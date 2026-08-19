@@ -1,0 +1,12 @@
+{
+  "schema_version": 2,
+  "producer": {
+    "name": "acta",
+    "version": "v0.1.0",
+    "commit": "0123456789abcdef",
+    "date": "2026-08-19T10:00:00Z"
+  },
+  "generation": "1787133600000000000",
+  "digest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "events_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+}

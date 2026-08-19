@@ -1,0 +1,41 @@
+name: Bug report
+description: Report a reproducible Acta defect
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include credentials, private prompts, or captured run bundles. Use SECURITY.md for vulnerabilities.
+  - type: input
+    id: acta-version
+    attributes:
+      label: Acta version
+      description: Output of `acta version`.
+    validations:
+      required: true
+  - type: input
+    id: agent-version
+    attributes:
+      label: Agent CLI and version
+      placeholder: codex-cli 0.147.0
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and architecture
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Minimal commands and synthetic inputs, with sensitive values removed.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true

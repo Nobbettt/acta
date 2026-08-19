@@ -1,0 +1,11 @@
+{"type":"thread.started","thread_id":"synthetic-thread"}
+{"type":"turn.started"}
+{"type":"item.updated","item":{"id":"todo-1","type":"todo_list","items":[{"text":"Inspect synthetic source","completed":true},{"text":"Run synthetic tests","completed":false}],"status":"in_progress"}}
+{"type":"item.started","item":{"id":"command-1","type":"command_execution","command":"/bin/sh -lc \"sed -n '1,40p' src/main.go\"","status":"in_progress"}}
+{"type":"item.completed","item":{"id":"command-1","type":"command_execution","command":"/bin/sh -lc \"sed -n '1,40p' src/main.go\"","aggregated_output":"1:package fixture\n2:\n3:func main() {}\n","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"command-2","type":"command_execution","command":"go test ./...","status":"in_progress"}}
+{"type":"item.completed","item":{"id":"command-2","type":"command_execution","command":"go test ./...","aggregated_output":"ok synthetic/project\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"change-1","type":"file_change","changes":[{"path":"/tmp/acta-fixture/src/main.go","kind":"update"}],"status":"completed"}}
+{"type":"item.completed","item":{"id":"reasoning-1","type":"reasoning","text":"Inspect the synthetic source before editing."}}
+{"type":"item.completed","item":{"id":"message-1","type":"agent_message","text":"Synthetic task complete."}}
+{"type":"turn.completed","usage":{"input_tokens":120,"cached_input_tokens":80,"output_tokens":30}}

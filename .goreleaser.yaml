@@ -1,0 +1,75 @@
+version: 2
+
+project_name: acta
+
+before:
+  hooks:
+    - go mod verify
+
+builds:
+  - id: acta
+    main: ./cmd/acta
+    binary: acta
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - >-
+        -s -w
+        -X github.com/nobbettt/acta/internal/version.Version=v{{ .Version }}
+        -X github.com/nobbettt/acta/internal/version.Commit={{ .FullCommit }}
+        -X github.com/nobbettt/acta/internal/version.Date={{ .CommitDate }}
+
+archives:
+  - id: release
+    ids:
+      - acta
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - README.md
+      - CHANGELOG.md
+      - LICENSE
+      - THIRD_PARTY_NOTICES
+      - schemas/*.schema.json
+      - schemas/examples/*
+      - docs/data-contracts.md
+      - docs/run-bundle.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+sboms:
+  - artifacts: archive
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+
+release:
+  # The workflow publishes only after attestations succeed. A failed workflow
+  # may leave a recoverable draft, never a partially promised public release.
+  draft: true
+  prerelease: auto

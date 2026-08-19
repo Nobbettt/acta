@@ -1,0 +1,7 @@
+.acta/
+/acta
+/acta.exe
+/dist/
+/THIRD_PARTY_NOTICES.tmp
+*.test
+coverage.out
