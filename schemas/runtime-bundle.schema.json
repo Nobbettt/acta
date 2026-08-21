@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Nobbettt/acta/schemas/runtime-bundle.schema.json",
+  "title": "Acta runtime bundle v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "adapter", "capabilities"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "adapter": {"const": "codex"},
+    "model": {"type": "string", "minLength": 1, "pattern": "\\S"},
+    "capabilities": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {"$ref": "#/$defs/capability"}
+    }
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+    "stringSet": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "pattern": "^\\S(?:.*\\S)?$"}
+    },
+    "base": {
+      "type": "object",
+      "required": ["id", "name", "description", "kind", "configuration"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "name": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "description": {"type": "string", "minLength": 1, "pattern": "\\S"}
+      }
+    },
+    "capability": {
+      "oneOf": [
+        {"$ref": "#/$defs/mcp"},
+        {"$ref": "#/$defs/tool"},
+        {"$ref": "#/$defs/skill"}
+      ]
+    },
+    "mcp": {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "name", "description", "kind", "configuration"],
+          "properties": {
+            "id": {"$ref": "#/$defs/id"},
+            "name": {"type": "string", "minLength": 1, "pattern": "\\S"},
+            "description": {"type": "string", "minLength": 1, "pattern": "\\S"},
+            "kind": {"const": "mcp"},
+            "configuration": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["url"],
+              "properties": {
+                "server_slug": {"$ref": "#/$defs/id"},
+                "url": {"type": "string", "format": "uri", "pattern": "^https://"},
+                "enabled_tools": {"$ref": "#/$defs/stringSet"},
+                "disabled_tools": {"$ref": "#/$defs/stringSet"},
+                "required": {"type": "boolean"},
+                "bearer_token_env_var": {"type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$"}
+              }
+            }
+          }
+        }
+      ]
+    },
+    "tool": {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "name", "description", "kind", "configuration"],
+          "properties": {
+            "id": {"$ref": "#/$defs/id"},
+            "name": {"type": "string", "minLength": 1, "pattern": "\\S"},
+            "description": {"type": "string", "minLength": 1, "pattern": "\\S"},
+            "kind": {"const": "tool"},
+            "configuration": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["config_key", "value"],
+                  "properties": {
+                    "config_key": {"const": "web_search"},
+                    "value": {"enum": ["disabled", "cached", "live"]}
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["config_key", "value"],
+                  "properties": {
+                    "config_key": {"enum": ["features.multi_agent", "features.image_generation"]},
+                    "value": {"type": "boolean"}
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "skill": {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "name", "description", "kind", "configuration"],
+          "properties": {
+            "id": {"$ref": "#/$defs/id"},
+            "name": {"type": "string", "minLength": 1, "pattern": "\\S"},
+            "description": {"type": "string", "minLength": 1, "pattern": "\\S"},
+            "kind": {"const": "skill"},
+            "configuration": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["description", "instructions"],
+              "properties": {
+                "name": {"$ref": "#/$defs/id"},
+                "description": {"type": "string", "minLength": 1, "pattern": "\\S"},
+                "instructions": {"type": "string", "minLength": 1, "pattern": "\\S"}
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

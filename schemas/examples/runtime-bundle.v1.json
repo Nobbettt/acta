@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "adapter": "codex",
+  "model": "gpt-example",
+  "capabilities": [
+    {
+      "id": "documentation",
+      "name": "Documentation",
+      "kind": "mcp",
+      "description": "Read the project documentation service.",
+      "configuration": {
+        "server_slug": "documentation",
+        "url": "https://mcp.example.invalid/mcp",
+        "enabled_tools": ["search"],
+        "required": true,
+        "bearer_token_env_var": "ACTA_DOCS_TOKEN"
+      }
+    },
+    {
+      "id": "web-search",
+      "name": "Web search",
+      "kind": "tool",
+      "description": "Enable live web search for this run.",
+      "configuration": {"config_key": "web_search", "value": "live"}
+    }
+  ]
+}

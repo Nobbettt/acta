@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Nobbettt/acta/schemas/acta-event.schema.json",
+  "title": "Acta replay event envelope v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "producer", "run_id", "sequence", "timestamp", "source", "type", "payload"],
+  "properties": {
+    "schema_version": {"const": 2},
+    "producer": {"$ref": "run-record.schema.json#/$defs/producer"},
+    "run_id": {"type": "string", "minLength": 1},
+    "sequence": {"type": "integer", "minimum": 1},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "source": {"const": "acta"},
+    "type": {
+      "enum": [
+        "agent.prompt", "run.started", "agent.input", "agent.message", "agent.reasoning",
+        "agent.todo", "agent.todo.updated", "agent.task.started", "agent.task.progress",
+        "agent.task.completed", "agent.task.incomplete", "agent.permission.denied",
+        "agent.runtime.configured", "agent.output.structured", "agent.rate_limit.observed",
+        "agent.lifecycle", "agent.error", "agent.event.unsupported", "tool.call.completed",
+        "tool.call.incomplete", "tool.result.orphaned", "shell.command.completed",
+        "shell.command.incomplete", "web.search.completed", "web.search.incomplete",
+        "file.read", "file.written", "file.write.incomplete", "diff.generated",
+        "tokens.reported", "run.completed", "run.failed"
+      ]
+    },
+    "payload": {"type": "object"},
+    "artifact_refs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "path"],
+        "properties": {
+          "kind": {"type": "string", "minLength": 1},
+          "path": {"type": "string", "minLength": 1},
+          "lines": {"type": "array", "items": {"type": "integer", "minimum": 1}}
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"type": {"const": "agent.prompt"}}, "required": ["type"]},
+      "then": {"properties": {"payload": {"$ref": "#/$defs/agentPrompt"}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "run.started"}}, "required": ["type"]},
+      "then": {"properties": {"payload": {"$ref": "#/$defs/runStarted"}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "file.read"}}, "required": ["type"]},
+      "then": {"properties": {"payload": {"$ref": "#/$defs/fileRead"}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "diff.generated"}}, "required": ["type"]},
+      "then": {"properties": {"payload": {"$ref": "#/$defs/diff"}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "tokens.reported"}}, "required": ["type"]},
+      "then": {"properties": {"payload": {"$ref": "#/$defs/tokensReported"}}}
+    },
+    {
+      "if": {"properties": {"type": {"enum": ["run.completed", "run.failed"]}}, "required": ["type"]},
+      "then": {"properties": {"payload": {"$ref": "#/$defs/terminal"}}}
+    },
+    {
+      "if": {"properties": {"type": {"enum": ["agent.input", "agent.message", "agent.reasoning", "agent.todo", "agent.todo.updated", "agent.task.started", "agent.task.progress", "agent.task.completed", "agent.task.incomplete", "agent.permission.denied", "agent.runtime.configured", "agent.output.structured", "agent.rate_limit.observed", "agent.lifecycle", "agent.error", "agent.event.unsupported", "tool.call.completed", "tool.call.incomplete", "tool.result.orphaned", "shell.command.completed", "shell.command.incomplete", "web.search.completed", "web.search.incomplete", "file.written", "file.write.incomplete"]}}, "required": ["type"]},
+      "then": {"properties": {"payload": {"$ref": "#/$defs/timeline"}}}
+    }
+  ],
+  "$defs": {
+    "agentPrompt": {
+      "type": "object", "additionalProperties": false, "required": ["text"],
+      "properties": {"text": {"type": "string", "maxLength": 1048576}, "source": {"enum": ["flag", "args", "stdin", "internal", "test"]}}
+    },
+    "runStarted": {
+      "type": "object", "additionalProperties": false, "required": ["agent", "cwd", "run_dir"],
+      "properties": {
+        "agent": {"enum": ["codex", "claude"]}, "agent_version": {"type": "string"}, "model": {"type": "string"},
+        "cwd": {"type": "string"}, "base_commit_sha": {"type": "string"}, "base_branch": {"type": "string"},
+        "base_dirty": {"type": "boolean"}, "repository": {"type": "string"}, "issue_number": {"type": "integer", "minimum": 1},
+        "issue_title": {"type": "string"}, "issue_body": {"type": "string"}, "task_title": {"type": "string"},
+        "run_dir": {"type": "string"}, "recovery_dir": {"type": "string"}, "command": {"type": "array", "items": {"type": "string"}},
+        "prompt_source": {"enum": ["flag", "args", "stdin", "internal", "test"]}, "prompt_captured": {"type": "boolean"}
+        ,"otlp_status": {"enum": ["not_configured", "exported", "failed"]}, "otlp_error": {"type": "string"},
+        "raw_output_limit_bytes": {"type": "integer", "minimum": 0},
+        "workspace_diff_limit_bytes": {"type": "integer", "minimum": 0},
+        "process_containment": {"enum": ["posix_process_group", "windows_job", "direct_process"]},
+        "agent_config_mode": {"enum": ["ambient_ephemeral", "project_only_ephemeral", "authoritative_bundle"]},
+        "runtime_bundle_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "span": {
+      "type": "object", "additionalProperties": false, "required": ["start", "end"],
+      "properties": {"start": {"type": "integer", "minimum": 1}, "end": {"type": "integer", "minimum": 1}}
+    },
+    "range": {
+      "type": "object", "additionalProperties": false, "required": ["start", "end", "content"],
+      "properties": {"start": {"type": "integer", "minimum": 1}, "end": {"type": "integer", "minimum": 1}, "content": {"type": "string"}}
+    },
+    "patch": {
+      "type": "object", "additionalProperties": false, "required": ["path", "patch"],
+      "properties": {"path": {"type": "string"}, "patch": {"type": "string"}}
+    },
+    "mutation": {
+      "type": "object", "additionalProperties": false, "required": ["path"],
+      "properties": {"path": {"type": "string"}, "kind": {"type": "string"}}
+    },
+    "timeline": {
+      "type": "object", "additionalProperties": false, "required": ["kind"],
+      "properties": {
+        "kind": {"type": "string"}, "provider_event": {"type": "string"}, "id": {"type": "string"}, "parent_id": {"type": "string"},
+        "thread_id": {"type": "string"}, "session_id": {"type": "string"}, "task_id": {"type": "string"}, "phase": {"type": "string"},
+        "status": {"type": "string"}, "visibility": {"enum": ["primary", "diagnostic"]}, "started_at": {"type": "string", "format": "date-time"},
+        "completed_at": {"type": "string", "format": "date-time"}, "tool": {"type": "string"}, "server": {"type": "string"},
+        "input": {}, "input_chars": {"type": "integer", "minimum": 0}, "input_truncated": {"type": "boolean"},
+        "result": {}, "result_chars": {"type": "integer", "minimum": 0}, "result_truncated": {"type": "boolean"},
+        "command": {"type": "string"}, "exit_code": {"type": "integer"}, "is_error": {"type": "boolean"}, "error_message": {"type": "string"},
+        "output": {"type": "string"}, "output_chars": {"type": "integer", "minimum": 0}, "output_truncated": {"type": "boolean"},
+        "text": {"type": "string"}, "query": {"type": "string"}, "action": {}, "files": {"type": "array", "items": {"type": "string"}},
+        "changes": {"type": "array", "items": {"$ref": "#/$defs/mutation"}},
+        "spans": {"type": "object", "additionalProperties": {"type": "array", "items": {"$ref": "#/$defs/span"}}},
+        "patches": {"type": "array", "items": {"$ref": "#/$defs/patch"}}, "details": {},
+        "raw_event_lines": {"type": "array", "items": {"type": "integer", "minimum": 1}}
+      }
+    },
+    "fileRead": {
+      "type": "object", "additionalProperties": false, "required": ["path", "source_event_sequence"],
+      "properties": {"path": {"type": "string"}, "spans": {"type": "array", "items": {"$ref": "#/$defs/span"}}, "ranges": {"type": "array", "items": {"$ref": "#/$defs/range"}}, "source_event_sequence": {"type": "integer", "minimum": 1}, "tool": {"type": "string"}, "command": {"type": "string"}}
+    },
+    "diff": {"type": "object", "additionalProperties": false, "required": ["path"], "properties": {"path": {"type": "string"}}},
+    "tokenUsage": {
+      "type": "object", "additionalProperties": false, "required": ["input", "output", "total"],
+      "properties": {"input": {"type": "integer"}, "output": {"type": "integer"}, "cache_read": {"type": "integer"}, "cache_creation": {"type": "integer"}, "reasoning": {"type": "integer"}, "total": {"type": "integer"}}
+    },
+    "tokensReported": {
+      "type": "object", "additionalProperties": false, "required": ["tokens"],
+      "properties": {"tokens": {"$ref": "#/$defs/tokenUsage"}, "cost_usd": {"type": "number", "minimum": 0}}
+    },
+    "termination": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"outcome": {"enum": ["completed", "failed", "error", "timeout", "cancelled", "interrupted", "degraded"]}, "provider_reason": {"type": "string"}, "provider_subtype": {"type": "string"}, "runner_reason": {"type": "string"}, "error_code": {"type": "string"}, "error_message": {"type": "string"}}
+    },
+    "terminal": {
+      "type": "object", "additionalProperties": false, "required": ["status", "ok", "timeout", "duration_ms"],
+      "properties": {"status": {"enum": ["ok", "error", "timeout", "degraded"]}, "ok": {"type": "boolean"}, "timeout": {"type": "boolean"}, "exit_code": {"type": "integer"}, "head_commit_sha": {"type": "string"}, "duration_ms": {"type": "integer", "minimum": 0}, "error": {"type": "string"}, "termination": {"$ref": "#/$defs/termination"}, "unsupported_events": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}, "incomplete_tool_calls": {"type": "integer", "minimum": 0}, "orphaned_tool_results": {"type": "integer", "minimum": 0}, "structured_output": {}, "model_usage": {}, "raw_output_limit_bytes": {"type": "integer", "minimum": 0}, "raw_output_limit_exceeded": {"type": "boolean"}, "workspace_diff_limit_bytes": {"type": "integer", "minimum": 0}, "workspace_diff_limit_exceeded": {"type": "boolean"}}
+    }
+  }
+}

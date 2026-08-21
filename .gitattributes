@@ -1,0 +1,5 @@
+# Keep Go sources in gofmt's canonical line-ending format on every platform.
+*.go text eol=lf
+
+# Fixtures are byte-exact raw agent streams; never convert their line endings.
+*.jsonl -text

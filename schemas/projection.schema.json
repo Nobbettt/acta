@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Nobbettt/acta/schemas/projection.schema.json",
+  "title": "Acta derived projection manifest v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "producer", "generation", "digest_sha256", "events_sha256"],
+  "properties": {
+    "schema_version": {"const": 2},
+    "producer": {"$ref": "run-record.schema.json#/$defs/producer"},
+    "generation": {"type": "string", "pattern": "^[0-9]+$"},
+    "digest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "events_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
