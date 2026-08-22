@@ -96,9 +96,10 @@ final diff evidence and therefore deliberately remove those paths from the
 record; do not use broad directories. Acta separately excludes the exact run
 and staging paths it owns, not all files under a conventional directory name.
 
-Configured OTLP export is required unless `--otlp-best-effort` is explicitly
-set. Best-effort mode records setup/flush status but allows the local execution
-outcome to remain successful when export alone fails.
+Configured OTLP export is best-effort unless
+`--otlp-export-failure-policy required` is explicitly selected. Required mode
+records setup/flush status, preserves the local execution outcome, finalizes
+the bundle, and then returns an operational error.
 
 Use `acta doctor --agent codex` or `acta doctor --agent claude` to check Git,
 the selected CLI's tested version range and required flags, the workspace, and the runs-root

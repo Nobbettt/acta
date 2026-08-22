@@ -51,6 +51,18 @@ const DefaultMaxWorkspaceDiffBytes int64 = 256 << 20
 
 const DefaultUploadTimeout = 2 * time.Minute
 
+const (
+	OTLPExportFailurePolicyBestEffort = "best-effort"
+	OTLPExportFailurePolicyRequired   = "required"
+	// TelemetryOnlyFailureExitCode is returned by the CLI only when the agent
+	// run and its durable bundle succeeded but required OTLP delivery failed.
+	// Launchers must also validate run.json before treating this code as a
+	// warning, because an agent process may independently use the same code.
+	TelemetryOnlyFailureExitCode = 86
+)
+
+var ErrTelemetryOnlyFailure = errors.New("required telemetry export failed after a successful run")
+
 // DefaultRunsDir is the workspace-relative bundle root shared by every
 // command that resolves a runs directory.
 const DefaultRunsDir = ".acta/runs"
@@ -77,25 +89,31 @@ type Options struct {
 	// MaxRawOutputBytes bounds stdout+stderr combined. Zero explicitly keeps
 	// full fidelity without a byte limit. Crossing a positive limit terminates
 	// the process tree and fails the run; it never silently truncates success.
-	MaxRawOutputBytes     int64
-	MaxWorkspaceDiffBytes int64
-	MaxUploadBytes        int64
-	Stream                bool
-	AgentWritableDirs     []string
-	CodexSandbox          string
-	ClaudePermissionMode  string
-	OTLPEndpoint          string
-	OTLPIncludeOutput     bool
-	OTLPBestEffort        bool
-	RunID                 string
-	BackendURL            string
-	ReportToken           string
-	ReportTokenEnv        string
-	OrganizationID        string
-	RepositoryID          string
-	ReportMode            string
-	RuntimeBundlePath     string
-	AllowInsecureHTTP     bool
+	MaxRawOutputBytes       int64
+	MaxWorkspaceDiffBytes   int64
+	MaxUploadBytes          int64
+	Stream                  bool
+	AgentWritableDirs       []string
+	CodexSandbox            string
+	ClaudePermissionMode    string
+	OTLPEndpoint            string
+	OTLPIncludeOutput       bool
+	OTLPExportFailurePolicy string
+	// OTLPBestEffort is a deprecated programmatic compatibility switch. The
+	// default and the preferred explicit policy are both best-effort.
+	OTLPBestEffort                 bool
+	OTLPForceRoot                  bool
+	RedactReasoning                bool
+	AllowUnredactedRemoteReasoning bool
+	RunID                          string
+	BackendURL                     string
+	ReportToken                    string
+	ReportTokenEnv                 string
+	OrganizationID                 string
+	RepositoryID                   string
+	ReportMode                     string
+	RuntimeBundlePath              string
+	AllowInsecureHTTP              bool
 	// GitEvidenceExcludes are workspace-relative generated/control paths to
 	// omit in addition to the run's bundle root, which is always excluded so
 	// prior bundles never leak into captured evidence.
@@ -125,6 +143,10 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 		return nil, err
 	}
 	if err := validateRetainedContent(opts); err != nil {
+		return nil, err
+	}
+	otlpFailurePolicy, err := normalizeOTLPExportFailurePolicy(opts)
+	if err != nil {
 		return nil, err
 	}
 
@@ -274,12 +296,14 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 	var tr *tracing.Run
 	otlpStatus := "not_configured"
 	otlpError := ""
+	var telemetryErr error
 	if tracing.Enabled(opts.OTLPEndpoint) {
 		otlpStatus = "configured"
 		traceStartedAt := time.Now().UTC()
 		tr, err = tracing.Setup(ctx, tracing.Config{
 			Endpoint:      opts.OTLPEndpoint,
 			IncludeOutput: opts.OTLPIncludeOutput,
+			ForceRoot:     opts.OTLPForceRoot,
 			RunID:         runID,
 			Agent:         adapter.Name(),
 			Provider:      adapter.Provider(),
@@ -290,8 +314,8 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 		if err != nil {
 			otlpStatus = "failed"
 			otlpError = err.Error()
-			if !opts.OTLPBestEffort {
-				return nil, fmt.Errorf("set up OTLP export: %w", err)
+			if otlpFailurePolicy == OTLPExportFailurePolicyRequired {
+				telemetryErr = fmt.Errorf("required OTLP export failed during setup: %w", err)
 			}
 			fmt.Fprintf(stderr, "acta: OTLP export disabled: %v\n", err)
 			tr = nil
@@ -330,6 +354,10 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 		ProcessContainment:      processContainmentName(),
 		AgentConfigMode:         configMode,
 		RuntimeBundleSHA256:     preparedRuntime.BundleSHA256,
+		ReasoningRedactionState: "retained_local",
+	}
+	if opts.RedactReasoning {
+		record.ReasoningRedactionState = "redacted"
 	}
 
 	cmd := exec.Command(spec.Path, spec.Args...)
@@ -444,8 +472,8 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 		otlpStatus = "failed"
 		otlpError = err.Error()
 		record.TraceID = ""
-		if !opts.OTLPBestEffort {
-			runErr = errors.Join(runErr, fmt.Errorf("OTLP export failed: %w", err))
+		if otlpFailurePolicy == OTLPExportFailurePolicyRequired {
+			telemetryErr = errors.Join(telemetryErr, fmt.Errorf("required OTLP export failed during flush: %w", err))
 		}
 	} else if tr != nil {
 		otlpStatus = "exported"
@@ -453,6 +481,12 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 	record.OTLPStatus = otlpStatus
 	record.OTLPError = otlpError
 	FinalizeRecordOutcome(record, runErr)
+
+	if opts.RedactReasoning {
+		if redactErr := redactReasoningRawStream(stagedStdoutPath); redactErr != nil {
+			return record, fmt.Errorf("redact reasoning from raw stream: %w", redactErr)
+		}
+	}
 
 	if writeErr := WriteRecord(stagingDir, record); writeErr != nil {
 		runErr = errors.Join(runErr, writeErr)
@@ -462,7 +496,7 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 	if opts.CapturePrompt {
 		capturedPrompt = opts.Prompt
 	}
-	finalDigest, postErr := postRun(ctx, record, stagingDir, gitExcludes, opts.MaxWorkspaceDiffBytes, digester, capturedPrompt, stderr, runErr)
+	finalDigest, postErr := postRun(ctx, record, stagingDir, gitExcludes, opts.MaxWorkspaceDiffBytes, digester, capturedPrompt, opts.RedactReasoning, stderr, runErr)
 	if postErr != nil {
 		runErr = errors.Join(runErr, postErr)
 	}
@@ -523,12 +557,13 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 		}
 		defer cancel()
 		if err := reporting.UploadRun(reportCtx, reporting.Config{
-			BackendURL:        opts.BackendURL,
-			ReportToken:       opts.ReportToken,
-			OrganizationID:    opts.OrganizationID,
-			RepositoryID:      opts.RepositoryID,
-			AllowInsecureHTTP: opts.AllowInsecureHTTP,
-			MaxUploadBytes:    opts.MaxUploadBytes,
+			BackendURL:                     opts.BackendURL,
+			ReportToken:                    opts.ReportToken,
+			OrganizationID:                 opts.OrganizationID,
+			RepositoryID:                   opts.RepositoryID,
+			AllowInsecureHTTP:              opts.AllowInsecureHTTP,
+			MaxUploadBytes:                 opts.MaxUploadBytes,
+			AllowUnredactedRemoteReasoning: opts.AllowUnredactedRemoteReasoning,
 		}, record); err != nil {
 			err = fmt.Errorf("upload report: %w", err)
 			fmt.Fprintf(stderr, "acta: %v\n", err)
@@ -541,10 +576,29 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 			fmt.Fprintf(stderr, "acta: uploaded run report to %s\n", strings.TrimRight(opts.BackendURL, "/"))
 		}
 	}
+	if telemetryErr != nil {
+		if runErr == nil && record.OK {
+			return record, fmt.Errorf("%w: %v", ErrTelemetryOnlyFailure, telemetryErr)
+		}
+		runErr = errors.Join(runErr, telemetryErr)
+	}
 	if runErr != nil {
 		return record, runErr
 	}
 	return record, nil
+}
+
+func normalizeOTLPExportFailurePolicy(opts Options) (string, error) {
+	policy := strings.ToLower(strings.TrimSpace(opts.OTLPExportFailurePolicy))
+	if policy == "" || opts.OTLPBestEffort {
+		policy = OTLPExportFailurePolicyBestEffort
+	}
+	switch policy {
+	case OTLPExportFailurePolicyBestEffort, OTLPExportFailurePolicyRequired:
+		return policy, nil
+	default:
+		return "", fmt.Errorf("--otlp-export-failure-policy must be %q or %q", OTLPExportFailurePolicyBestEffort, OTLPExportFailurePolicyRequired)
+	}
 }
 
 // rejectProjectCodexConfig prevents a repository-local Codex config layer from
@@ -600,7 +654,7 @@ func verifyCompleteBundle(bundleDir string, record *runrecord.Record) error {
 // postRun captures derived evidence into artifactDir. artifactDir remains
 // private staging until every final/failed artifact has been generated; the
 // caller publishes the complete directory atomically afterwards.
-func postRun(ctx context.Context, record *runrecord.Record, artifactDir string, gitExcludes []string, maxWorkspaceDiffBytes int64, digester *digest.StreamDigester, capturedPrompt string, stderr io.Writer, priorErr error) (*digest.Digest, error) {
+func postRun(ctx context.Context, record *runrecord.Record, artifactDir string, gitExcludes []string, maxWorkspaceDiffBytes int64, digester *digest.StreamDigester, capturedPrompt string, redactReasoning bool, stderr io.Writer, priorErr error) (*digest.Digest, error) {
 	var postErr error
 	refreshOutcome := func() {
 		FinalizeRecordOutcome(record, errors.Join(priorErr, postErr))
@@ -659,6 +713,9 @@ func postRun(ctx context.Context, record *runrecord.Record, artifactDir string, 
 	// Finalize AFTER the diff is written so HasWorkspaceDiff sees it. No
 	// re-decode of the raw stream, no sidecar re-read — times are already set.
 	d := digester.Finalize(record, artifactDir)
+	if redactReasoning {
+		digest.RedactReasoning(d)
+	}
 	digest.ReconcileRecord(record, d)
 	if !record.OK && priorErr == nil && postErr == nil {
 		postErr = errors.New(record.Error)
@@ -832,7 +889,33 @@ func reportMode(opts Options) string {
 }
 
 func agentEnvironment(opts Options) []string {
-	return environmentWithoutKeys(os.Environ(), opts.ReportTokenEnv)
+	environment := environmentWithoutKeys(os.Environ(), opts.ReportTokenEnv)
+	filtered := environment[:0]
+	for _, entry := range environment {
+		key, _, _ := strings.Cut(entry, "=")
+		if credentialBearingOTELEnvironmentKey(key) {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
+}
+
+// credentialBearingOTELEnvironmentKey recognizes standard OTLP credential
+// carriers plus conservative token/password extensions. These variables stay
+// available to Acta's exporter, but never reach Codex/Claude or their version
+// probes.
+func credentialBearingOTELEnvironmentKey(key string) bool {
+	key = strings.ToUpper(strings.TrimSpace(key))
+	if !strings.HasPrefix(key, "OTEL_") {
+		return false
+	}
+	for _, marker := range []string{"HEADER", "CLIENT_KEY", "CLIENT_CERTIFICATE", "TOKEN", "SECRET", "PASSWORD", "API_KEY"} {
+		if strings.Contains(key, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func probeAgentVersion(ctx context.Context, adapter agents.Adapter, spec agents.CommandSpec, environment []string) (string, error) {

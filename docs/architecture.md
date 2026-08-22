@@ -151,9 +151,10 @@ metadata only (tool names, ids, exit codes, tokens, timing) unless
 `--otlp-include-output` opts content in. The resulting `trace_id` is recorded
 in `run.json` so a bundle can be correlated with the trace backend afterwards.
 Export is a live view of the run; the bundle remains the source of truth.
-Any configured exporter is required by default. `--otlp-best-effort` is an
-explicit degraded-export policy; setup/flush status and errors remain recorded
-in `run.json`.
+Configured exporters are best-effort by default. Launchers that require
+delivery select `--otlp-export-failure-policy required`; setup/flush status
+remains recorded, and failure is returned after the bundle is finalized
+without changing the agent outcome.
 
 ## Report Upload
 

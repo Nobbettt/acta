@@ -3,7 +3,9 @@ package tracing
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +19,12 @@ import (
 )
 
 var testStart = time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+const (
+	testParentTraceID = "11111111111111111111111111111111"
+	testParentSpanID  = "2222222222222222"
+	testTraceparent   = "00-" + testParentTraceID + "-" + testParentSpanID + "-01"
+)
 
 func newTestRun(t *testing.T, agent string) (*tracetest.SpanRecorder, *Run) {
 	t.Helper()
@@ -77,6 +85,40 @@ func TestContentAttributesGatedByIncludeOutput(t *testing.T) {
 		}
 		if args, paths := scan(agent, true); !args || !paths {
 			t.Errorf("%s with include-output: arguments=%v file_path=%v, want both present", agent, args, paths)
+		}
+	}
+}
+
+func TestReasoningTextNeverEntersTelemetry(t *testing.T) {
+	const secret = "private-reasoning-telemetry-8842"
+	lines := map[string]string{
+		"codex":  `{"type":"item.completed","item":{"id":"r1","type":"reasoning","text":"` + secret + `"}}`,
+		"claude": `{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"` + secret + `"}]}}`,
+	}
+	for agent, line := range lines {
+		recorder, run := newTestRunOutput(t, agent, true)
+		run.OnLine([]byte(line), testStart.Add(time.Millisecond))
+		finish(t, run, true, testStart.Add(time.Second))
+		reasoningEvents := 0
+		for _, span := range recorder.Ended() {
+			for _, value := range span.Attributes() {
+				if strings.Contains(fmt.Sprint(value.Value.AsInterface()), secret) {
+					t.Fatalf("%s span attribute %s leaked reasoning text", agent, value.Key)
+				}
+			}
+			for _, event := range span.Events() {
+				if event.Name == "acta.reasoning" {
+					reasoningEvents++
+				}
+				for _, value := range event.Attributes {
+					if value.Key == "text" || strings.Contains(fmt.Sprint(value.Value.AsInterface()), secret) {
+						t.Fatalf("%s event attribute %s leaked reasoning text", agent, value.Key)
+					}
+				}
+			}
+		}
+		if reasoningEvents != 1 {
+			t.Fatalf("%s reasoning structural events = %d, want 1", agent, reasoningEvents)
 		}
 	}
 }
@@ -149,6 +191,36 @@ func TestFinishSurfacesFlushError(t *testing.T) {
 	}
 }
 
+func TestEnabledHonorsStandardDisableControls(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://collector.test/v1/traces")
+	t.Setenv("OTEL_SDK_DISABLED", "true")
+	if Enabled("") {
+		t.Fatal("OTEL_SDK_DISABLED=true must disable tracing")
+	}
+	t.Setenv("OTEL_SDK_DISABLED", "false")
+	t.Setenv("OTEL_TRACES_EXPORTER", "none")
+	if Enabled("https://explicit.test/v1/traces") {
+		t.Fatal("OTEL_TRACES_EXPORTER=none must disable an explicit endpoint")
+	}
+}
+
+func TestSamplerFromEnvironmentHonorsSamplerAndArgument(t *testing.T) {
+	t.Setenv("OTEL_TRACES_SAMPLER", "traceidratio")
+	t.Setenv("OTEL_TRACES_SAMPLER_ARG", "0")
+	parameters := sdktrace.SamplingParameters{Name: "test"}
+	if decision := samplerFromEnvironment().ShouldSample(parameters).Decision; decision != sdktrace.Drop {
+		t.Fatalf("traceidratio=0 decision = %v, want drop", decision)
+	}
+	t.Setenv("OTEL_TRACES_SAMPLER_ARG", "1")
+	if decision := samplerFromEnvironment().ShouldSample(parameters).Decision; decision != sdktrace.RecordAndSample {
+		t.Fatalf("traceidratio=1 decision = %v, want record and sample", decision)
+	}
+	t.Setenv("OTEL_TRACES_SAMPLER", "always_off")
+	if decision := samplerFromEnvironment().ShouldSample(parameters).Decision; decision != sdktrace.Drop {
+		t.Fatalf("always_off decision = %v, want drop", decision)
+	}
+}
+
 // Every registered agent must resolve a trace mapper and declare a provider, so
 // adding an agent without wiring tracing fails here instead of silently
 // exporting no spans at runtime.
@@ -190,6 +262,70 @@ func TestProviderAttributeOnRootSpan(t *testing.T) {
 	}
 }
 
+func TestRunRootUsesW3CParentContext(t *testing.T) {
+	t.Setenv("TRACEPARENT", testTraceparent)
+	t.Setenv("TRACESTATE", "vendor=opaque")
+
+	root := recordedRoot(t, Config{Agent: "codex", RunID: "child", StartedAt: testStart})
+	parent := root.Parent()
+	if !parent.IsValid() || !parent.IsRemote() {
+		t.Fatalf("parent = %v, want valid remote parent", parent)
+	}
+	if got := root.SpanContext().TraceID().String(); got != testParentTraceID {
+		t.Errorf("root trace id = %q, want %q", got, testParentTraceID)
+	}
+	if got := parent.TraceID().String(); got != testParentTraceID {
+		t.Errorf("parent trace id = %q, want %q", got, testParentTraceID)
+	}
+	if got := parent.SpanID().String(); got != testParentSpanID {
+		t.Errorf("parent span id = %q, want %q", got, testParentSpanID)
+	}
+}
+
+func TestRunRootWithoutParentContext(t *testing.T) {
+	t.Setenv("TRACEPARENT", "")
+	t.Setenv("TRACESTATE", "")
+
+	root := recordedRoot(t, Config{Agent: "codex", RunID: "standalone", StartedAt: testStart})
+	if parent := root.Parent(); parent.IsValid() || parent.IsRemote() {
+		t.Fatalf("parent = %v, want standalone root with no remote parent", parent)
+	}
+}
+
+func TestRunRootIgnoresMalformedTraceparent(t *testing.T) {
+	t.Setenv("TRACEPARENT", "not-w3c-trace-context")
+	t.Setenv("TRACESTATE", "vendor=opaque")
+
+	root := recordedRoot(t, Config{Agent: "codex", RunID: "malformed", StartedAt: testStart})
+	if parent := root.Parent(); parent.IsValid() || parent.IsRemote() {
+		t.Fatalf("parent = %v, want standalone root for malformed TRACEPARENT", parent)
+	}
+}
+
+func TestRunRootForceRootIgnoresValidParent(t *testing.T) {
+	t.Setenv("TRACEPARENT", testTraceparent)
+	t.Setenv("TRACESTATE", "vendor=opaque")
+
+	root := recordedRoot(t, Config{Agent: "codex", RunID: "forced-root", StartedAt: testStart, ForceRoot: true})
+	if parent := root.Parent(); parent.IsValid() || parent.IsRemote() {
+		t.Fatalf("parent = %v, want standalone root with ForceRoot", parent)
+	}
+	if got := root.SpanContext().TraceID().String(); got == testParentTraceID {
+		t.Errorf("root trace id = parent trace id %q despite ForceRoot", got)
+	}
+}
+
+func TestRunRootPropagatesTracestate(t *testing.T) {
+	const want = "vendor=opaque,other=value"
+	t.Setenv("TRACEPARENT", testTraceparent)
+	t.Setenv("TRACESTATE", want)
+
+	root := recordedRoot(t, Config{Agent: "claude", RunID: "state", StartedAt: testStart})
+	if got := root.Parent().TraceState().String(); got != want {
+		t.Fatalf("parent tracestate = %q, want %q", got, want)
+	}
+}
+
 func TestTextEventCountsCharactersNotBytes(t *testing.T) {
 	recorder, r := newTestRun(t, "codex")
 	r.addTextEvent("acta.message", "a€", testStart)
@@ -218,6 +354,24 @@ func attrValue(span sdktrace.ReadOnlySpan, key attribute.Key) (attribute.Value, 
 		}
 	}
 	return attribute.Value{}, false
+}
+
+func recordedRoot(t *testing.T, cfg Config) sdktrace.ReadOnlySpan {
+	t.Helper()
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	r, err := newRun(context.Background(), provider, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finish(t, r, true, cfg.StartedAt.Add(time.Second))
+	for _, span := range recorder.Ended() {
+		if span.Name() == "invoke_agent "+cfg.Agent {
+			return span
+		}
+	}
+	t.Fatalf("root span for %q not ended", cfg.Agent)
+	return nil
 }
 
 func TestClaudeFixtureSpans(t *testing.T) {

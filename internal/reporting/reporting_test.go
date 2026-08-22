@@ -1,6 +1,7 @@
 package reporting
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -185,6 +186,113 @@ func TestUploadRunPostsRunEventsArtifactsAndCompletion(t *testing.T) {
 	}
 	if completeMetadata.TerminationReason != "completed" {
 		t.Fatalf("completion termination_reason = %#v, want completed", completeMetadata.TerminationReason)
+	}
+}
+
+func TestUploadRunRedactsRemoteReasoningByDefaultForEveryAgentShape(t *testing.T) {
+	const secret = "private-remote-reasoning-57291"
+	tests := map[string]string{
+		"codex":  `{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","text":"` + secret + `"}}` + "\n",
+		"claude": `{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"` + secret + `"}]}}` + "\n",
+	}
+	for agent, raw := range tests {
+		t.Run(agent, func(t *testing.T) {
+			runDir := t.TempDir()
+			rawName := "codex-events.jsonl"
+			if agent == "claude" {
+				rawName = "claude-output.jsonl"
+			}
+			writeFile(t, filepath.Join(runDir, rawName), raw)
+			writeFile(t, filepath.Join(runDir, "run.json"), `{"id":"run-1","reasoning_redaction_state":"retained_local"}`+"\n")
+			writeFile(t, filepath.Join(runDir, "digest.json"), `{"run_id":"run-1"}`+"\n")
+			writeFile(t, filepath.Join(runDir, actaevents.Filename), strings.Join([]string{
+				`{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":1,"timestamp":"2026-07-06T12:00:00Z","source":"acta","type":"run.started","payload":{"agent":"` + agent + `","reasoning_redaction_state":"retained_local"}}`,
+				`{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":2,"timestamp":"2026-07-06T12:00:00.5Z","source":"acta","type":"agent.reasoning","payload":{"kind":"reasoning","provider_event":"private","text":"` + secret + `"}}`,
+				`{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":3,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed","payload":{"reasoning_redaction_state":"retained_local"},"artifact_refs":[{"kind":"run_record","path":"run.json"},{"kind":"raw_stdout","path":"` + rawName + `"},{"kind":"digest","path":"digest.json"},{"kind":"event_stream","path":"acta-events.jsonl"}]}`,
+				"",
+			}, "\n"))
+			record := testRecord(runDir)
+			record.Agent = agent
+			record.ReasoningRedactionState = "retained_local"
+
+			var remote bytes.Buffer
+			redactionStates := map[string]string{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				if request.URL.Path == "/api/ingest/runs/run-1/events" || request.URL.Path == "/api/ingest/runs/run-1/artifacts" {
+					payload, err := io.ReadAll(request.Body)
+					if err != nil {
+						t.Error(err)
+					}
+					remote.Write(payload)
+				}
+				if request.URL.Path == "/api/ingest/runs/run-1/artifacts" {
+					redactionStates[request.URL.Query().Get("filename")] = request.URL.Query().Get("redaction_state")
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+			if err := UploadRun(context.Background(), Config{
+				BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+			}, record); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(remote.String(), secret) {
+				t.Fatalf("remote upload leaked private reasoning: %s", remote.String())
+			}
+			for filename, state := range redactionStates {
+				want := "not_required"
+				if filename == "run.json" || filename == rawName || filename == actaevents.Filename {
+					want = "redacted"
+				}
+				if state != want {
+					t.Errorf("artifact %s redaction_state = %q, want %s", filename, state, want)
+				}
+			}
+			local, err := os.ReadFile(filepath.Join(runDir, rawName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(local), secret) {
+				t.Fatal("default remote redaction changed the local full-fidelity bundle")
+			}
+		})
+	}
+}
+
+func TestUploadRunAllowsExplicitUnredactedRemoteReasoning(t *testing.T) {
+	const secret = "explicit-private-reasoning-9012"
+	runDir := writeBundle(t)
+	writeFile(t, filepath.Join(runDir, "codex-events.jsonl"), `{"type":"item.completed","item":{"type":"reasoning","text":"`+secret+`"}}`+"\n")
+	eventsPath := filepath.Join(runDir, actaevents.Filename)
+	eventBytes, err := os.ReadFile(eventsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := strings.Replace(string(eventBytes), `{"kind":"event_stream","path":"acta-events.jsonl"}`, `{"kind":"raw_stdout","path":"codex-events.jsonl"},{"kind":"event_stream","path":"acta-events.jsonl"}`, 1)
+	writeFile(t, eventsPath, events)
+	record := testRecord(runDir)
+	record.ReasoningRedactionState = "retained_local"
+	var remote bytes.Buffer
+	var rawState string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" {
+			body, _ := io.ReadAll(request.Body)
+			remote.Write(body)
+			if request.URL.Query().Get("filename") == "codex-events.jsonl" {
+				rawState = request.URL.Query().Get("redaction_state")
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	if err := UploadRun(context.Background(), Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+		AllowUnredactedRemoteReasoning: true,
+	}, record); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(remote.String(), secret) || rawState != "unredacted" {
+		t.Fatalf("explicit upload remote=%q redaction_state=%q", remote.String(), rawState)
 	}
 }
 

@@ -475,7 +475,7 @@ func codexItemEvent(d *Digest, item *CodexItem, srcLine int, completedLine int, 
 		e.Text = renderTodos(item.Items)
 	case "reasoning":
 		e.Kind = KindReasoning
-		e.Text = item.Text
+		e.localReasoningText = item.Text
 	case "mcp_tool_call":
 		e.Kind = KindToolCall
 		e.Server = item.Server

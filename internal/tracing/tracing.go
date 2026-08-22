@@ -10,12 +10,15 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
@@ -26,6 +29,7 @@ import (
 type Config struct {
 	Endpoint      string // --otlp-endpoint override; "" uses OTEL_EXPORTER_OTLP_* env
 	IncludeOutput bool   // export tool outputs and message text
+	ForceRoot     bool   // ignore TRACEPARENT/TRACESTATE and start a new trace
 	RunID         string
 	Agent         string // codex | claude
 	Provider      string // GenAI provider name (from the agent adapter)
@@ -38,7 +42,13 @@ type Config struct {
 // flag or one of the standard endpoint env vars. Otherwise no provider is
 // constructed and runs carry zero tracing overhead.
 func Enabled(endpointFlag string) bool {
-	return endpointFlag != "" ||
+	if disabled, err := strconv.ParseBool(strings.TrimSpace(os.Getenv("OTEL_SDK_DISABLED"))); err == nil && disabled {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("OTEL_TRACES_EXPORTER")), "none") {
+		return false
+	}
+	return strings.TrimSpace(endpointFlag) != "" ||
 		os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" ||
 		os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") != ""
 }
@@ -80,9 +90,42 @@ func Setup(ctx context.Context, cfg Config) (*Run, error) {
 	provider := sdktrace.NewTracerProvider(
 		sdktrace.WithBatcher(exporter),
 		sdktrace.WithResource(res),
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithSampler(samplerFromEnvironment()),
 	)
 	return newRun(ctx, provider, cfg)
+}
+
+// samplerFromEnvironment implements the standard built-in
+// OTEL_TRACES_SAMPLER values. Unknown names and invalid ratio arguments use
+// the SDK default (parent-based always-on) instead of silently forcing a
+// different sampling policy.
+func samplerFromEnvironment() sdktrace.Sampler {
+	defaultSampler := sdktrace.ParentBased(sdktrace.AlwaysSample())
+	ratio := func() sdktrace.Sampler {
+		value, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER_ARG")), 64)
+		if err != nil || value < 0 || value > 1 {
+			value = 1
+		}
+		return sdktrace.TraceIDRatioBased(value)
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER"))) {
+	case "":
+		return defaultSampler
+	case "always_on":
+		return sdktrace.AlwaysSample()
+	case "always_off":
+		return sdktrace.NeverSample()
+	case "traceidratio":
+		return ratio()
+	case "parentbased_always_on":
+		return sdktrace.ParentBased(sdktrace.AlwaysSample())
+	case "parentbased_always_off":
+		return sdktrace.ParentBased(sdktrace.NeverSample())
+	case "parentbased_traceidratio":
+		return sdktrace.ParentBased(ratio())
+	default:
+		return defaultSampler
+	}
 }
 
 // newRun starts the root span on an existing provider (split from Setup so
@@ -114,11 +157,21 @@ func newRun(ctx context.Context, provider *sdktrace.TracerProvider, cfg Config) 
 	if cfg.Model != "" {
 		attrs = append(attrs, attrRequestModel.String(cfg.Model))
 	}
-	r.rootCtx, r.root = r.tracer.Start(ctx, "invoke_agent "+cfg.Agent,
+	startCtx := ctx
+	startOpts := []trace.SpanStartOption{
 		trace.WithTimestamp(cfg.StartedAt),
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(attrs...),
-	)
+	}
+	if cfg.ForceRoot {
+		startOpts = append(startOpts, trace.WithNewRoot())
+	} else {
+		startCtx = propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier{
+			"traceparent": os.Getenv("TRACEPARENT"),
+			"tracestate":  os.Getenv("TRACESTATE"),
+		})
+	}
+	r.rootCtx, r.root = r.tracer.Start(startCtx, "invoke_agent "+cfg.Agent, startOpts...)
 	return r, nil
 }
 
@@ -194,13 +247,19 @@ func (r *Run) startToolSpan(tool string, at time.Time, attrs ...attribute.KeyVal
 	return span
 }
 
-// addTextEvent records assistant message/reasoning text as a span event on
-// the root span. Text content is exported only under --otlp-include-output;
-// the event itself (with size) is always recorded.
+// addTextEvent records surfaced assistant message text as a span event on the
+// root span. Provider-private reasoning uses addReasoningEvent and is never
+// attached to telemetry, even when output export is enabled.
 func (r *Run) addTextEvent(name, text string, at time.Time) {
 	attrs := []attribute.KeyValue{attrEventChars.Int(utf8.RuneCountInString(text))}
 	if r.includeOutput {
 		attrs = append(attrs, attribute.String("text", capString(text, maxResultChars)))
 	}
 	r.root.AddEvent(name, trace.WithTimestamp(at), trace.WithAttributes(attrs...))
+}
+
+func (r *Run) addReasoningEvent(text string, at time.Time) {
+	r.root.AddEvent("acta.reasoning", trace.WithTimestamp(at), trace.WithAttributes(
+		attrEventChars.Int(utf8.RuneCountInString(text)),
+	))
 }

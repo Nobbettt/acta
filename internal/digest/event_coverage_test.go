@@ -1,6 +1,8 @@
 package digest
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -48,8 +50,19 @@ func TestCodexCapturesRichItemsFailuresAndIncompleteCalls(t *testing.T) {
 			unsupported = event
 		}
 	}
-	if reasoning == nil || reasoning.Text == "" {
-		t.Fatal("reasoning item was not retained")
+	if reasoning == nil || reasoning.Text != "" || reasoning.LocalReasoningText() != "Inspect the failing path." {
+		t.Fatalf("reasoning boundary = %#v / %q, want structural digest plus local-only text", reasoning, reasoning.LocalReasoningText())
+	}
+	dir := t.TempDir()
+	if err := Write(dir, d); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := os.ReadFile(filepath.Join(dir, "digest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(persisted), "Inspect the failing path.") {
+		t.Fatalf("persisted digest leaked reasoning text: %s", persisted)
 	}
 	if mcp == nil || mcp.Server != "docs" || mcp.Tool != "lookup" || len(mcp.Input) == 0 || len(mcp.Result) == 0 {
 		t.Fatalf("mcp event = %+v", mcp)

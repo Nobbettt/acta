@@ -306,7 +306,7 @@ func (s *claudeParseState) consumeAssistantContent(content *ClaudeContent, item 
 		e.Kind = KindReasoning
 		e.ProviderEvent = "assistant.thinking"
 		e.Status = "completed"
-		e.Text = content.Thinking
+		e.localReasoningText = content.Thinking
 	case "tool_use":
 		e.ProviderEvent = "assistant.tool_use"
 		e.Phase = "started"

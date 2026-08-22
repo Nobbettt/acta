@@ -89,7 +89,8 @@
         "workspace_diff_limit_bytes": {"type": "integer", "minimum": 0},
         "process_containment": {"enum": ["posix_process_group", "windows_job", "direct_process"]},
         "agent_config_mode": {"enum": ["ambient_ephemeral", "project_only_ephemeral", "authoritative_bundle"]},
-        "runtime_bundle_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        "runtime_bundle_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "reasoning_redaction_state": {"enum": ["retained_local", "redacted"]}
       }
     },
     "span": {
