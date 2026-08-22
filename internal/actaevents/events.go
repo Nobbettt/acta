@@ -235,6 +235,7 @@ func BuildForBundle(bundleDir string, record *runrecord.Record, d *digest.Digest
 		ProcessContainment:      record.ProcessContainment,
 		AgentConfigMode:         record.AgentConfigMode,
 		RuntimeBundleSHA256:     record.RuntimeBundleSHA256,
+		ReasoningRedactionState: record.ReasoningRedactionState,
 	}); err != nil {
 		return nil, err
 	}
@@ -408,7 +409,7 @@ func WriteProjectionForRunDir(runDir string, d *digest.Digest) error {
 	if err != nil {
 		return err
 	}
-	digestPayload, err := json.MarshalIndent(d, "", "  ")
+	digestPayload, err := digest.MarshalEvaluation(d)
 	if err != nil {
 		return fmt.Errorf("marshal digest: %w", err)
 	}
@@ -527,6 +528,10 @@ func capturedPromptFromEventStream(runDir, runID string) (string, error) {
 func (b *builder) appendTimelineEvent(record *runrecord.Record, item digest.Event) error {
 	typ := timelineType(item)
 	eventTime := timelineTimes(record, item)
+	text := item.Text
+	if item.Kind == digest.KindReasoning {
+		text = item.LocalReasoningText()
+	}
 	seq, err := b.append(typ, eventTime, timelinePayload{
 		Kind: item.Kind, ProviderEvent: item.ProviderEvent,
 		ID: item.ID, ParentID: item.ParentID, ThreadID: item.ThreadID,
@@ -539,7 +544,7 @@ func (b *builder) appendTimelineEvent(record *runrecord.Record, item digest.Even
 		Command: item.Command, ExitCode: item.ExitCode, IsError: item.IsError,
 		ErrorMessage: item.ErrorMessage,
 		Output:       item.Output, OutputChars: item.OutputChars, OutputTruncated: item.OutputTruncated,
-		Text: item.Text, Query: item.Query, Action: item.Action,
+		Text: text, Query: item.Query, Action: item.Action,
 		Files: item.Files, Changes: item.Changes, Spans: item.Spans,
 		Patches: item.FilePatches,
 		Details: item.Details, RawEventLines: item.RawEventLines,
@@ -805,6 +810,7 @@ type runStartedPayload struct {
 	ProcessContainment      string   `json:"process_containment,omitempty"`
 	AgentConfigMode         string   `json:"agent_config_mode,omitempty"`
 	RuntimeBundleSHA256     string   `json:"runtime_bundle_sha256,omitempty"`
+	ReasoningRedactionState string   `json:"reasoning_redaction_state,omitempty"`
 }
 
 type agentPromptPayload struct {

@@ -89,6 +89,10 @@ func (m *codexMapper) onLine(r *Run, line []byte, at time.Time) {
 			if strings.TrimSpace(item.Text) != "" {
 				r.addTextEvent("acta.message", item.Text, at)
 			}
+		case item.Type == "reasoning":
+			if strings.TrimSpace(item.Text) != "" {
+				r.addReasoningEvent(item.Text, at)
+			}
 		}
 	}
 }

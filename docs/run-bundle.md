@@ -131,6 +131,9 @@ Current fields:
   `authoritative_bundle`
 - `runtime_bundle_sha256` - SHA-256 of the exact validated bundle bytes when a
   runtime bundle was used; its path and contents are not copied into metadata
+- `reasoning_redaction_state` - `retained_local` when private reasoning remains
+  only in raw/normalized bundle streams, or `redacted` when its text was
+  removed from persisted bundle artifacts
 
 ## Raw Files
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1011,9 +1012,9 @@ func gitCmd(t *testing.T, dir string, args ...string) {
 	}
 }
 
-// An explicit --otlp-endpoint that can't deliver must fail the run (the user
-// asked for traces), not exit 0 with only a warning. The bundle is still saved.
-func TestRunFailsOnExplicitOTLPExportFailure(t *testing.T) {
+// Required telemetry is an operational requirement: export failure exits
+// non-zero only after the successful agent outcome and bundle are durable.
+func TestRunRequiredOTLPExportFailurePreservesOutcomeAndBundle(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake shell agents require /bin/sh")
 	}
@@ -1024,14 +1025,15 @@ func TestRunFailsOnExplicitOTLPExportFailure(t *testing.T) {
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	record, err := runForTest(context.Background(), Options{
-		Agent:        "codex",
-		CWD:          cwd,
-		Prompt:       "x",
-		PromptSource: "test",
-		Stream:       false,
-		OTLPEndpoint: "http://127.0.0.1:1/v1/traces", // refused
+		Agent:                   "codex",
+		CWD:                     cwd,
+		Prompt:                  "x",
+		PromptSource:            "test",
+		Stream:                  false,
+		OTLPEndpoint:            "http://127.0.0.1:1/v1/traces", // refused
+		OTLPExportFailurePolicy: OTLPExportFailurePolicyRequired,
 	}, bytes.NewBuffer(nil), bytes.NewBuffer(nil))
-	if err == nil {
+	if err == nil || !strings.Contains(err.Error(), "required OTLP export failed") {
 		t.Fatal("expected the failed OTLP export to fail the run")
 	}
 	if record == nil {
@@ -1039,6 +1041,65 @@ func TestRunFailsOnExplicitOTLPExportFailure(t *testing.T) {
 		return
 	}
 	assertJSONFile(t, filepath.Join(record.RunDir, "run.json"))
+	if !record.OK || record.TerminationReason != "completed" || record.OTLPStatus != "failed" {
+		t.Fatalf("record outcome changed by telemetry failure: %#v", record)
+	}
+}
+
+func TestRunBestEffortOTLPExportFailureIsDefault(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	cwd := t.TempDir()
+	fakeBin := t.TempDir()
+	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
+		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	record, err := runForTest(context.Background(), Options{
+		Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test",
+		OTLPEndpoint: "http://127.0.0.1:1/v1/traces",
+	}, io.Discard, io.Discard)
+	if err != nil || record == nil || !record.OK || record.OTLPStatus != "failed" {
+		t.Fatalf("default best-effort run = record %#v, err %v", record, err)
+	}
+}
+
+func TestRunRedactReasoningRemovesTextFromEntireBundle(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	const secretReasoning = "private-chain-of-thought-7419"
+	cwd := t.TempDir()
+	fakeBin := t.TempDir()
+	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
+		`printf '{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","text":"`+secretReasoning+`"}}\n'`+"\n"+
+		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	record, err := runForTest(context.Background(), Options{
+		Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test", RedactReasoning: true,
+	}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.ReasoningRedactionState != "redacted" {
+		t.Fatalf("reasoning redaction state = %q", record.ReasoningRedactionState)
+	}
+	err = filepath.Walk(record.RunDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil || info.IsDir() {
+			return walkErr
+		}
+		payload, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if strings.Contains(string(payload), secretReasoning) {
+			return fmt.Errorf("reasoning text leaked into %s", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 // Run ids must be unique — the timestamp is only second-granular, so uniqueness

@@ -110,9 +110,12 @@ holds the data that never reaches them:
   per-line arrival timestamp for the stdout event stream (the streams
   themselves carry none). A launcher may set an explicit raw-output budget;
   exceeding it fails and stops the run rather than silently truncating success.
-- **Full tool-call arguments and outputs, message and reasoning text.** Native
-  events carry the tool *name*, duration, and success flag; the payloads stay
-  behind.
+- **Full tool-call arguments and outputs plus surfaced messages.** Provider
+  reasoning/thinking channels are treated differently from assistant text
+  deliberately surfaced to the user. Private reasoning stays local-only in
+  raw and normalized streams, is excluded from OTLP, `digest.json`, and
+  evaluation-facing summaries, and can be removed from bundles entirely with
+  `--redact-reasoning`.
 - **The workspace diff** (staged + unstaged + non-ignored untracked): the net uncommitted
   change the run left in the workspace. Commits made during the run show up as
   base-to-head commit movement in the run metadata instead. Line counters
@@ -163,10 +166,11 @@ honored too):
 ./acta run --agent codex --prompt "..." --otlp-endpoint http://localhost:4318
 ```
 
-Any configured OTLP exporter is required by default: setup or flush failure
-fails the Acta command and is recorded. Use `--otlp-best-effort` only when the
-launcher explicitly accepts a completed local bundle without successful trace
-export.
+Configured OTLP export is best-effort by default: setup or flush failure is
+recorded without changing the agent outcome. Use
+`--otlp-export-failure-policy required` when delivery is an operational
+requirement. Required mode still finishes and preserves the bundle and its
+semantic result before Acta exits non-zero with a telemetry error.
 
 When `TRACEPARENT` contains valid W3C Trace Context, the `invoke_agent` span
 joins that trace as a child of the supplied remote parent; valid `TRACESTATE`
@@ -181,8 +185,12 @@ it. The total snapshot budget defaults to 1 GiB; use
 
 By default spans carry only structural metadata (tool names, ids, exit codes,
 tokens, timing). Content that can hold secrets or local paths stays out of the
-export unless you opt in with `--otlp-include-output`. Full fidelity always
-stays in the local bundle.
+export unless you opt in with `--otlp-include-output`. That opt-in applies to
+surfaced messages and tool content, never provider reasoning/thinking text.
+Without `--redact-reasoning`, private reasoning is retained only in local raw
+streams and `agent.reasoning` normalized events; `run.json` records
+`reasoning_redaction_state: retained_local`. Redact mode removes its text from
+both persisted streams and records `reasoning_redaction_state: redacted`.
 
 ## Where it's headed
 

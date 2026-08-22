@@ -152,6 +152,41 @@ type Event struct {
 	inputPath     string
 	completedLine int
 	fileSnapshots []fileWriteSnapshot
+	// localReasoningText is deliberately excluded from digest serialization.
+	// It exists only long enough to build the local normalized event stream.
+	localReasoningText string
+}
+
+// LocalReasoningText returns provider-private reasoning for the local event
+// projection. Callers must never use it for telemetry, digests, summaries, or
+// evaluation inputs.
+func (e Event) LocalReasoningText() string {
+	return e.localReasoningText
+}
+
+// RedactReasoning removes provider-private reasoning from the in-memory local
+// projection before a redacted bundle is persisted. Structural events and raw
+// line references remain intact.
+func RedactReasoning(d *Digest) {
+	if d == nil {
+		return
+	}
+	for i := range d.Timeline {
+		event := &d.Timeline[i]
+		identity := strings.ToLower(event.Kind + " " + event.ProviderEvent)
+		if event.Kind == KindReasoning || strings.Contains(identity, "reasoning") || strings.Contains(identity, "thinking") {
+			event.Text = ""
+			event.localReasoningText = ""
+			event.Input = nil
+			event.Result = nil
+			event.Command = ""
+			event.ErrorMessage = ""
+			event.Output = ""
+			event.Query = ""
+			event.Action = nil
+			event.Details = nil
+		}
+	}
 }
 
 type FileMutation struct {
@@ -736,7 +771,7 @@ func (sd *StreamDigester) Finalize(record *runrecord.Record, runDir string) *Dig
 
 // Write serializes the digest to digest.json inside the run bundle.
 func Write(runDir string, d *Digest) error {
-	payload, err := json.MarshalIndent(d, "", "  ")
+	payload, err := MarshalEvaluation(d)
 	if err != nil {
 		return fmt.Errorf("marshal digest: %w", err)
 	}
@@ -748,6 +783,19 @@ func Write(runDir string, d *Digest) error {
 		return fmt.Errorf("write digest: %w", err)
 	}
 	return nil
+}
+
+// MarshalEvaluation serializes the structural/evaluation view of a digest.
+// Provider-private reasoning text is removed even when the input originated
+// from an older in-memory or decoded digest representation.
+func MarshalEvaluation(d *Digest) ([]byte, error) {
+	if d == nil {
+		return nil, fmt.Errorf("digest is nil")
+	}
+	copy := *d
+	copy.Timeline = append([]Event(nil), d.Timeline...)
+	RedactReasoning(&copy)
+	return json.MarshalIndent(&copy, "", "  ")
 }
 
 func statusFromRecord(record runrecord.Record) string {

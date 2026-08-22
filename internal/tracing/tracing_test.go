@@ -3,7 +3,9 @@ package tracing
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,6 +85,40 @@ func TestContentAttributesGatedByIncludeOutput(t *testing.T) {
 		}
 		if args, paths := scan(agent, true); !args || !paths {
 			t.Errorf("%s with include-output: arguments=%v file_path=%v, want both present", agent, args, paths)
+		}
+	}
+}
+
+func TestReasoningTextNeverEntersTelemetry(t *testing.T) {
+	const secret = "private-reasoning-telemetry-8842"
+	lines := map[string]string{
+		"codex":  `{"type":"item.completed","item":{"id":"r1","type":"reasoning","text":"` + secret + `"}}`,
+		"claude": `{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"` + secret + `"}]}}`,
+	}
+	for agent, line := range lines {
+		recorder, run := newTestRunOutput(t, agent, true)
+		run.OnLine([]byte(line), testStart.Add(time.Millisecond))
+		finish(t, run, true, testStart.Add(time.Second))
+		reasoningEvents := 0
+		for _, span := range recorder.Ended() {
+			for _, value := range span.Attributes() {
+				if strings.Contains(fmt.Sprint(value.Value.AsInterface()), secret) {
+					t.Fatalf("%s span attribute %s leaked reasoning text", agent, value.Key)
+				}
+			}
+			for _, event := range span.Events() {
+				if event.Name == "acta.reasoning" {
+					reasoningEvents++
+				}
+				for _, value := range event.Attributes {
+					if value.Key == "text" || strings.Contains(fmt.Sprint(value.Value.AsInterface()), secret) {
+						t.Fatalf("%s event attribute %s leaked reasoning text", agent, value.Key)
+					}
+				}
+			}
+		}
+		if reasoningEvents != 1 {
+			t.Fatalf("%s reasoning structural events = %d, want 1", agent, reasoningEvents)
 		}
 	}
 }

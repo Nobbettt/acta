@@ -206,13 +206,19 @@ func (r *Run) startToolSpan(tool string, at time.Time, attrs ...attribute.KeyVal
 	return span
 }
 
-// addTextEvent records assistant message/reasoning text as a span event on
-// the root span. Text content is exported only under --otlp-include-output;
-// the event itself (with size) is always recorded.
+// addTextEvent records surfaced assistant message text as a span event on the
+// root span. Provider-private reasoning uses addReasoningEvent and is never
+// attached to telemetry, even when output export is enabled.
 func (r *Run) addTextEvent(name, text string, at time.Time) {
 	attrs := []attribute.KeyValue{attrEventChars.Int(utf8.RuneCountInString(text))}
 	if r.includeOutput {
 		attrs = append(attrs, attribute.String("text", capString(text, maxResultChars)))
 	}
 	r.root.AddEvent(name, trace.WithTimestamp(at), trace.WithAttributes(attrs...))
+}
+
+func (r *Run) addReasoningEvent(text string, at time.Time) {
+	r.root.AddEvent("acta.reasoning", trace.WithTimestamp(at), trace.WithAttributes(
+		attrEventChars.Int(utf8.RuneCountInString(text)),
+	))
 }

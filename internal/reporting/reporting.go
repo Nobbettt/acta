@@ -94,6 +94,7 @@ type completionMetadata struct {
 	RawOutputLimitExceeded     bool   `json:"raw_output_limit_exceeded,omitempty"`
 	WorkspaceDiffLimitBytes    int64  `json:"workspace_diff_limit_bytes,omitempty"`
 	WorkspaceDiffLimitExceeded bool   `json:"workspace_diff_limit_exceeded,omitempty"`
+	ReasoningRedactionState    string `json:"reasoning_redaction_state,omitempty"`
 }
 
 type runMetadataPayload struct {
@@ -107,6 +108,7 @@ type runMetadataPayload struct {
 	ProcessContainment         string  `json:"process_containment,omitempty"`
 	AgentConfigMode            string  `json:"agent_config_mode,omitempty"`
 	RuntimeBundleSHA256        string  `json:"runtime_bundle_sha256,omitempty"`
+	ReasoningRedactionState    string  `json:"reasoning_redaction_state,omitempty"`
 	PromptSource               string  `json:"prompt_source"`
 	PromptCaptured             bool    `json:"prompt_captured"`
 	TerminationReason          string  `json:"termination_reason"`
@@ -196,6 +198,7 @@ func UploadRun(ctx context.Context, cfg Config, record *runrecord.Record) error 
 				OTLPStatus:        record.OTLPStatus, OTLPError: record.OTLPError,
 				RawOutputLimitBytes: record.RawOutputLimitBytes, RawOutputLimitExceeded: record.RawOutputLimitExceeded,
 				WorkspaceDiffLimitBytes: record.WorkspaceDiffLimitBytes, WorkspaceDiffLimitExceeded: record.WorkspaceDiffLimitExceeded,
+				ReasoningRedactionState: record.ReasoningRedactionState,
 			},
 		})
 		if markErr != nil {
@@ -243,6 +246,7 @@ func UploadRun(ctx context.Context, cfg Config, record *runrecord.Record) error 
 			OTLPStatus:        record.OTLPStatus, OTLPError: record.OTLPError,
 			RawOutputLimitBytes: record.RawOutputLimitBytes, RawOutputLimitExceeded: record.RawOutputLimitExceeded,
 			WorkspaceDiffLimitBytes: record.WorkspaceDiffLimitBytes, WorkspaceDiffLimitExceeded: record.WorkspaceDiffLimitExceeded,
+			ReasoningRedactionState: record.ReasoningRedactionState,
 		},
 	}); err != nil {
 		return fmt.Errorf("complete run: %w", err)
@@ -930,6 +934,7 @@ func buildRunMetadata(record *runrecord.Record) runMetadataPayload {
 		ProcessContainment:         record.ProcessContainment,
 		AgentConfigMode:            record.AgentConfigMode,
 		RuntimeBundleSHA256:        record.RuntimeBundleSHA256,
+		ReasoningRedactionState:    record.ReasoningRedactionState,
 		PromptSource:               record.PromptSource,
 		PromptCaptured:             record.PromptCaptured,
 		TerminationReason:          record.TerminationReason,
