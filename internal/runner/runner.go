@@ -87,6 +87,7 @@ type Options struct {
 	OTLPEndpoint          string
 	OTLPIncludeOutput     bool
 	OTLPBestEffort        bool
+	OTLPForceRoot         bool
 	RunID                 string
 	BackendURL            string
 	ReportToken           string
@@ -280,6 +281,7 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 		tr, err = tracing.Setup(ctx, tracing.Config{
 			Endpoint:      opts.OTLPEndpoint,
 			IncludeOutput: opts.OTLPIncludeOutput,
+			ForceRoot:     opts.OTLPForceRoot,
 			RunID:         runID,
 			Agent:         adapter.Name(),
 			Provider:      adapter.Provider(),

@@ -18,6 +18,12 @@ import (
 
 var testStart = time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
+const (
+	testParentTraceID = "11111111111111111111111111111111"
+	testParentSpanID  = "2222222222222222"
+	testTraceparent   = "00-" + testParentTraceID + "-" + testParentSpanID + "-01"
+)
+
 func newTestRun(t *testing.T, agent string) (*tracetest.SpanRecorder, *Run) {
 	t.Helper()
 	recorder := tracetest.NewSpanRecorder()
@@ -190,6 +196,70 @@ func TestProviderAttributeOnRootSpan(t *testing.T) {
 	}
 }
 
+func TestRunRootUsesW3CParentContext(t *testing.T) {
+	t.Setenv("TRACEPARENT", testTraceparent)
+	t.Setenv("TRACESTATE", "vendor=opaque")
+
+	root := recordedRoot(t, Config{Agent: "codex", RunID: "child", StartedAt: testStart})
+	parent := root.Parent()
+	if !parent.IsValid() || !parent.IsRemote() {
+		t.Fatalf("parent = %v, want valid remote parent", parent)
+	}
+	if got := root.SpanContext().TraceID().String(); got != testParentTraceID {
+		t.Errorf("root trace id = %q, want %q", got, testParentTraceID)
+	}
+	if got := parent.TraceID().String(); got != testParentTraceID {
+		t.Errorf("parent trace id = %q, want %q", got, testParentTraceID)
+	}
+	if got := parent.SpanID().String(); got != testParentSpanID {
+		t.Errorf("parent span id = %q, want %q", got, testParentSpanID)
+	}
+}
+
+func TestRunRootWithoutParentContext(t *testing.T) {
+	t.Setenv("TRACEPARENT", "")
+	t.Setenv("TRACESTATE", "")
+
+	root := recordedRoot(t, Config{Agent: "codex", RunID: "standalone", StartedAt: testStart})
+	if parent := root.Parent(); parent.IsValid() || parent.IsRemote() {
+		t.Fatalf("parent = %v, want standalone root with no remote parent", parent)
+	}
+}
+
+func TestRunRootIgnoresMalformedTraceparent(t *testing.T) {
+	t.Setenv("TRACEPARENT", "not-w3c-trace-context")
+	t.Setenv("TRACESTATE", "vendor=opaque")
+
+	root := recordedRoot(t, Config{Agent: "codex", RunID: "malformed", StartedAt: testStart})
+	if parent := root.Parent(); parent.IsValid() || parent.IsRemote() {
+		t.Fatalf("parent = %v, want standalone root for malformed TRACEPARENT", parent)
+	}
+}
+
+func TestRunRootForceRootIgnoresValidParent(t *testing.T) {
+	t.Setenv("TRACEPARENT", testTraceparent)
+	t.Setenv("TRACESTATE", "vendor=opaque")
+
+	root := recordedRoot(t, Config{Agent: "codex", RunID: "forced-root", StartedAt: testStart, ForceRoot: true})
+	if parent := root.Parent(); parent.IsValid() || parent.IsRemote() {
+		t.Fatalf("parent = %v, want standalone root with ForceRoot", parent)
+	}
+	if got := root.SpanContext().TraceID().String(); got == testParentTraceID {
+		t.Errorf("root trace id = parent trace id %q despite ForceRoot", got)
+	}
+}
+
+func TestRunRootPropagatesTracestate(t *testing.T) {
+	const want = "vendor=opaque,other=value"
+	t.Setenv("TRACEPARENT", testTraceparent)
+	t.Setenv("TRACESTATE", want)
+
+	root := recordedRoot(t, Config{Agent: "claude", RunID: "state", StartedAt: testStart})
+	if got := root.Parent().TraceState().String(); got != want {
+		t.Fatalf("parent tracestate = %q, want %q", got, want)
+	}
+}
+
 func TestTextEventCountsCharactersNotBytes(t *testing.T) {
 	recorder, r := newTestRun(t, "codex")
 	r.addTextEvent("acta.message", "a€", testStart)
@@ -218,6 +288,24 @@ func attrValue(span sdktrace.ReadOnlySpan, key attribute.Key) (attribute.Value, 
 		}
 	}
 	return attribute.Value{}, false
+}
+
+func recordedRoot(t *testing.T, cfg Config) sdktrace.ReadOnlySpan {
+	t.Helper()
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	r, err := newRun(context.Background(), provider, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finish(t, r, true, cfg.StartedAt.Add(time.Second))
+	for _, span := range recorder.Ended() {
+		if span.Name() == "invoke_agent "+cfg.Agent {
+			return span
+		}
+	}
+	t.Fatalf("root span for %q not ended", cfg.Agent)
+	return nil
 }
 
 func TestClaudeFixtureSpans(t *testing.T) {

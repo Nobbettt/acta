@@ -81,6 +81,7 @@ func runCommand(ctx context.Context, args []string, stdin io.Reader, stdout io.W
 	fs.StringVar(&opts.OTLPEndpoint, "otlp-endpoint", "", "OTLP/HTTP endpoint URL for live trace export (OTEL_EXPORTER_OTLP_* env also honored)")
 	fs.BoolVar(&opts.OTLPIncludeOutput, "otlp-include-output", false, "include tool outputs and message text in exported spans")
 	fs.BoolVar(&opts.OTLPBestEffort, "otlp-best-effort", false, "allow agent execution to succeed while recording a configured OTLP export failure")
+	fs.BoolVar(&opts.OTLPForceRoot, "otlp-force-root", false, "ignore TRACEPARENT/TRACESTATE and start a new trace")
 	fs.StringVar(&opts.RunID, "run-id", "", "optional stable run id; defaults to a generated id")
 	fs.StringVar(&opts.BackendURL, "backend-url", "", "backend API base URL for report upload")
 	fs.StringVar(&opts.ReportToken, "report-token", "", "bearer token for report upload")

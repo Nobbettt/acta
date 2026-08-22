@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
@@ -26,6 +27,7 @@ import (
 type Config struct {
 	Endpoint      string // --otlp-endpoint override; "" uses OTEL_EXPORTER_OTLP_* env
 	IncludeOutput bool   // export tool outputs and message text
+	ForceRoot     bool   // ignore TRACEPARENT/TRACESTATE and start a new trace
 	RunID         string
 	Agent         string // codex | claude
 	Provider      string // GenAI provider name (from the agent adapter)
@@ -114,11 +116,21 @@ func newRun(ctx context.Context, provider *sdktrace.TracerProvider, cfg Config) 
 	if cfg.Model != "" {
 		attrs = append(attrs, attrRequestModel.String(cfg.Model))
 	}
-	r.rootCtx, r.root = r.tracer.Start(ctx, "invoke_agent "+cfg.Agent,
+	startCtx := ctx
+	startOpts := []trace.SpanStartOption{
 		trace.WithTimestamp(cfg.StartedAt),
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(attrs...),
-	)
+	}
+	if cfg.ForceRoot {
+		startOpts = append(startOpts, trace.WithNewRoot())
+	} else {
+		startCtx = propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier{
+			"traceparent": os.Getenv("TRACEPARENT"),
+			"tracestate":  os.Getenv("TRACESTATE"),
+		})
+	}
+	r.rootCtx, r.root = r.tracer.Start(startCtx, "invoke_agent "+cfg.Agent, startOpts...)
 	return r, nil
 }
 

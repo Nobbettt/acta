@@ -168,6 +168,13 @@ fails the Acta command and is recorded. Use `--otlp-best-effort` only when the
 launcher explicitly accepts a completed local bundle without successful trace
 export.
 
+When `TRACEPARENT` contains valid W3C Trace Context, the `invoke_agent` span
+joins that trace as a child of the supplied remote parent; valid `TRACESTATE`
+is carried with it. Missing or malformed parent context is ignored and Acta
+starts a standalone root trace as before. Pass `--otlp-force-root` to ignore
+both variables even when the parent is valid. Run IDs remain opaque and are
+never used to derive trace context.
+
 Hybrid and standalone upload pin an immutable bundle snapshot before sending
 it. The total snapshot budget defaults to 1 GiB; use
 `--max-upload-bytes 0` only when an explicit unlimited upload is intended.
