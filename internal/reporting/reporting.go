@@ -35,6 +35,10 @@ type Config struct {
 	// MaxUploadBytes caps the total immutable upload snapshot. Zero explicitly
 	// disables the cap; callers normally pass DefaultMaxUploadBytes.
 	MaxUploadBytes int64
+	// AllowUnredactedRemoteReasoning is an explicit privacy opt-in. The default
+	// upload snapshot removes provider-private reasoning while leaving the local
+	// run bundle untouched.
+	AllowUnredactedRemoteReasoning bool
 }
 
 const (
@@ -66,15 +70,16 @@ type eventsRequest struct {
 }
 
 type artifactUpload struct {
-	Kind          string `json:"kind"`
-	Filename      string `json:"filename"`
-	ContentType   string `json:"content_type"`
-	SizeBytes     int64  `json:"size_bytes"`
-	SHA256        string `json:"sha256"`
-	Compression   string `json:"compression,omitempty"`
-	SchemaVersion *int32 `json:"schema_version,omitempty"`
-	File          *os.File
-	TempPath      string
+	Kind           string `json:"kind"`
+	Filename       string `json:"filename"`
+	ContentType    string `json:"content_type"`
+	SizeBytes      int64  `json:"size_bytes"`
+	SHA256         string `json:"sha256"`
+	Compression    string `json:"compression,omitempty"`
+	SchemaVersion  *int32 `json:"schema_version,omitempty"`
+	RedactionState string `json:"redaction_state"`
+	File           *os.File
+	TempPath       string
 }
 
 type completionMetadata struct {
@@ -152,7 +157,12 @@ func UploadRun(ctx context.Context, cfg Config, record *runrecord.Record) error 
 	if artifactLimit < 0 {
 		return errors.New("max upload bytes must not be negative")
 	}
-	eventFile, eventTempPath, err := snapshotEventStreamLimit(ctx, record.RunDir, artifactLimit)
+	redactRemoteReasoning := record.ReasoningRedactionState != "redacted" && !cfg.AllowUnredactedRemoteReasoning
+	remoteRedactionState := "redacted"
+	if !redactRemoteReasoning && record.ReasoningRedactionState != "redacted" {
+		remoteRedactionState = "unredacted"
+	}
+	eventFile, eventTempPath, err := snapshotEventStreamLimit(ctx, record.RunDir, artifactLimit, redactRemoteReasoning)
 	if err != nil {
 		return err
 	}
@@ -164,7 +174,7 @@ func UploadRun(ctx context.Context, cfg Config, record *runrecord.Record) error 
 	if err != nil {
 		return err
 	}
-	artifacts, err := buildArtifactsContext(ctx, record.RunDir, artifactRefs, eventFile, eventTempPath, artifactLimit)
+	artifacts, err := buildArtifactsContext(ctx, record.RunDir, artifactRefs, eventFile, eventTempPath, artifactLimit, redactRemoteReasoning, remoteRedactionState)
 	if err != nil {
 		return err
 	}
@@ -198,7 +208,7 @@ func UploadRun(ctx context.Context, cfg Config, record *runrecord.Record) error 
 				OTLPStatus:        record.OTLPStatus, OTLPError: record.OTLPError,
 				RawOutputLimitBytes: record.RawOutputLimitBytes, RawOutputLimitExceeded: record.RawOutputLimitExceeded,
 				WorkspaceDiffLimitBytes: record.WorkspaceDiffLimitBytes, WorkspaceDiffLimitExceeded: record.WorkspaceDiffLimitExceeded,
-				ReasoningRedactionState: record.ReasoningRedactionState,
+				ReasoningRedactionState: remoteRedactionState,
 			},
 		})
 		if markErr != nil {
@@ -216,7 +226,7 @@ func UploadRun(ctx context.Context, cfg Config, record *runrecord.Record) error 
 		Model:          record.Model,
 		Source:         actaevents.Source,
 		StartedAt:      record.StartedAt,
-		Metadata:       buildRunMetadata(record),
+		Metadata:       buildRunMetadata(record, remoteRedactionState),
 	}); err != nil {
 		return fmt.Errorf("create run: %w", err)
 	}
@@ -246,7 +256,7 @@ func UploadRun(ctx context.Context, cfg Config, record *runrecord.Record) error 
 			OTLPStatus:        record.OTLPStatus, OTLPError: record.OTLPError,
 			RawOutputLimitBytes: record.RawOutputLimitBytes, RawOutputLimitExceeded: record.RawOutputLimitExceeded,
 			WorkspaceDiffLimitBytes: record.WorkspaceDiffLimitBytes, WorkspaceDiffLimitExceeded: record.WorkspaceDiffLimitExceeded,
-			ReasoningRedactionState: record.ReasoningRedactionState,
+			ReasoningRedactionState: remoteRedactionState,
 		},
 	}); err != nil {
 		return fmt.Errorf("complete run: %w", err)
@@ -413,6 +423,7 @@ func (c client) postArtifact(ctx context.Context, runID string, artifact artifac
 	if artifact.SchemaVersion != nil {
 		values.Set("schema_version", fmt.Sprintf("%d", *artifact.SchemaVersion))
 	}
+	values.Set("redaction_state", artifact.RedactionState)
 	path := "/api/ingest/runs/" + url.PathEscape(runID) + "/artifacts?" + values.Encode()
 
 	return c.retry(ctx, func() error {
@@ -667,7 +678,7 @@ func dedupeArtifactRefs(refs []actaevents.ArtifactRef) []actaevents.ArtifactRef 
 	return out
 }
 
-func buildArtifactsContext(ctx context.Context, runDir string, refs []actaevents.ArtifactRef, eventFile *os.File, eventTempPath string, maxBytes int64) ([]artifactUpload, error) {
+func buildArtifactsContext(ctx context.Context, runDir string, refs []actaevents.ArtifactRef, eventFile *os.File, eventTempPath string, maxBytes int64, redactReasoning bool, redactionState string) ([]artifactUpload, error) {
 	resolvedRunDir, err := filepath.EvalSymlinks(runDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve run directory: %w", err)
@@ -719,6 +730,14 @@ func buildArtifactsContext(ctx context.Context, runDir string, refs []actaevents
 				closeArtifacts(artifacts)
 				return nil, fmt.Errorf("snapshot artifact %s: %w", ref.Path, err)
 			}
+			if redactReasoning {
+				if err := redactArtifactSnapshot(file, ref.Kind); err != nil {
+					_ = file.Close()
+					_ = os.Remove(tempPath)
+					closeArtifacts(artifacts)
+					return nil, fmt.Errorf("redact reasoning from artifact %s: %w", ref.Path, err)
+				}
+			}
 		}
 		sha256Hex, sizeBytes, err := hashFileContext(ctx, file)
 		if err != nil {
@@ -737,14 +756,15 @@ func buildArtifactsContext(ctx context.Context, runDir string, refs []actaevents
 		}
 		schemaVersion := int32(actaevents.SchemaVersion)
 		artifact := artifactUpload{
-			Kind:        ref.Kind,
-			Filename:    ref.Path,
-			ContentType: contentType(ref.Path),
-			SizeBytes:   sizeBytes,
-			SHA256:      sha256Hex,
-			Compression: compression(ref.Path),
-			File:        file,
-			TempPath:    tempPath,
+			Kind:           ref.Kind,
+			Filename:       ref.Path,
+			ContentType:    contentType(ref.Path),
+			SizeBytes:      sizeBytes,
+			SHA256:         sha256Hex,
+			Compression:    compression(ref.Path),
+			RedactionState: artifactReasoningRedactionState(ref.Kind, redactionState),
+			File:           file,
+			TempPath:       tempPath,
 		}
 		if ref.Kind == "event_stream" {
 			artifact.SchemaVersion = &schemaVersion
@@ -752,6 +772,218 @@ func buildArtifactsContext(ctx context.Context, runDir string, refs []actaevents
 		artifacts = append(artifacts, artifact)
 	}
 	return artifacts, nil
+}
+
+func artifactReasoningRedactionState(kind, reasoningState string) string {
+	switch kind {
+	case "run_record", "raw_stdout", "event_stream":
+		return reasoningState
+	default:
+		return "not_required"
+	}
+}
+
+func redactArtifactSnapshot(file *os.File, kind string) error {
+	switch kind {
+	case "raw_stdout":
+		return rewriteJSONLSnapshot(file, redactProviderReasoningLine)
+	case "event_stream":
+		return rewriteJSONLSnapshot(file, redactActaReasoningEventLine)
+	case "run_record":
+		return redactRunRecordSnapshot(file)
+	default:
+		return nil
+	}
+}
+
+func rewriteJSONLSnapshot(file *os.File, transform func([]byte) ([]byte, error)) error {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	temp, err := os.CreateTemp("", "acta-redacted-snapshot-*")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	defer func() {
+		_ = temp.Close()
+		_ = os.Remove(tempPath)
+	}()
+	reader := bufio.NewReader(file)
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			redacted, err := transform(line)
+			if err != nil {
+				return err
+			}
+			if _, err := temp.Write(redacted); err != nil {
+				return err
+			}
+		}
+		if readErr != nil {
+			if readErr != io.EOF {
+				return readErr
+			}
+			break
+		}
+	}
+	if _, err := temp.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	if err := file.Truncate(0); err != nil {
+		return err
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	if _, err := io.Copy(file, temp); err != nil {
+		return err
+	}
+	_, err = file.Seek(0, io.SeekStart)
+	return err
+}
+
+func redactProviderReasoningLine(line []byte) ([]byte, error) {
+	hasNewline := len(line) > 0 && line[len(line)-1] == '\n'
+	payload := bytes.TrimSpace(line)
+	if len(payload) == 0 {
+		return line, nil
+	}
+	var value any
+	if err := json.Unmarshal(payload, &value); err != nil {
+		return nil, fmt.Errorf("parse provider event for remote reasoning redaction: %w", err)
+	}
+	if !redactReasoningValue(value) {
+		return line, nil
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	if hasNewline {
+		encoded = append(encoded, '\n')
+	}
+	return encoded, nil
+}
+
+func redactActaReasoningEventLine(line []byte) ([]byte, error) {
+	hasNewline := len(line) > 0 && line[len(line)-1] == '\n'
+	payload := bytes.TrimSpace(line)
+	if len(payload) == 0 {
+		return line, nil
+	}
+	var event map[string]any
+	if err := json.Unmarshal(payload, &event); err != nil {
+		return nil, fmt.Errorf("parse Acta event for remote reasoning redaction: %w", err)
+	}
+	changed := setReasoningRedactionState(event)
+	if typ, _ := event["type"].(string); typ == actaevents.TypeAgentReasoning {
+		if reasoningPayload, ok := event["payload"]; ok {
+			changed = redactReasoningValue(reasoningPayload) || changed
+		}
+	}
+	if !changed {
+		return line, nil
+	}
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		return nil, err
+	}
+	if hasNewline {
+		encoded = append(encoded, '\n')
+	}
+	return encoded, nil
+}
+
+func redactReasoningValue(value any) bool {
+	switch typed := value.(type) {
+	case []any:
+		changed := false
+		for _, item := range typed {
+			changed = redactReasoningValue(item) || changed
+		}
+		return changed
+	case map[string]any:
+		kind, _ := typed["type"].(string)
+		if kind == "" {
+			kind, _ = typed["kind"].(string)
+		}
+		kind = strings.ToLower(strings.TrimSpace(kind))
+		if strings.Contains(kind, "reasoning") || strings.Contains(kind, "thinking") {
+			for key := range typed {
+				switch key {
+				case "type", "kind", "id", "status", "provider_event", "phase", "visibility", "started_at", "completed_at", "raw_event_lines":
+				default:
+					delete(typed, key)
+				}
+			}
+			return true
+		}
+		changed := false
+		for _, item := range typed {
+			changed = redactReasoningValue(item) || changed
+		}
+		return changed
+	default:
+		return false
+	}
+}
+
+func setReasoningRedactionState(value any) bool {
+	changed := false
+	switch typed := value.(type) {
+	case []any:
+		for _, item := range typed {
+			changed = setReasoningRedactionState(item) || changed
+		}
+	case map[string]any:
+		for key, item := range typed {
+			if key == "reasoning_redaction_state" {
+				if item != "redacted" {
+					typed[key] = "redacted"
+					changed = true
+				}
+				continue
+			}
+			changed = setReasoningRedactionState(item) || changed
+		}
+	}
+	return changed
+}
+
+func redactRunRecordSnapshot(file *os.File) error {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	payload, err := io.ReadAll(io.LimitReader(file, runrecord.MaxRecordBytes+1))
+	if err != nil {
+		return err
+	}
+	if int64(len(payload)) > runrecord.MaxRecordBytes {
+		return fmt.Errorf("run record exceeds %d-byte limit", runrecord.MaxRecordBytes)
+	}
+	var value map[string]any
+	if err := json.Unmarshal(payload, &value); err != nil {
+		return err
+	}
+	value["reasoning_redaction_state"] = "redacted"
+	redacted, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	redacted = append(redacted, '\n')
+	if err := file.Truncate(0); err != nil {
+		return err
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	if _, err := file.Write(redacted); err != nil {
+		return err
+	}
+	_, err = file.Seek(0, io.SeekStart)
+	return err
 }
 
 func hashFileContext(ctx context.Context, file *os.File) (string, int64, error) {
@@ -783,7 +1015,7 @@ func hashFileContext(ctx context.Context, file *os.File) (string, int64, error) 
 	return hex.EncodeToString(hasher.Sum(nil)), size, nil
 }
 
-func snapshotEventStreamLimit(ctx context.Context, runDir string, maxBytes int64) (*os.File, string, error) {
+func snapshotEventStreamLimit(ctx context.Context, runDir string, maxBytes int64, redactReasoning bool) (*os.File, string, error) {
 	resolvedRunDir, err := filepath.EvalSymlinks(runDir)
 	if err != nil {
 		return nil, "", fmt.Errorf("resolve run directory: %w", err)
@@ -794,7 +1026,18 @@ func snapshotEventStreamLimit(ctx context.Context, runDir string, maxBytes int64
 			return nil, "", fmt.Errorf("event stream is %d bytes; artifact snapshot maximum is %d", info.Size(), maxBytes)
 		}
 	}
-	return snapshotRegularFile(ctx, resolvedRunDir, path, maxBytes)
+	file, tempPath, err := snapshotRegularFile(ctx, resolvedRunDir, path, maxBytes)
+	if err != nil {
+		return nil, "", err
+	}
+	if redactReasoning {
+		if err := redactArtifactSnapshot(file, "event_stream"); err != nil {
+			_ = file.Close()
+			_ = os.Remove(tempPath)
+			return nil, "", fmt.Errorf("redact reasoning from event snapshot: %w", err)
+		}
+	}
+	return file, tempPath, nil
 }
 
 // snapshotRegularFile copies one pinned source into a private temporary file,
@@ -922,7 +1165,7 @@ func compression(path string) string {
 	}
 }
 
-func buildRunMetadata(record *runrecord.Record) runMetadataPayload {
+func buildRunMetadata(record *runrecord.Record, reasoningRedactionState string) runMetadataPayload {
 	metadata := runMetadataPayload{
 		AgentVersion:               record.AgentVersion,
 		OTLPStatus:                 record.OTLPStatus,
@@ -934,7 +1177,7 @@ func buildRunMetadata(record *runrecord.Record) runMetadataPayload {
 		ProcessContainment:         record.ProcessContainment,
 		AgentConfigMode:            record.AgentConfigMode,
 		RuntimeBundleSHA256:        record.RuntimeBundleSHA256,
-		ReasoningRedactionState:    record.ReasoningRedactionState,
+		ReasoningRedactionState:    reasoningRedactionState,
 		PromptSource:               record.PromptSource,
 		PromptCaptured:             record.PromptCaptured,
 		TerminationReason:          record.TerminationReason,

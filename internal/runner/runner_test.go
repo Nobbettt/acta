@@ -1033,7 +1033,7 @@ func TestRunRequiredOTLPExportFailurePreservesOutcomeAndBundle(t *testing.T) {
 		OTLPEndpoint:            "http://127.0.0.1:1/v1/traces", // refused
 		OTLPExportFailurePolicy: OTLPExportFailurePolicyRequired,
 	}, bytes.NewBuffer(nil), bytes.NewBuffer(nil))
-	if err == nil || !strings.Contains(err.Error(), "required OTLP export failed") {
+	if err == nil || !errors.Is(err, ErrTelemetryOnlyFailure) || !strings.Contains(err.Error(), "required OTLP export failed") {
 		t.Fatal("expected the failed OTLP export to fail the run")
 	}
 	if record == nil {
@@ -1061,6 +1061,50 @@ func TestRunBestEffortOTLPExportFailureIsDefault(t *testing.T) {
 	}, io.Discard, io.Discard)
 	if err != nil || record == nil || !record.OK || record.OTLPStatus != "failed" {
 		t.Fatalf("default best-effort run = record %#v, err %v", record, err)
+	}
+}
+
+func TestRunKeepsOTLPCredentialsOutOfAgentEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	requests := make(chan string, 1)
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests <- request.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer collector.Close()
+
+	cwd := t.TempDir()
+	fakeBin := t.TempDir()
+	writeFakeAgent(t, fakeBin, "codex", `#!/bin/sh
+if env | grep -q '^OTEL_EXPORTER_OTLP_TRACES_HEADERS='; then
+  echo 'OTLP header leaked to coding agent' >&2
+  exit 23
+fi
+cat >/dev/null
+printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'
+`)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "Authorization=Bearer secret-otlp-token")
+
+	record, err := runForTest(context.Background(), Options{
+		Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test", OTLPEndpoint: collector.URL,
+	}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !record.OK || record.OTLPStatus != "exported" || record.TraceID == "" {
+		t.Fatalf("record = %#v, want successful exported trace", record)
+	}
+	select {
+	case authorization := <-requests:
+		if authorization != "Bearer secret-otlp-token" {
+			t.Fatalf("collector Authorization = %q, want Acta exporter credential", authorization)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Acta exporter did not reach collector")
 	}
 }
 

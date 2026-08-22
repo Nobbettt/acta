@@ -82,6 +82,15 @@ type Record struct {
 	// remains in the local-only raw/normalized streams or was removed from the
 	// bundle entirely. Reasoning text is never written to digest.json or OTLP.
 	ReasoningRedactionState string `json:"reasoning_redaction_state,omitempty"`
+	// PublishedBundle is populated only by an Acta-owned publication path. A
+	// launcher may reuse this digest-bound reference instead of trusting a
+	// similarly shaped claim emitted by the coding agent.
+	PublishedBundle *PublishedBundle `json:"published_bundle,omitempty"`
+}
+
+type PublishedBundle struct {
+	ArtifactID string `json:"artifact_id"`
+	SHA256     string `json:"sha256"`
 }
 
 // Validate rejects records from schemas this build cannot interpret.
@@ -137,6 +146,14 @@ func (r *Record) Validate() error {
 		}
 		if r.ReasoningRedactionState != "" && !oneOf(r.ReasoningRedactionState, "retained_local", "redacted") {
 			return fmt.Errorf("run record has invalid reasoning_redaction_state %q", r.ReasoningRedactionState)
+		}
+		if r.PublishedBundle != nil {
+			if strings.TrimSpace(r.PublishedBundle.ArtifactID) == "" || strings.TrimSpace(r.PublishedBundle.ArtifactID) != r.PublishedBundle.ArtifactID {
+				return fmt.Errorf("published_bundle.artifact_id is invalid")
+			}
+			if !isLowerHexSHA256(r.PublishedBundle.SHA256) {
+				return fmt.Errorf("published_bundle.sha256 must be 64 lowercase hexadecimal characters")
+			}
 		}
 		if r.AgentConfigMode == "authoritative_bundle" && r.RuntimeBundleSHA256 == "" || r.AgentConfigMode != "authoritative_bundle" && r.RuntimeBundleSHA256 != "" {
 			return fmt.Errorf("run record agent_config_mode and runtime_bundle_sha256 are inconsistent")

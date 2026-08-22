@@ -104,8 +104,9 @@ Current fields:
 - `completed_at` - UTC completion time
 - `duration_ms` - wall-clock duration
 - `exit_code` - process exit code when available
-- `ok` - the reconciled outcome: true only when runner, provider, evidence,
-  projection, and required export/finalization stages all succeeded
+- `ok` - the reconciled agent/evidence outcome. Required telemetry delivery is
+  operational state: its failure leaves a successful `ok` unchanged, records
+  `otlp_status: failed`, and makes the CLI return telemetry-only exit code 86
 - `timeout` - true when Acta's timeout killed the run
 - `termination_reason` - normalized final outcome such as `completed`,
   `timeout`, `cancelled`, `process_error`, `resource_limit`, `failed`, or
@@ -119,8 +120,9 @@ Current fields:
 - `prompt_captured` - true when explicit prompt retention was enabled
 - `otlp_status` / `otlp_error` - distinguish not configured, configured,
   exported, and failed OTLP state for runs that started, including best-effort
-  setup failures and all flush failures. Required setup failure is preflight:
-  no agent starts and no run bundle is published
+  setup failures and all flush failures. Required delivery failure is reported
+  after the agent outcome and bundle are durable, using telemetry-only exit
+  code 86 when no other operation failed
 - `raw_output_limit_bytes` / `raw_output_limit_exceeded` - effective combined
   stdout/stderr budget and whether it terminated the run
 - `workspace_diff_limit_bytes` / `workspace_diff_limit_exceeded` - effective
@@ -134,6 +136,8 @@ Current fields:
 - `reasoning_redaction_state` - `retained_local` when private reasoning remains
   only in raw/normalized bundle streams, or `redacted` when its text was
   removed from persisted bundle artifacts
+- `published_bundle` - optional digest-bound artifact reference written only by
+  an Acta-owned publication path; launchers must not substitute agent output
 
 ## Raw Files
 

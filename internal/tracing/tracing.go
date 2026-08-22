@@ -10,6 +10,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -40,7 +42,13 @@ type Config struct {
 // flag or one of the standard endpoint env vars. Otherwise no provider is
 // constructed and runs carry zero tracing overhead.
 func Enabled(endpointFlag string) bool {
-	return endpointFlag != "" ||
+	if disabled, err := strconv.ParseBool(strings.TrimSpace(os.Getenv("OTEL_SDK_DISABLED"))); err == nil && disabled {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("OTEL_TRACES_EXPORTER")), "none") {
+		return false
+	}
+	return strings.TrimSpace(endpointFlag) != "" ||
 		os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" ||
 		os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") != ""
 }
@@ -82,9 +90,42 @@ func Setup(ctx context.Context, cfg Config) (*Run, error) {
 	provider := sdktrace.NewTracerProvider(
 		sdktrace.WithBatcher(exporter),
 		sdktrace.WithResource(res),
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithSampler(samplerFromEnvironment()),
 	)
 	return newRun(ctx, provider, cfg)
+}
+
+// samplerFromEnvironment implements the standard built-in
+// OTEL_TRACES_SAMPLER values. Unknown names and invalid ratio arguments use
+// the SDK default (parent-based always-on) instead of silently forcing a
+// different sampling policy.
+func samplerFromEnvironment() sdktrace.Sampler {
+	defaultSampler := sdktrace.ParentBased(sdktrace.AlwaysSample())
+	ratio := func() sdktrace.Sampler {
+		value, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER_ARG")), 64)
+		if err != nil || value < 0 || value > 1 {
+			value = 1
+		}
+		return sdktrace.TraceIDRatioBased(value)
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER"))) {
+	case "":
+		return defaultSampler
+	case "always_on":
+		return sdktrace.AlwaysSample()
+	case "always_off":
+		return sdktrace.NeverSample()
+	case "traceidratio":
+		return ratio()
+	case "parentbased_always_on":
+		return sdktrace.ParentBased(sdktrace.AlwaysSample())
+	case "parentbased_always_off":
+		return sdktrace.ParentBased(sdktrace.NeverSample())
+	case "parentbased_traceidratio":
+		return sdktrace.ParentBased(ratio())
+	default:
+		return defaultSampler
+	}
 }
 
 // newRun starts the root span on an existing provider (split from Setup so

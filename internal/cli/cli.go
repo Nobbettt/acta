@@ -84,6 +84,7 @@ func runCommand(ctx context.Context, args []string, stdin io.Reader, stdout io.W
 	fs.BoolVar(&opts.OTLPBestEffort, "otlp-best-effort", false, "deprecated alias for --otlp-export-failure-policy=best-effort")
 	fs.BoolVar(&opts.OTLPForceRoot, "otlp-force-root", false, "ignore TRACEPARENT/TRACESTATE and start a new trace")
 	fs.BoolVar(&opts.RedactReasoning, "redact-reasoning", false, "remove provider-private reasoning text from raw and normalized bundle streams")
+	fs.BoolVar(&opts.AllowUnredactedRemoteReasoning, "allow-unredacted-remote-reasoning", false, "explicitly allow private reasoning text in remote uploads; local bundles are unchanged")
 	fs.StringVar(&opts.RunID, "run-id", "", "optional stable run id; defaults to a generated id")
 	fs.StringVar(&opts.BackendURL, "backend-url", "", "backend API base URL for report upload")
 	fs.StringVar(&opts.ReportToken, "report-token", "", "bearer token for report upload")
@@ -185,6 +186,9 @@ func runCommand(ctx context.Context, args []string, stdin io.Reader, stdout io.W
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "acta run failed: %v\n", err)
+		if errors.Is(err, runner.ErrTelemetryOnlyFailure) {
+			return runner.TelemetryOnlyFailureExitCode
+		}
 		if record != nil && record.ExitCode != nil && *record.ExitCode > 0 {
 			return *record.ExitCode
 		}
@@ -208,6 +212,7 @@ func uploadCommand(ctx context.Context, args []string, stdout io.Writer, stderr 
 	var timeout time.Duration
 	var maxUploadBytes int64
 	var allowInsecureHTTP bool
+	var allowUnredactedRemoteReasoning bool
 	fs.StringVar(&runDir, "run-dir", "", "Acta run bundle directory; can also be passed as the single argument")
 	fs.StringVar(&backendURL, "backend-url", "", "backend API base URL for report upload")
 	fs.StringVar(&reportToken, "report-token", "", "bearer token for report upload")
@@ -219,6 +224,7 @@ func uploadCommand(ctx context.Context, args []string, stdout io.Writer, stderr 
 	fs.DurationVar(&timeout, "timeout", 2*time.Minute, "upload timeout such as 30s or 2m; 0 disables timeout")
 	fs.Int64Var(&maxUploadBytes, "max-upload-bytes", reporting.DefaultMaxUploadBytes, "total immutable upload snapshot byte limit; 0 explicitly disables the limit")
 	fs.BoolVar(&allowInsecureHTTP, "allow-insecure-http", false, "allow plaintext HTTP upload to a non-loopback backend")
+	fs.BoolVar(&allowUnredactedRemoteReasoning, "allow-unredacted-remote-reasoning", false, "explicitly allow private reasoning text in the remote upload")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -276,12 +282,13 @@ func uploadCommand(ctx context.Context, args []string, stdout io.Writer, stderr 
 	defer cancel()
 
 	if err := reporting.UploadRun(uploadCtx, reporting.Config{
-		BackendURL:        backendURL,
-		ReportToken:       reportToken,
-		OrganizationID:    organizationID,
-		RepositoryID:      repositoryID,
-		MaxUploadBytes:    maxUploadBytes,
-		AllowInsecureHTTP: allowInsecureHTTP,
+		BackendURL:                     backendURL,
+		ReportToken:                    reportToken,
+		OrganizationID:                 organizationID,
+		RepositoryID:                   repositoryID,
+		MaxUploadBytes:                 maxUploadBytes,
+		AllowInsecureHTTP:              allowInsecureHTTP,
+		AllowUnredactedRemoteReasoning: allowUnredactedRemoteReasoning,
 	}, record); err != nil {
 		fmt.Fprintf(stderr, "acta upload failed: %v\n", err)
 		return 1

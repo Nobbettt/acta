@@ -170,7 +170,9 @@ Configured OTLP export is best-effort by default: setup or flush failure is
 recorded without changing the agent outcome. Use
 `--otlp-export-failure-policy required` when delivery is an operational
 requirement. Required mode still finishes and preserves the bundle and its
-semantic result before Acta exits non-zero with a telemetry error.
+semantic result before Acta exits with the documented telemetry-only code 86.
+Launchers must validate the successful Acta-owned `run.json` as well as the
+code before treating it as an operational warning.
 
 When `TRACEPARENT` contains valid W3C Trace Context, the `invoke_agent` span
 joins that trace as a child of the supplied remote parent; valid `TRACESTATE`
@@ -180,7 +182,11 @@ both variables even when the parent is valid. Run IDs remain opaque and are
 never used to derive trace context.
 
 Hybrid and standalone upload pin an immutable bundle snapshot before sending
-it. The total snapshot budget defaults to 1 GiB; use
+it. Remote snapshots remove provider-private reasoning by default while the
+local bundle remains full fidelity. The explicit
+`--allow-unredacted-remote-reasoning` flag opts a remote upload back into that
+content and marks its artifact metadata unredacted. The total snapshot budget
+defaults to 1 GiB; use
 `--max-upload-bytes 0` only when an explicit unlimited upload is intended.
 
 By default spans carry only structural metadata (tool names, ids, exit codes,
@@ -191,6 +197,7 @@ Without `--redact-reasoning`, private reasoning is retained only in local raw
 streams and `agent.reasoning` normalized events; `run.json` records
 `reasoning_redaction_state: retained_local`. Redact mode removes its text from
 both persisted streams and records `reasoning_redaction_state: redacted`.
+Remote upload redaction is independent and never rewrites those local files.
 
 ## Where it's headed
 

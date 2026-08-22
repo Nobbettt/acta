@@ -54,7 +54,14 @@ const DefaultUploadTimeout = 2 * time.Minute
 const (
 	OTLPExportFailurePolicyBestEffort = "best-effort"
 	OTLPExportFailurePolicyRequired   = "required"
+	// TelemetryOnlyFailureExitCode is returned by the CLI only when the agent
+	// run and its durable bundle succeeded but required OTLP delivery failed.
+	// Launchers must also validate run.json before treating this code as a
+	// warning, because an agent process may independently use the same code.
+	TelemetryOnlyFailureExitCode = 86
 )
+
+var ErrTelemetryOnlyFailure = errors.New("required telemetry export failed after a successful run")
 
 // DefaultRunsDir is the workspace-relative bundle root shared by every
 // command that resolves a runs directory.
@@ -94,18 +101,19 @@ type Options struct {
 	OTLPExportFailurePolicy string
 	// OTLPBestEffort is a deprecated programmatic compatibility switch. The
 	// default and the preferred explicit policy are both best-effort.
-	OTLPBestEffort    bool
-	OTLPForceRoot     bool
-	RedactReasoning   bool
-	RunID             string
-	BackendURL        string
-	ReportToken       string
-	ReportTokenEnv    string
-	OrganizationID    string
-	RepositoryID      string
-	ReportMode        string
-	RuntimeBundlePath string
-	AllowInsecureHTTP bool
+	OTLPBestEffort                 bool
+	OTLPForceRoot                  bool
+	RedactReasoning                bool
+	AllowUnredactedRemoteReasoning bool
+	RunID                          string
+	BackendURL                     string
+	ReportToken                    string
+	ReportTokenEnv                 string
+	OrganizationID                 string
+	RepositoryID                   string
+	ReportMode                     string
+	RuntimeBundlePath              string
+	AllowInsecureHTTP              bool
 	// GitEvidenceExcludes are workspace-relative generated/control paths to
 	// omit in addition to the run's bundle root, which is always excluded so
 	// prior bundles never leak into captured evidence.
@@ -549,12 +557,13 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 		}
 		defer cancel()
 		if err := reporting.UploadRun(reportCtx, reporting.Config{
-			BackendURL:        opts.BackendURL,
-			ReportToken:       opts.ReportToken,
-			OrganizationID:    opts.OrganizationID,
-			RepositoryID:      opts.RepositoryID,
-			AllowInsecureHTTP: opts.AllowInsecureHTTP,
-			MaxUploadBytes:    opts.MaxUploadBytes,
+			BackendURL:                     opts.BackendURL,
+			ReportToken:                    opts.ReportToken,
+			OrganizationID:                 opts.OrganizationID,
+			RepositoryID:                   opts.RepositoryID,
+			AllowInsecureHTTP:              opts.AllowInsecureHTTP,
+			MaxUploadBytes:                 opts.MaxUploadBytes,
+			AllowUnredactedRemoteReasoning: opts.AllowUnredactedRemoteReasoning,
 		}, record); err != nil {
 			err = fmt.Errorf("upload report: %w", err)
 			fmt.Fprintf(stderr, "acta: %v\n", err)
@@ -568,6 +577,9 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 		}
 	}
 	if telemetryErr != nil {
+		if runErr == nil && record.OK {
+			return record, fmt.Errorf("%w: %v", ErrTelemetryOnlyFailure, telemetryErr)
+		}
 		runErr = errors.Join(runErr, telemetryErr)
 	}
 	if runErr != nil {
@@ -877,7 +889,33 @@ func reportMode(opts Options) string {
 }
 
 func agentEnvironment(opts Options) []string {
-	return environmentWithoutKeys(os.Environ(), opts.ReportTokenEnv)
+	environment := environmentWithoutKeys(os.Environ(), opts.ReportTokenEnv)
+	filtered := environment[:0]
+	for _, entry := range environment {
+		key, _, _ := strings.Cut(entry, "=")
+		if credentialBearingOTELEnvironmentKey(key) {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
+}
+
+// credentialBearingOTELEnvironmentKey recognizes standard OTLP credential
+// carriers plus conservative token/password extensions. These variables stay
+// available to Acta's exporter, but never reach Codex/Claude or their version
+// probes.
+func credentialBearingOTELEnvironmentKey(key string) bool {
+	key = strings.ToUpper(strings.TrimSpace(key))
+	if !strings.HasPrefix(key, "OTEL_") {
+		return false
+	}
+	for _, marker := range []string{"HEADER", "CLIENT_KEY", "CLIENT_CERTIFICATE", "TOKEN", "SECRET", "PASSWORD", "API_KEY"} {
+		if strings.Contains(key, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func probeAgentVersion(ctx context.Context, adapter agents.Adapter, spec agents.CommandSpec, environment []string) (string, error) {

@@ -191,6 +191,36 @@ func TestFinishSurfacesFlushError(t *testing.T) {
 	}
 }
 
+func TestEnabledHonorsStandardDisableControls(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://collector.test/v1/traces")
+	t.Setenv("OTEL_SDK_DISABLED", "true")
+	if Enabled("") {
+		t.Fatal("OTEL_SDK_DISABLED=true must disable tracing")
+	}
+	t.Setenv("OTEL_SDK_DISABLED", "false")
+	t.Setenv("OTEL_TRACES_EXPORTER", "none")
+	if Enabled("https://explicit.test/v1/traces") {
+		t.Fatal("OTEL_TRACES_EXPORTER=none must disable an explicit endpoint")
+	}
+}
+
+func TestSamplerFromEnvironmentHonorsSamplerAndArgument(t *testing.T) {
+	t.Setenv("OTEL_TRACES_SAMPLER", "traceidratio")
+	t.Setenv("OTEL_TRACES_SAMPLER_ARG", "0")
+	parameters := sdktrace.SamplingParameters{Name: "test"}
+	if decision := samplerFromEnvironment().ShouldSample(parameters).Decision; decision != sdktrace.Drop {
+		t.Fatalf("traceidratio=0 decision = %v, want drop", decision)
+	}
+	t.Setenv("OTEL_TRACES_SAMPLER_ARG", "1")
+	if decision := samplerFromEnvironment().ShouldSample(parameters).Decision; decision != sdktrace.RecordAndSample {
+		t.Fatalf("traceidratio=1 decision = %v, want record and sample", decision)
+	}
+	t.Setenv("OTEL_TRACES_SAMPLER", "always_off")
+	if decision := samplerFromEnvironment().ShouldSample(parameters).Decision; decision != sdktrace.Drop {
+		t.Fatalf("always_off decision = %v, want drop", decision)
+	}
+}
+
 // Every registered agent must resolve a trace mapper and declare a provider, so
 // adding an agent without wiring tracing fails here instead of silently
 // exporting no spans at runtime.
