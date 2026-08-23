@@ -1109,6 +1109,44 @@ printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n
 	}
 }
 
+func TestRunRecordsAlwaysOffSamplerAsNotSampled(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	requests := make(chan struct{}, 1)
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case requests <- struct{}{}:
+		default:
+		}
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer collector.Close()
+
+	cwd := t.TempDir()
+	fakeBin := t.TempDir()
+	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
+		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("OTEL_TRACES_SAMPLER", "always_off")
+
+	record, err := runForTest(context.Background(), Options{
+		Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test", OTLPEndpoint: collector.URL,
+	}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !record.OK || record.OTLPStatus != "not_sampled" || record.TraceID != "" {
+		t.Fatalf("record = %#v, want successful unsampled trace without trace_id", record)
+	}
+	select {
+	case <-requests:
+		t.Fatal("always_off sampler unexpectedly exported a trace")
+	default:
+	}
+}
+
 func TestRunRedactReasoningRemovesTextFromEntireBundle(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake shell agents require /bin/sh")

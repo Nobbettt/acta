@@ -475,6 +475,11 @@ func codexItemEvent(d *Digest, item *CodexItem, srcLine int, completedLine int, 
 		e.Text = renderTodos(item.Items)
 	case "reasoning":
 		e.Kind = KindReasoning
+		if strings.TrimSpace(item.Text) == "" {
+			// Reasoning redaction deliberately leaves an empty structural item.
+			// Match Claude re-digestion by retaining it as explicitly redacted.
+			e.Redacted = true
+		}
 		e.localReasoningText = item.Text
 	case "mcp_tool_call":
 		e.Kind = KindToolCall

@@ -133,7 +133,7 @@ func (r *Record) Validate() error {
 		if r.OK && (r.ExitCode == nil || *r.ExitCode != 0) {
 			return fmt.Errorf("successful run record requires exit_code 0")
 		}
-		if !oneOf(r.OTLPStatus, "not_configured", "exported", "failed") || r.OTLPStatus == "failed" && strings.TrimSpace(r.OTLPError) == "" || r.OTLPStatus != "failed" && r.OTLPError != "" {
+		if !oneOf(r.OTLPStatus, "not_configured", "not_sampled", "exported", "failed") || r.OTLPStatus == "failed" && strings.TrimSpace(r.OTLPError) == "" || r.OTLPStatus != "failed" && r.OTLPError != "" {
 			return fmt.Errorf("run record OTLP status and error are inconsistent")
 		}
 		if r.OTLPStatus == "exported" && strings.TrimSpace(r.TraceID) == "" || r.OTLPStatus != "exported" && r.TraceID != "" {

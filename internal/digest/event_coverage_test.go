@@ -159,6 +159,39 @@ func TestClaudeRedactedThinkingRetainsStructuralReasoningEvent(t *testing.T) {
 	}
 }
 
+func TestCodexRedactedReasoningRetainsStructuralReasoningEvent(t *testing.T) {
+	originalRaw := strings.Join([]string{
+		`{"type":"thread.started","thread_id":"thread-1"}`,
+		`{"type":"turn.started"}`,
+		`{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","text":"private chain of thought"}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`,
+	}, "\n") + "\n"
+	redactedRaw := strings.Replace(originalRaw, `,"text":"private chain of thought"`, "", 1)
+
+	original, err := parseCodex(strings.NewReader(originalRaw), newWorkspace(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	redacted, err := parseCodex(strings.NewReader(redactedRaw), newWorkspace(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalReasoning := findTimelineKind(original.Timeline, KindReasoning)
+	redactedReasoning := findTimelineKind(redacted.Timeline, KindReasoning)
+	if originalReasoning == nil || redactedReasoning == nil {
+		t.Fatalf("reasoning events original=%+v redacted=%+v", originalReasoning, redactedReasoning)
+	}
+	if originalReasoning.Redacted || originalReasoning.LocalReasoningText() != "private chain of thought" {
+		t.Fatalf("original reasoning event = %+v / %q", originalReasoning, originalReasoning.LocalReasoningText())
+	}
+	if !redactedReasoning.Redacted || redactedReasoning.LocalReasoningText() != "" ||
+		redactedReasoning.Kind != originalReasoning.Kind ||
+		redactedReasoning.ProviderEvent != originalReasoning.ProviderEvent ||
+		len(redactedReasoning.RawEventLines) != 1 || redactedReasoning.RawEventLines[0] != 3 {
+		t.Fatalf("redacted structural reasoning event = %+v / %q", redactedReasoning, redactedReasoning.LocalReasoningText())
+	}
+}
+
 func findTimelineKind(timeline []Event, kind string) *Event {
 	for index := range timeline {
 		if timeline[index].Kind == kind {

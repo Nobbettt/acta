@@ -97,7 +97,16 @@ func redactReasoningLine(line []byte) ([]byte, error) {
 		return line, nil
 	}
 	var value any
-	if err := json.Unmarshal(payload, &value); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return nil, fmt.Errorf("parse raw provider event for reasoning redaction: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			err = fmt.Errorf("multiple JSON values")
+		}
 		return nil, fmt.Errorf("parse raw provider event for reasoning redaction: %w", err)
 	}
 	if !redactReasoningValue(value) {

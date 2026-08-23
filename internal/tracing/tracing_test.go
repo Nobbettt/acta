@@ -221,6 +221,25 @@ func TestSamplerFromEnvironmentHonorsSamplerAndArgument(t *testing.T) {
 	}
 }
 
+func TestUnsampledRunHasNoExportableTraceID(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.NeverSample()),
+		sdktrace.WithSpanProcessor(recorder),
+	)
+	run, err := newRun(context.Background(), provider, Config{Agent: "codex", RunID: "unsampled", StartedAt: testStart})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Sampled() || run.TraceID() != "" {
+		t.Fatalf("unsampled run reported sampled=%v trace_id=%q", run.Sampled(), run.TraceID())
+	}
+	finish(t, run, true, testStart.Add(time.Second))
+	if len(recorder.Ended()) != 0 {
+		t.Fatalf("unsampled ended spans = %d, want 0", len(recorder.Ended()))
+	}
+}
+
 // Every registered agent must resolve a trace mapper and declare a provider, so
 // adding an agent without wiring tracing fails here instead of silently
 // exporting no spans at runtime.

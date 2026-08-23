@@ -468,6 +468,7 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 	record.OK = preview.OK
 	record.TerminationReason = preview.TerminationReason
 	record.Error = preview.Error
+	traceSampled := tr != nil && tr.Sampled()
 	if err := tr.Finish(record, completedAt); err != nil {
 		fmt.Fprintf(stderr, "acta: OTLP flush failed: %v\n", err)
 		otlpStatus = "failed"
@@ -477,7 +478,12 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 			telemetryErr = errors.Join(telemetryErr, fmt.Errorf("required OTLP export failed during flush: %w", err))
 		}
 	} else if tr != nil {
-		otlpStatus = "exported"
+		if traceSampled {
+			otlpStatus = "exported"
+		} else {
+			otlpStatus = "not_sampled"
+			record.TraceID = ""
+		}
 	}
 	record.OTLPStatus = otlpStatus
 	record.OTLPError = otlpError

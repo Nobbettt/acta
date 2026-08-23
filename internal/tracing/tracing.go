@@ -60,6 +60,7 @@ type Run struct {
 	tracer        trace.Tracer
 	rootCtx       context.Context
 	root          trace.Span
+	sampled       bool
 	mapper        mapper
 	includeOutput bool
 }
@@ -172,12 +173,24 @@ func newRun(ctx context.Context, provider *sdktrace.TracerProvider, cfg Config) 
 		})
 	}
 	r.rootCtx, r.root = r.tracer.Start(startCtx, "invoke_agent "+cfg.Agent, startOpts...)
+	r.sampled = r.root.IsRecording() && r.root.SpanContext().IsSampled()
 	return r, nil
 }
 
-// TraceID returns the run's trace id for run.json correlation.
-func (r *Run) TraceID() string {
+// Sampled reports whether the root is recording and selected for export. It
+// must be checked before Finish ends the root span.
+func (r *Run) Sampled() bool {
 	if r == nil {
+		return false
+	}
+	return r.sampled
+}
+
+// TraceID returns the sampled run's trace id for run.json correlation. A
+// dropped root has a locally generated context but no remotely queryable
+// trace, so exposing that ID would be misleading.
+func (r *Run) TraceID() string {
+	if !r.Sampled() {
 		return ""
 	}
 	return r.root.SpanContext().TraceID().String()

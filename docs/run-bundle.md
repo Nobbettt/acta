@@ -118,11 +118,11 @@ Current fields:
   artifact paths used by v2 readers
 - `prompt_source` - `flag`, `args`, `stdin`, or test/internal source
 - `prompt_captured` - true when explicit prompt retention was enabled
-- `otlp_status` / `otlp_error` - distinguish not configured, configured,
+- `otlp_status` / `otlp_error` - distinguish not configured, not sampled,
   exported, and failed OTLP state for runs that started, including best-effort
-  setup failures and all flush failures. Required delivery failure is reported
-  after the agent outcome and bundle are durable, using telemetry-only exit
-  code 86 when no other operation failed
+  setup failures and all flush failures. Unsampled roots have no `trace_id`.
+  Required delivery failure is reported after the agent outcome and bundle are
+  durable, using telemetry-only exit code 86 when no other operation failed
 - `raw_output_limit_bytes` / `raw_output_limit_exceeded` - effective combined
   stdout/stderr budget and whether it terminated the run
 - `workspace_diff_limit_bytes` / `workspace_diff_limit_exceeded` - effective

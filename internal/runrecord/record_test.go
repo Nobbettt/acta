@@ -35,6 +35,15 @@ func validRecord() Record {
 	}
 }
 
+func TestValidateAllowsNotSampledWithoutTraceID(t *testing.T) {
+	record := validRecord()
+	record.OTLPStatus = "not_sampled"
+	record.TraceID = ""
+	if err := record.Validate(); err != nil {
+		t.Fatalf("Validate() rejected not_sampled record: %v", err)
+	}
+}
+
 func TestValidateCurrentRecord(t *testing.T) {
 	record := validRecord()
 	if err := record.Validate(); err != nil {

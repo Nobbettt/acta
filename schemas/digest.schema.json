@@ -25,7 +25,7 @@
     "termination": {"$ref": "#/$defs/termination"},
     "error": {"type": "string"},
     "has_workspace_diff": {"type": "boolean"},
-    "otlp_status": {"enum": ["not_configured", "exported", "failed"]},
+    "otlp_status": {"enum": ["not_configured", "not_sampled", "exported", "failed"]},
     "otlp_error": {"type": "string"},
     "raw_output_limit_bytes": {"type": "integer", "minimum": 0},
     "raw_output_limit_exceeded": {"type": "boolean"},

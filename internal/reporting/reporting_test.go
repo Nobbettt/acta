@@ -243,7 +243,7 @@ func TestUploadRunRedactsRemoteReasoningByDefaultForEveryAgentShape(t *testing.T
 			wantStates := map[string]string{
 				"run.json":          "redacted",
 				rawName:             "redacted",
-				"digest.json":       "not_required",
+				"digest.json":       "redacted",
 				actaevents.Filename: "redacted",
 			}
 			if len(redactionStates) != len(wantStates) {
@@ -262,6 +262,88 @@ func TestUploadRunRedactsRemoteReasoningByDefaultForEveryAgentShape(t *testing.T
 				t.Fatal("default remote redaction changed the local full-fidelity bundle")
 			}
 		})
+	}
+}
+
+func TestUploadRunRedactsReasoningFromLegacyDigest(t *testing.T) {
+	const secret = "legacy-digest-reasoning-48291"
+	runDir := writeBundle(t)
+	digestBody := `{"schema_version":2,"run_id":"run-1","timeline":[{"kind":"reasoning","provider_event":"item.reasoning","text":"` + secret + `","raw_event_lines":[17]}],"metrics":{"tokens":{"reasoning":42}}}` + "\n"
+	writeFile(t, filepath.Join(runDir, "digest.json"), digestBody)
+	record := testRecord(runDir)
+	record.ReasoningRedactionState = "retained_local"
+
+	var remoteDigest string
+	var remoteState string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == "digest.json" {
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Error(err)
+			}
+			remoteDigest = string(body)
+			remoteState = request.URL.Query().Get("redaction_state")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	if err := UploadRun(context.Background(), Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+	}, record); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(remoteDigest, secret) || strings.Contains(remoteDigest, `"text"`) {
+		t.Fatalf("remote legacy digest retained reasoning: %s", remoteDigest)
+	}
+	if !strings.Contains(remoteDigest, `"kind":"reasoning"`) ||
+		!strings.Contains(remoteDigest, `"raw_event_lines":[17]`) ||
+		!strings.Contains(remoteDigest, `"reasoning":42`) ||
+		!strings.Contains(remoteDigest, `"redacted":true`) || remoteState != "redacted" {
+		t.Fatalf("remote legacy digest/state lost structural redaction: %s / %q", remoteDigest, remoteState)
+	}
+	if local := readTestFile(t, filepath.Join(runDir, "digest.json")); local != digestBody {
+		t.Fatal("upload redaction modified the local legacy digest")
+	}
+}
+
+func TestUploadRunRedactsJSONLDespiteMismatchedDigestKind(t *testing.T) {
+	const secret = "mismatched-kind-reasoning-19571"
+	runDir := writeBundle(t)
+	rawName := "codex-events.jsonl"
+	writeFile(t, filepath.Join(runDir, rawName), `{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","text":"`+secret+`"}}`+"\n")
+	eventsPath := filepath.Join(runDir, actaevents.Filename)
+	events := readTestFile(t, eventsPath)
+	events = strings.Replace(events, `{"kind":"event_stream","path":"acta-events.jsonl"}`, `{"kind":"digest","path":"codex-events.jsonl"},{"kind":"event_stream","path":"acta-events.jsonl"}`, 1)
+	writeFile(t, eventsPath, events)
+	record := testRecord(runDir)
+	record.ReasoningRedactionState = "retained_local"
+
+	var remoteRaw string
+	var remoteKind string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == rawName {
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Error(err)
+			}
+			remoteRaw = string(body)
+			remoteKind = request.URL.Query().Get("kind")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	if err := UploadRun(context.Background(), Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+	}, record); err != nil {
+		t.Fatal(err)
+	}
+	if remoteKind != "digest" {
+		t.Fatalf("test did not exercise mismatched declared kind: %q", remoteKind)
+	}
+	if strings.Contains(remoteRaw, secret) || !strings.Contains(remoteRaw, `"redacted":true`) {
+		t.Fatalf("mismatched kind bypassed conservative JSONL redaction: %s", remoteRaw)
 	}
 }
 
@@ -386,6 +468,21 @@ func TestRedactActaReasoningEventLineRedactsUnknownTypeByDefault(t *testing.T) {
 	}
 	if !strings.Contains(string(redacted), `"raw_event_lines":[7]`) || !strings.Contains(string(redacted), `"redacted":true`) {
 		t.Fatalf("unknown event lost structural references: %s", redacted)
+	}
+}
+
+func TestRedactProviderReasoningLinePreservesLargeInteger(t *testing.T) {
+	const secret = "private-thinking-with-large-tool-input"
+	original := []byte(`{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"` + secret + `"},{"type":"tool_use","input":{"boundary":9007199254740993}}]}}` + "\n")
+	redacted, err := redactProviderReasoningLine(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(redacted), secret) {
+		t.Fatalf("reasoning was not redacted: %s", redacted)
+	}
+	if !strings.Contains(string(redacted), `"boundary":9007199254740993`) {
+		t.Fatalf("large integer changed during redaction: %s", redacted)
 	}
 }
 
