@@ -495,17 +495,22 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 		if maxRedactionLineBytes == 0 {
 			maxRedactionLineBytes = reporting.DefaultMaxRedactionLineBytes
 		}
-		if redactErr := redactReasoningRawStream(stagedStdoutPath, maxRedactionLineBytes); redactErr != nil {
-			// The atomic rewrite leaves the original raw stream untouched. Treat
-			// redaction as a late Acta failure, but continue all derivation and
-			// publication so the completed evidence remains recoverable.
-			record.ReasoningRedactionState = "failed"
-			redactErr = fmt.Errorf("reasoning redaction failed; completed run retained unredacted: %w", redactErr)
+		redactionState, redactErr := redactReasoningRawStream(stagedStdoutPath, maxRedactionLineBytes)
+		if redactErr != nil {
+			// Treat redaction as a late Acta failure, but continue derivation and
+			// publication. A post-rename commit error is marked partial unless the
+			// pre-computed original hash verifies byte-identical retention.
+			record.ReasoningRedactionState = redactionState
+			if redactionState == "partial" {
+				redactErr = fmt.Errorf("reasoning redaction partially committed; original raw stream retention was not verified: %w", redactErr)
+			} else {
+				redactErr = fmt.Errorf("reasoning redaction failed; raw stream was not replaced or was hash-verified unchanged: %w", redactErr)
+			}
 			fmt.Fprintf(stderr, "acta: %v\n", redactErr)
 			runErr = errors.Join(runErr, redactErr)
 			FinalizeRecordOutcome(record, runErr)
 		} else {
-			record.ReasoningRedactionState = "redacted"
+			record.ReasoningRedactionState = redactionState
 			reasoningRedacted = true
 		}
 	}
@@ -912,33 +917,20 @@ func reportMode(opts Options) string {
 }
 
 func agentEnvironment(opts Options) []string {
-	environment := environmentWithoutKeys(os.Environ(), opts.ReportTokenEnv)
+	return prepareAgentEnvironment(os.Environ(), opts.ReportTokenEnv)
+}
+
+func prepareAgentEnvironment(environment []string, reportTokenEnv string) []string {
+	environment = environmentWithoutKeys(environment, reportTokenEnv)
 	filtered := environment[:0]
 	for _, entry := range environment {
 		key, _, _ := strings.Cut(entry, "=")
-		if credentialBearingOTELEnvironmentKey(key) {
+		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(key)), "OTEL_") {
 			continue
 		}
 		filtered = append(filtered, entry)
 	}
 	return filtered
-}
-
-// credentialBearingOTELEnvironmentKey recognizes standard OTLP credential
-// carriers plus conservative token/password extensions. These variables stay
-// available to Acta's exporter, but never reach Codex/Claude or their version
-// probes.
-func credentialBearingOTELEnvironmentKey(key string) bool {
-	key = strings.ToUpper(strings.TrimSpace(key))
-	if !strings.HasPrefix(key, "OTEL_") {
-		return false
-	}
-	for _, marker := range []string{"HEADER", "CLIENT_KEY", "CLIENT_CERTIFICATE", "TOKEN", "SECRET", "PASSWORD", "API_KEY"} {
-		if strings.Contains(key, marker) {
-			return true
-		}
-	}
-	return false
 }
 
 func probeAgentVersion(ctx context.Context, adapter agents.Adapter, spec agents.CommandSpec, environment []string) (string, error) {

@@ -544,7 +544,8 @@ func (b *builder) appendTimelineEvent(record *runrecord.Record, item digest.Even
 		Command: item.Command, ExitCode: item.ExitCode, IsError: item.IsError,
 		ErrorMessage: item.ErrorMessage,
 		Output:       item.Output, OutputChars: item.OutputChars, OutputTruncated: item.OutputTruncated,
-		Text: text, Query: item.Query, Action: item.Action,
+		Text: text, TextChars: item.TextChars, TextTruncated: item.TextTruncated,
+		Query: item.Query, Action: item.Action,
 		Files: item.Files, Changes: item.Changes, Spans: item.Spans,
 		Patches: item.FilePatches,
 		Details: item.Details, RawEventLines: item.RawEventLines, Redacted: item.Redacted,
@@ -847,6 +848,8 @@ type timelinePayload struct {
 	OutputChars     int                      `json:"output_chars,omitempty"`
 	OutputTruncated bool                     `json:"output_truncated,omitempty"`
 	Text            string                   `json:"text,omitempty"`
+	TextChars       int                      `json:"text_chars,omitempty"`
+	TextTruncated   bool                     `json:"text_truncated,omitempty"`
 	Query           string                   `json:"query,omitempty"`
 	Action          json.RawMessage          `json:"action,omitempty"`
 	Files           []string                 `json:"files,omitempty"`

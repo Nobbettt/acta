@@ -1,10 +1,13 @@
 package runner
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/nobbettt/acta/internal/securefile"
 )
 
 func TestRedactReasoningRawStreamRejectsOversizedLineWithoutMutation(t *testing.T) {
@@ -13,9 +16,12 @@ func TestRedactReasoningRawStreamRejectsOversizedLineWithoutMutation(t *testing.
 	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := redactReasoningRawStream(path, 16)
+	state, err := redactReasoningRawStream(path, 16)
 	if err == nil || !strings.Contains(err.Error(), "line 1 exceeds maximum") {
 		t.Fatalf("redaction error = %v, want explicit oversized-line failure", err)
+	}
+	if state != "failed" {
+		t.Fatalf("redaction state = %q, want failed", state)
 	}
 	payload, readErr := os.ReadFile(path)
 	if readErr != nil {
@@ -23,5 +29,65 @@ func TestRedactReasoningRawStreamRejectsOversizedLineWithoutMutation(t *testing.
 	}
 	if string(payload) != original {
 		t.Fatalf("oversized redaction changed raw evidence = %q, want %q", payload, original)
+	}
+}
+
+func TestRedactReasoningRawStreamMarksPostRenameCommitFailurePartial(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "provider.jsonl")
+	const secret = "private commit-failure reasoning"
+	original := `{"type":"thinking","thinking":"` + secret + `"}` + "\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("sync directory after rename")
+	state, err := redactReasoningRawStreamWithWriter(path, 1<<20, failReasoningWriterAfterCommit(t, wantErr))
+	if !errors.Is(err, wantErr) || state != "partial" {
+		t.Fatalf("redaction state=%q error=%v, want partial commit failure", state, err)
+	}
+	payload, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(payload), secret) {
+		t.Fatalf("post-rename target was not redacted: %s", payload)
+	}
+}
+
+func TestRedactReasoningRawStreamVerifiesUnchangedPostRenameFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "provider.jsonl")
+	original := `{"type":"turn.completed"}` + "\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("sync directory after rename")
+	state, err := redactReasoningRawStreamWithWriter(path, 1<<20, failReasoningWriterAfterCommit(t, wantErr))
+	if !errors.Is(err, wantErr) || state != "failed" || !strings.Contains(err.Error(), "hash verified unchanged") {
+		t.Fatalf("redaction state=%q error=%v, want verified unchanged failure", state, err)
+	}
+	if payload, readErr := os.ReadFile(path); readErr != nil || string(payload) != original {
+		t.Fatalf("verified target=%q error=%v, want %q", payload, readErr, original)
+	}
+}
+
+type postCommitFailureWriter struct {
+	*securefile.AtomicWriter
+	err error
+}
+
+func (writer *postCommitFailureWriter) Commit() error {
+	if err := writer.AtomicWriter.Commit(); err != nil {
+		return err
+	}
+	return writer.err
+}
+
+func failReasoningWriterAfterCommit(t *testing.T, commitErr error) func(string) (reasoningAtomicWriter, error) {
+	t.Helper()
+	return func(path string) (reasoningAtomicWriter, error) {
+		writer, err := securefile.Create(path)
+		if err != nil {
+			return nil, err
+		}
+		return &postCommitFailureWriter{AtomicWriter: writer, err: commitErr}, nil
 	}
 }

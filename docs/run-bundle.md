@@ -135,8 +135,9 @@ Current fields:
   runtime bundle was used; its path and contents are not copied into metadata
 - `reasoning_redaction_state` - `retained_local` when private reasoning remains
   only in raw/normalized bundle streams, `redacted` when its text was removed
-  from persisted bundle artifacts, or `failed` when redaction failed and the
-  completed bundle was retained locally with its original evidence
+  from persisted bundle artifacts, `failed` when redaction failed with the raw
+  stream unchanged, or `partial` when an ambiguous commit could not be verified
+  as byte-identical to the original stream
 - `published_bundle` - optional digest-bound artifact reference written only by
   an Acta-owned publication path; launchers must not substitute agent output
 

@@ -236,6 +236,55 @@ func TestBuildWithPromptPlacesCapturedPromptFirst(t *testing.T) {
 	}
 }
 
+func TestBuildTruncatesMultiMiBReasoningWithStructuralMarker(t *testing.T) {
+	const reasoningBytes = 9 << 20
+	reasoning := strings.Repeat("r", reasoningBytes)
+	item, err := json.Marshal(map[string]any{
+		"type": "item.completed",
+		"item": map[string]any{"id": "reason-1", "type": "reasoning", "text": reasoning},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	started := time.Date(2026, 8, 24, 10, 0, 0, 0, time.UTC)
+	digester, err := digest.NewStreamDigesterWithOptions("codex", t.TempDir(), digest.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digester.Line([]byte(`{"type":"thread.started","thread_id":"thread-large"}`), started)
+	digester.Line([]byte(`{"type":"turn.started"}`), started)
+	digester.Line(item, started)
+	digester.Line([]byte(`{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`), started)
+	record := &runrecord.Record{
+		ID: "large-reasoning", Agent: "codex", StartedAt: started, CompletedAt: started, OK: true,
+	}
+	d := digester.Finalize(record, "")
+
+	events, err := Build(record, d)
+	if err != nil {
+		t.Fatalf("Build() rejected an otherwise successful run with oversized reasoning: %v", err)
+	}
+	for _, event := range events {
+		if event.Type != TypeAgentReasoning {
+			continue
+		}
+		var payload struct {
+			Text          string `json:"text"`
+			TextChars     int    `json:"text_chars"`
+			TextTruncated bool   `json:"text_truncated"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if len(payload.Text) != digest.MaxEventTextBytes || payload.TextChars != reasoningBytes || !payload.TextTruncated {
+			t.Fatalf("reasoning payload text bytes=%d chars=%d truncated=%v", len(payload.Text), payload.TextChars, payload.TextTruncated)
+		}
+		return
+	}
+	t.Fatal("normalized stream omitted the reasoning event")
+}
+
 func TestTimelineTypeMapping(t *testing.T) {
 	cases := map[string]string{
 		digest.KindCommand:    TypeShellCommandComplete,

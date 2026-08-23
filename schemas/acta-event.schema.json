@@ -90,7 +90,7 @@
         "process_containment": {"enum": ["posix_process_group", "windows_job", "direct_process"]},
         "agent_config_mode": {"enum": ["ambient_ephemeral", "project_only_ephemeral", "authoritative_bundle"]},
         "runtime_bundle_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "reasoning_redaction_state": {"enum": ["retained_local", "redacted", "failed"]}
+        "reasoning_redaction_state": {"enum": ["retained_local", "redacted", "failed", "partial"]}
       }
     },
     "span": {
@@ -120,7 +120,8 @@
         "result": {}, "result_chars": {"type": "integer", "minimum": 0}, "result_truncated": {"type": "boolean"},
         "command": {"type": "string"}, "exit_code": {"type": "integer"}, "is_error": {"type": "boolean"}, "error_message": {"type": "string"},
         "output": {"type": "string"}, "output_chars": {"type": "integer", "minimum": 0}, "output_truncated": {"type": "boolean"},
-        "text": {"type": "string"}, "query": {"type": "string"}, "action": {}, "files": {"type": "array", "items": {"type": "string"}},
+        "text": {"type": "string"}, "text_chars": {"type": "integer", "minimum": 0}, "text_truncated": {"type": "boolean"},
+        "query": {"type": "string"}, "action": {}, "files": {"type": "array", "items": {"type": "string"}},
         "changes": {"type": "array", "items": {"$ref": "#/$defs/mutation"}},
         "spans": {"type": "object", "additionalProperties": {"type": "array", "items": {"$ref": "#/$defs/span"}}},
         "patches": {"type": "array", "items": {"$ref": "#/$defs/patch"}}, "details": {},

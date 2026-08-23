@@ -133,6 +133,29 @@ func TestTopLevelSchemasCoverEveryPublishedGoField(t *testing.T) {
 	}
 }
 
+func TestPublishedBundleArtifactIDRejectsOuterWhitespace(t *testing.T) {
+	schema := compileSchemas(t)["run-record.schema.json"]
+	payload, err := os.ReadFile(filepath.Join("examples", "run-record.v2.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record map[string]any
+	if err := json.Unmarshal(payload, &record); err != nil {
+		t.Fatal(err)
+	}
+	record["published_bundle"] = map[string]any{
+		"artifact_id": " id ",
+		"sha256":      strings.Repeat("a", 64),
+	}
+	if err := schema.Validate(record); err == nil {
+		t.Fatal("run-record schema accepted a whitespace-padded published_bundle.artifact_id")
+	}
+	record["published_bundle"].(map[string]any)["artifact_id"] = "artifact id"
+	if err := schema.Validate(record); err != nil {
+		t.Fatalf("run-record schema rejected an artifact id with no outer whitespace: %v", err)
+	}
+}
+
 func TestGoBuiltActaEventStreamValidatesPayloadContracts(t *testing.T) {
 	schema := compileSchemas(t)["acta-event.schema.json"]
 	now := time.Date(2026, 8, 19, 10, 0, 0, 0, time.UTC)

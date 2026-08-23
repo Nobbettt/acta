@@ -200,9 +200,11 @@ Without `--redact-reasoning`, private reasoning is retained only in local raw
 streams and `agent.reasoning` normalized events; `run.json` records
 `reasoning_redaction_state: retained_local`. Redact mode removes its text from
 both persisted streams and records `reasoning_redaction_state: redacted`. If
-redaction fails, Acta retains the completed unredacted bundle locally, records
-`reasoning_redaction_state: failed`, and refuses default remote upload. Remote
-upload redaction is independent and never rewrites those local files.
+redaction fails before replacement, Acta retains the completed unredacted
+bundle locally and records `reasoning_redaction_state: failed`. An ambiguous
+post-replacement commit is hash-checked and recorded as `partial` unless the
+original bytes are verified unchanged. Both states refuse default remote
+upload. Remote upload redaction is independent and never rewrites local files.
 
 ## Where it's headed
 

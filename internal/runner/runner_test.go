@@ -1065,7 +1065,28 @@ func TestRunBestEffortOTLPExportFailureIsDefault(t *testing.T) {
 	}
 }
 
-func TestRunKeepsOTLPCredentialsOutOfAgentEnvironment(t *testing.T) {
+func TestPrepareAgentEnvironmentForwardsOnlyTraceCorrelationTelemetry(t *testing.T) {
+	environment := []string{
+		"PATH=/bin",
+		"ACTA_REPORT_TOKEN=private",
+		"OTEL_EXPORTER_OTLP_ENDPOINT=https://collector.example/private-token",
+		"OTEL_EXPORTER_OTLP_TRACES_HEADERS=Authorization=Bearer private",
+		"OTEL_TRACES_SAMPLER=always_off",
+		"TRACEPARENT=00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+		"TRACESTATE=vendor=opaque",
+	}
+	got := prepareAgentEnvironment(environment, "ACTA_REPORT_TOKEN")
+	want := []string{
+		"PATH=/bin",
+		"TRACEPARENT=00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+		"TRACESTATE=vendor=opaque",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("agent environment = %q, want %q", got, want)
+	}
+}
+
+func TestRunKeepsAllOTELEnvironmentOutOfAgentSubprocess(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake shell agents require /bin/sh")
 	}
@@ -1080,8 +1101,8 @@ func TestRunKeepsOTLPCredentialsOutOfAgentEnvironment(t *testing.T) {
 	cwd := t.TempDir()
 	fakeBin := t.TempDir()
 	writeFakeAgent(t, fakeBin, "codex", `#!/bin/sh
-if env | grep -q '^OTEL_EXPORTER_OTLP_TRACES_HEADERS='; then
-  echo 'OTLP header leaked to coding agent' >&2
+if env | grep -q '^OTEL_'; then
+  echo 'OTEL configuration leaked to coding agent' >&2
   exit 23
 fi
 cat >/dev/null
@@ -1089,6 +1110,8 @@ printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n
 `)
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "Authorization=Bearer secret-otlp-token")
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://collector.example/private-token")
+	t.Setenv("OTEL_TRACES_SAMPLER", "always_on")
 
 	record, err := runForTest(context.Background(), Options{
 		Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test", OTLPEndpoint: collector.URL,

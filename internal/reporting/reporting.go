@@ -169,8 +169,8 @@ func UploadRun(ctx context.Context, cfg Config, record *runrecord.Record) error 
 	if maxRedactionLineBytes == 0 {
 		maxRedactionLineBytes = DefaultMaxRedactionLineBytes
 	}
-	if record.ReasoningRedactionState == "failed" && !cfg.AllowUnredactedRemoteReasoning {
-		return errors.New("remote upload refused because local reasoning redaction failed; pass --allow-unredacted-remote-reasoning to explicitly upload the unredacted bundle")
+	if (record.ReasoningRedactionState == "failed" || record.ReasoningRedactionState == "partial") && !cfg.AllowUnredactedRemoteReasoning {
+		return errors.New("remote upload refused because local reasoning redaction did not complete; pass --allow-unredacted-remote-reasoning to explicitly upload the unredacted bundle")
 	}
 	// The upload boundary never trusts the mutable run record as evidence that
 	// content is safe. Default uploads always perform their own idempotent pass.
@@ -888,25 +888,43 @@ func classifyArtifactJSON(file *os.File, kind, path string, maxLineBytes int) (a
 	return sniffArtifactJSON(file, maxLineBytes)
 }
 
+const artifactSniffNonEmptyLines = 16
+
 func sniffArtifactJSON(file *os.File, maxLineBytes int) (artifactJSONFormat, error) {
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return artifactOpaque, err
 	}
 	defer func() { _, _ = file.Seek(0, io.SeekStart) }()
 	reader := bufio.NewReaderSize(file, 64<<10)
-	line, readErr := readBoundedJSONLLine(reader, maxLineBytes)
-	if errors.Is(readErr, errRedactionLineTooLong) {
-		return artifactOpaque, fmt.Errorf("potential JSON artifact exceeds maximum sniff line size of %d bytes", maxLineBytes)
+	jsonLooking := false
+	nonEmptyLines := 0
+	for nonEmptyLines < artifactSniffNonEmptyLines {
+		line, readErr := readBoundedJSONLLine(reader, maxLineBytes)
+		if errors.Is(readErr, errRedactionLineTooLong) {
+			return artifactOpaque, fmt.Errorf("potential JSON artifact exceeds maximum sniff line size of %d bytes", maxLineBytes)
+		}
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) > 0 {
+			nonEmptyLines++
+			if looksLikeJSON(trimmed[0]) {
+				jsonLooking = true
+				if json.Valid(trimmed) {
+					// A valid JSON value on any inspected non-empty line is
+					// conservatively treated as JSONL. If surrounding opaque
+					// lines exist, the JSONL rewriter will refuse the artifact.
+					return artifactJSONLines, nil
+				}
+			}
+		}
+		if readErr != nil {
+			if readErr != io.EOF {
+				return artifactOpaque, readErr
+			}
+			break
+		}
 	}
-	trimmed := bytes.TrimSpace(line)
-	if len(trimmed) == 0 {
+	if !jsonLooking {
 		return artifactOpaque, nil
-	}
-	if !looksLikeJSON(trimmed[0]) {
-		return artifactOpaque, nil
-	}
-	if json.Valid(trimmed) && readErr != io.EOF {
-		return artifactJSONLines, nil
 	}
 	info, err := file.Stat()
 	if err != nil {
@@ -925,7 +943,7 @@ func sniffArtifactJSON(file *os.File, maxLineBytes int) (artifactJSONFormat, err
 	if json.Valid(payload) {
 		return artifactJSONDocument, nil
 	}
-	return artifactOpaque, fmt.Errorf("artifact begins like JSON but is neither valid JSON nor JSONL")
+	return artifactOpaque, fmt.Errorf("artifact contains JSON-looking content but is neither valid JSON nor JSONL")
 }
 
 func looksLikeJSON(first byte) bool {
@@ -1126,6 +1144,7 @@ func structuralPayloadKey(key string) bool {
 		"phase", "status", "visibility", "started_at", "observed_at", "completed_at",
 		"tool", "server", "exit_code", "is_error", "input_chars", "input_truncated",
 		"result_chars", "result_truncated", "output_chars", "output_truncated",
+		"text_chars", "text_truncated",
 		"raw_event_lines", "redacted":
 		return true
 	default:

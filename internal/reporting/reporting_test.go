@@ -438,6 +438,19 @@ func TestRewriteJSONLSnapshotRejectsOversizedLineWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestRedactArtifactSnapshotSniffsJSONLAfterLeadingBlankLines(t *testing.T) {
+	const secret = "reasoning-after-blank-line-4812"
+	file := writeSnapshotFile(t, "\n \t\n"+`{"type":"thinking","thinking":"`+secret+`"}`+"\n")
+	required, err := redactArtifactSnapshot(context.Background(), file, "stderr", "agent.stderr.log", DefaultMaxRedactionLineBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redacted := readOpenFile(t, file)
+	if !required || strings.Contains(redacted, secret) || !strings.Contains(redacted, `"redacted":true`) {
+		t.Fatalf("redaction required=%v snapshot=%q", required, redacted)
+	}
+}
+
 func TestRewriteJSONLSnapshotHonorsCancellationBetweenLines(t *testing.T) {
 	const original = "{\"type\":\"first\"}\n{\"type\":\"second\"}\n"
 	file := writeSnapshotFile(t, original)
@@ -520,6 +533,25 @@ func TestUploadRunAllowsExplicitUnredactedRemoteReasoning(t *testing.T) {
 	}
 	if !strings.Contains(remote.String(), secret) || rawState != "unredacted" {
 		t.Fatalf("explicit upload remote=%q redaction_state=%q", remote.String(), rawState)
+	}
+}
+
+func TestUploadRunRefusesPartialLocalReasoningRedactionByDefault(t *testing.T) {
+	runDir := writeBundle(t)
+	record := testRecord(runDir)
+	record.ReasoningRedactionState = "partial"
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	err := UploadRun(context.Background(), Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+	}, record)
+	if err == nil || !strings.Contains(err.Error(), "remote upload refused") || requests != 0 {
+		t.Fatalf("partial-redaction upload error=%v requests=%d", err, requests)
 	}
 }
 

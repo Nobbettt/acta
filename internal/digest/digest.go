@@ -135,6 +135,8 @@ type Event struct {
 	OutputChars     int                    `json:"output_chars,omitempty"`
 	OutputTruncated bool                   `json:"output_truncated,omitempty"`
 	Text            string                 `json:"text,omitempty"`
+	TextChars       int                    `json:"text_chars,omitempty"`
+	TextTruncated   bool                   `json:"text_truncated,omitempty"`
 	Query           string                 `json:"query,omitempty"`
 	Action          json.RawMessage        `json:"action,omitempty"`
 	Files           []string               `json:"files,omitempty"`
@@ -343,9 +345,13 @@ func normalizeEvent(event *Event) {
 	for _, value := range []*string{
 		&event.ProviderEvent, &event.ID, &event.ParentID, &event.ThreadID, &event.SessionID,
 		&event.TaskID, &event.Phase, &event.Status, &event.Visibility, &event.Tool,
-		&event.Server, &event.Command, &event.ErrorMessage, &event.Output, &event.Text, &event.Query,
+		&event.Server, &event.Command, &event.ErrorMessage, &event.Output, &event.Query,
 	} {
 		capString(value)
+	}
+	event.Text, event.TextChars, event.TextTruncated = capText(event.Text)
+	if event.localReasoningText != "" {
+		event.localReasoningText, event.TextChars, event.TextTruncated = capText(event.localReasoningText)
 	}
 	event.Input = capInput(event.Input)
 	event.Result = capInput(event.Result)
@@ -965,6 +971,13 @@ func Truncate(s string, limit int) string {
 // size in characters. The field is output_chars, so count runes, not bytes.
 func capOutput(text string) (string, int) {
 	return Truncate(text, MaxEventOutputChars), utf8.RuneCountInString(text)
+}
+
+// capText applies the normalized free-text byte limit while preserving the
+// original character count and an explicit structural truncation marker.
+func capText(text string) (string, int, bool) {
+	bounded := Truncate(text, MaxEventTextBytes)
+	return bounded, utf8.RuneCountInString(text), len(bounded) < len(text)
 }
 
 func setEventOutput(event *Event, text string) {
