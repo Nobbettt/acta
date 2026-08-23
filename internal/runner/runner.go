@@ -92,6 +92,7 @@ type Options struct {
 	MaxRawOutputBytes       int64
 	MaxWorkspaceDiffBytes   int64
 	MaxUploadBytes          int64
+	MaxRedactionLineBytes   int
 	Stream                  bool
 	AgentWritableDirs       []string
 	CodexSandbox            string
@@ -135,6 +136,9 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 	}
 	if opts.MaxUploadBytes < 0 {
 		return nil, fmt.Errorf("--max-upload-bytes must not be negative")
+	}
+	if opts.MaxRedactionLineBytes < 0 {
+		return nil, fmt.Errorf("--max-redaction-line-bytes must not be negative")
 	}
 	if err := validateGitEvidenceExcludes(opts.GitEvidenceExcludes); err != nil {
 		return nil, err
@@ -356,9 +360,6 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 		RuntimeBundleSHA256:     preparedRuntime.BundleSHA256,
 		ReasoningRedactionState: "retained_local",
 	}
-	if opts.RedactReasoning {
-		record.ReasoningRedactionState = "redacted"
-	}
 
 	cmd := exec.Command(spec.Path, spec.Args...)
 	// WaitDelay remains a final guard for inherited pipes that do not close
@@ -482,9 +483,24 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 	record.OTLPError = otlpError
 	FinalizeRecordOutcome(record, runErr)
 
+	reasoningRedacted := false
 	if opts.RedactReasoning {
-		if redactErr := redactReasoningRawStream(stagedStdoutPath); redactErr != nil {
-			return record, fmt.Errorf("redact reasoning from raw stream: %w", redactErr)
+		maxRedactionLineBytes := opts.MaxRedactionLineBytes
+		if maxRedactionLineBytes == 0 {
+			maxRedactionLineBytes = reporting.DefaultMaxRedactionLineBytes
+		}
+		if redactErr := redactReasoningRawStream(stagedStdoutPath, maxRedactionLineBytes); redactErr != nil {
+			// The atomic rewrite leaves the original raw stream untouched. Treat
+			// redaction as a late Acta failure, but continue all derivation and
+			// publication so the completed evidence remains recoverable.
+			record.ReasoningRedactionState = "failed"
+			redactErr = fmt.Errorf("reasoning redaction failed; completed run retained unredacted: %w", redactErr)
+			fmt.Fprintf(stderr, "acta: %v\n", redactErr)
+			runErr = errors.Join(runErr, redactErr)
+			FinalizeRecordOutcome(record, runErr)
+		} else {
+			record.ReasoningRedactionState = "redacted"
+			reasoningRedacted = true
 		}
 	}
 
@@ -496,7 +512,7 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 	if opts.CapturePrompt {
 		capturedPrompt = opts.Prompt
 	}
-	finalDigest, postErr := postRun(ctx, record, stagingDir, gitExcludes, opts.MaxWorkspaceDiffBytes, digester, capturedPrompt, opts.RedactReasoning, stderr, runErr)
+	finalDigest, postErr := postRun(ctx, record, stagingDir, gitExcludes, opts.MaxWorkspaceDiffBytes, digester, capturedPrompt, reasoningRedacted, stderr, runErr)
 	if postErr != nil {
 		runErr = errors.Join(runErr, postErr)
 	}
@@ -563,6 +579,7 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 			RepositoryID:                   opts.RepositoryID,
 			AllowInsecureHTTP:              opts.AllowInsecureHTTP,
 			MaxUploadBytes:                 opts.MaxUploadBytes,
+			MaxRedactionLineBytes:          opts.MaxRedactionLineBytes,
 			AllowUnredactedRemoteReasoning: opts.AllowUnredactedRemoteReasoning,
 		}, record); err != nil {
 			err = fmt.Errorf("upload report: %w", err)

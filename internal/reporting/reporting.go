@@ -39,12 +39,16 @@ type Config struct {
 	// upload snapshot removes provider-private reasoning while leaving the local
 	// run bundle untouched.
 	AllowUnredactedRemoteReasoning bool
+	// MaxRedactionLineBytes bounds one JSONL record while preparing redacted
+	// upload snapshots. Zero selects DefaultMaxRedactionLineBytes.
+	MaxRedactionLineBytes int
 }
 
 const (
-	maxEventsRequestBytes       = actaevents.MaxEventsRequestBytes
-	eventsEnvelopeBytes         = len(`{"events":[]}`)
-	DefaultMaxUploadBytes int64 = 1 << 30
+	maxEventsRequestBytes              = actaevents.MaxEventsRequestBytes
+	eventsEnvelopeBytes                = len(`{"events":[]}`)
+	DefaultMaxUploadBytes        int64 = 1 << 30
+	DefaultMaxRedactionLineBytes       = 8 << 20
 )
 
 type createRunRequest struct {
@@ -157,12 +161,24 @@ func UploadRun(ctx context.Context, cfg Config, record *runrecord.Record) error 
 	if artifactLimit < 0 {
 		return errors.New("max upload bytes must not be negative")
 	}
-	redactRemoteReasoning := record.ReasoningRedactionState != "redacted" && !cfg.AllowUnredactedRemoteReasoning
+	maxRedactionLineBytes := cfg.MaxRedactionLineBytes
+	if maxRedactionLineBytes < 0 {
+		return errors.New("max redaction line bytes must not be negative")
+	}
+	if maxRedactionLineBytes == 0 {
+		maxRedactionLineBytes = DefaultMaxRedactionLineBytes
+	}
+	if record.ReasoningRedactionState == "failed" && !cfg.AllowUnredactedRemoteReasoning {
+		return errors.New("remote upload refused because local reasoning redaction failed; pass --allow-unredacted-remote-reasoning to explicitly upload the unredacted bundle")
+	}
+	// The upload boundary never trusts the mutable run record as evidence that
+	// content is safe. Default uploads always perform their own idempotent pass.
+	redactRemoteReasoning := !cfg.AllowUnredactedRemoteReasoning
 	remoteRedactionState := "redacted"
-	if !redactRemoteReasoning && record.ReasoningRedactionState != "redacted" {
+	if !redactRemoteReasoning {
 		remoteRedactionState = "unredacted"
 	}
-	eventFile, eventTempPath, err := snapshotEventStreamLimit(ctx, record.RunDir, artifactLimit, redactRemoteReasoning)
+	eventFile, eventTempPath, err := snapshotEventStreamLimit(ctx, record.RunDir, artifactLimit, redactRemoteReasoning, maxRedactionLineBytes)
 	if err != nil {
 		return err
 	}
@@ -174,7 +190,7 @@ func UploadRun(ctx context.Context, cfg Config, record *runrecord.Record) error 
 	if err != nil {
 		return err
 	}
-	artifacts, err := buildArtifactsContext(ctx, record.RunDir, artifactRefs, eventFile, eventTempPath, artifactLimit, redactRemoteReasoning, remoteRedactionState)
+	artifacts, err := buildArtifactsContext(ctx, record.RunDir, artifactRefs, eventFile, eventTempPath, artifactLimit, redactRemoteReasoning, remoteRedactionState, maxRedactionLineBytes)
 	if err != nil {
 		return err
 	}
@@ -678,7 +694,7 @@ func dedupeArtifactRefs(refs []actaevents.ArtifactRef) []actaevents.ArtifactRef 
 	return out
 }
 
-func buildArtifactsContext(ctx context.Context, runDir string, refs []actaevents.ArtifactRef, eventFile *os.File, eventTempPath string, maxBytes int64, redactReasoning bool, redactionState string) ([]artifactUpload, error) {
+func buildArtifactsContext(ctx context.Context, runDir string, refs []actaevents.ArtifactRef, eventFile *os.File, eventTempPath string, maxBytes int64, redactReasoning bool, redactionState string, maxRedactionLineBytes int) ([]artifactUpload, error) {
 	resolvedRunDir, err := filepath.EvalSymlinks(runDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve run directory: %w", err)
@@ -731,7 +747,7 @@ func buildArtifactsContext(ctx context.Context, runDir string, refs []actaevents
 				return nil, fmt.Errorf("snapshot artifact %s: %w", ref.Path, err)
 			}
 			if redactReasoning {
-				if err := redactArtifactSnapshot(file, ref.Kind); err != nil {
+				if err := redactArtifactSnapshot(ctx, file, ref.Kind, maxRedactionLineBytes); err != nil {
 					_ = file.Close()
 					_ = os.Remove(tempPath)
 					closeArtifacts(artifacts)
@@ -783,12 +799,12 @@ func artifactReasoningRedactionState(kind, reasoningState string) string {
 	}
 }
 
-func redactArtifactSnapshot(file *os.File, kind string) error {
+func redactArtifactSnapshot(ctx context.Context, file *os.File, kind string, maxLineBytes int) error {
 	switch kind {
 	case "raw_stdout":
-		return rewriteJSONLSnapshot(file, redactProviderReasoningLine)
+		return rewriteJSONLSnapshot(ctx, file, maxLineBytes, redactProviderReasoningLine)
 	case "event_stream":
-		return rewriteJSONLSnapshot(file, redactActaReasoningEventLine)
+		return rewriteJSONLSnapshot(ctx, file, maxLineBytes, redactActaReasoningEventLine)
 	case "run_record":
 		return redactRunRecordSnapshot(file)
 	default:
@@ -796,9 +812,12 @@ func redactArtifactSnapshot(file *os.File, kind string) error {
 	}
 }
 
-func rewriteJSONLSnapshot(file *os.File, transform func([]byte) ([]byte, error)) error {
+func rewriteJSONLSnapshot(ctx context.Context, file *os.File, maxLineBytes int, transform func([]byte) ([]byte, error)) error {
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return err
+	}
+	if maxLineBytes <= 0 {
+		return fmt.Errorf("maximum redaction line size must be positive")
 	}
 	temp, err := os.CreateTemp("", "acta-redacted-snapshot-*")
 	if err != nil {
@@ -809,9 +828,17 @@ func rewriteJSONLSnapshot(file *os.File, transform func([]byte) ([]byte, error))
 		_ = temp.Close()
 		_ = os.Remove(tempPath)
 	}()
-	reader := bufio.NewReader(file)
+	reader := bufio.NewReaderSize(file, 64<<10)
+	lineNumber := 0
 	for {
-		line, readErr := reader.ReadBytes('\n')
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		lineNumber++
+		line, readErr := readBoundedJSONLLine(reader, maxLineBytes)
+		if errors.Is(readErr, errRedactionLineTooLong) {
+			return fmt.Errorf("JSONL line %d exceeds maximum redaction line size of %d bytes", lineNumber, maxLineBytes)
+		}
 		if len(line) > 0 {
 			redacted, err := transform(line)
 			if err != nil {
@@ -828,6 +855,9 @@ func rewriteJSONLSnapshot(file *os.File, transform func([]byte) ([]byte, error))
 			break
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if _, err := temp.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
@@ -842,6 +872,23 @@ func rewriteJSONLSnapshot(file *os.File, transform func([]byte) ([]byte, error))
 	}
 	_, err = file.Seek(0, io.SeekStart)
 	return err
+}
+
+var errRedactionLineTooLong = errors.New("redaction line too long")
+
+func readBoundedJSONLLine(reader *bufio.Reader, maxLineBytes int) ([]byte, error) {
+	line := make([]byte, 0, min(maxLineBytes, 64<<10))
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		if len(fragment) > maxLineBytes-len(line) {
+			return nil, errRedactionLineTooLong
+		}
+		line = append(line, fragment...)
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		return line, err
+	}
 }
 
 func redactProviderReasoningLine(line []byte) ([]byte, error) {
@@ -878,9 +925,17 @@ func redactActaReasoningEventLine(line []byte) ([]byte, error) {
 		return nil, fmt.Errorf("parse Acta event for remote reasoning redaction: %w", err)
 	}
 	changed := setReasoningRedactionState(event)
-	if typ, _ := event["type"].(string); typ == actaevents.TypeAgentReasoning {
-		if reasoningPayload, ok := event["payload"]; ok {
-			changed = redactReasoningValue(reasoningPayload) || changed
+	typ, _ := event["type"].(string)
+	if payload, ok := event["payload"]; ok {
+		switch {
+		case typ == actaevents.TypeAgentReasoning, !reasoningFreeActaEventType(typ):
+			structural, structuralChanged := redactToStructuralReferences(payload)
+			event["payload"] = structural
+			changed = structuralChanged || changed
+		default:
+			// Known reasoning-free payloads retain their documented content, but
+			// still receive a defensive recursive pass for nested provider blocks.
+			changed = redactReasoningValue(payload) || changed
 		}
 	}
 	if !changed {
@@ -894,6 +949,63 @@ func redactActaReasoningEventLine(line []byte) ([]byte, error) {
 		encoded = append(encoded, '\n')
 	}
 	return encoded, nil
+}
+
+// reasoningFreeActaEventType is deliberately explicit. A newly introduced
+// event type is redacted until this upload privacy boundary has audited it.
+func reasoningFreeActaEventType(typ string) bool {
+	switch typ {
+	case actaevents.TypeRunStarted, actaevents.TypeRunCompleted, actaevents.TypeRunFailed,
+		actaevents.TypeAgentPrompt, actaevents.TypeAgentInput, actaevents.TypeAgentMessage,
+		actaevents.TypeAgentTodo, actaevents.TypeAgentTodoUpdated,
+		actaevents.TypeAgentTaskStarted, actaevents.TypeAgentTaskProgress,
+		actaevents.TypeAgentTaskCompleted, actaevents.TypeAgentTaskIncomplete,
+		actaevents.TypeAgentPermissionDenied, actaevents.TypeAgentRuntimeConfigured,
+		actaevents.TypeAgentStructuredOutput, actaevents.TypeAgentRateLimitObserved,
+		actaevents.TypeAgentError, actaevents.TypeAgentLifecycle,
+		actaevents.TypeToolCallCompleted, actaevents.TypeToolCallIncomplete,
+		actaevents.TypeToolResultOrphaned, actaevents.TypeShellCommandComplete,
+		actaevents.TypeShellCommandIncomplete, actaevents.TypeWebSearchCompleted,
+		actaevents.TypeWebSearchIncomplete, actaevents.TypeFileRead,
+		actaevents.TypeFileWritten, actaevents.TypeFileWriteIncomplete,
+		actaevents.TypeDiffGenerated, actaevents.TypeTokensReported:
+		return true
+	default:
+		return false
+	}
+}
+
+func redactToStructuralReferences(value any) (any, bool) {
+	payload, ok := value.(map[string]any)
+	if !ok {
+		return map[string]any{"redacted": true}, true
+	}
+	changed := false
+	for key := range payload {
+		if structuralPayloadKey(key) {
+			continue
+		}
+		delete(payload, key)
+		changed = true
+	}
+	if redacted, _ := payload["redacted"].(bool); !redacted {
+		payload["redacted"] = true
+		changed = true
+	}
+	return payload, changed
+}
+
+func structuralPayloadKey(key string) bool {
+	switch key {
+	case "kind", "provider_event", "id", "parent_id", "thread_id", "session_id", "task_id",
+		"phase", "status", "visibility", "started_at", "observed_at", "completed_at",
+		"tool", "server", "exit_code", "is_error", "input_chars", "input_truncated",
+		"result_chars", "result_truncated", "output_chars", "output_truncated",
+		"raw_event_lines", "redacted":
+		return true
+	default:
+		return false
+	}
 }
 
 func redactReasoningValue(value any) bool {
@@ -1015,7 +1127,7 @@ func hashFileContext(ctx context.Context, file *os.File) (string, int64, error) 
 	return hex.EncodeToString(hasher.Sum(nil)), size, nil
 }
 
-func snapshotEventStreamLimit(ctx context.Context, runDir string, maxBytes int64, redactReasoning bool) (*os.File, string, error) {
+func snapshotEventStreamLimit(ctx context.Context, runDir string, maxBytes int64, redactReasoning bool, maxRedactionLineBytes int) (*os.File, string, error) {
 	resolvedRunDir, err := filepath.EvalSymlinks(runDir)
 	if err != nil {
 		return nil, "", fmt.Errorf("resolve run directory: %w", err)
@@ -1031,7 +1143,7 @@ func snapshotEventStreamLimit(ctx context.Context, runDir string, maxBytes int64
 		return nil, "", err
 	}
 	if redactReasoning {
-		if err := redactArtifactSnapshot(file, "event_stream"); err != nil {
+		if err := redactArtifactSnapshot(ctx, file, "event_stream", maxRedactionLineBytes); err != nil {
 			_ = file.Close()
 			_ = os.Remove(tempPath)
 			return nil, "", fmt.Errorf("redact reasoning from event snapshot: %w", err)

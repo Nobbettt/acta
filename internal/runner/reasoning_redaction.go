@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,7 +17,10 @@ import (
 // objects identified as reasoning/thinking retain structural identity only.
 // Invalid non-empty JSON fails closed: redact mode must never publish bytes it
 // could not classify.
-func redactReasoningRawStream(path string) error {
+func redactReasoningRawStream(path string, maxLineBytes int) error {
+	if maxLineBytes <= 0 {
+		return fmt.Errorf("maximum redaction line size must be positive")
+	}
 	info, err := os.Lstat(path)
 	if err != nil {
 		return err
@@ -35,9 +39,15 @@ func redactReasoningRawStream(path string) error {
 	}
 	defer writer.Abort()
 
-	reader := bufio.NewReader(input)
+	reader := bufio.NewReaderSize(input, 64<<10)
+	lineNumber := 0
 	for {
-		line, readErr := reader.ReadBytes('\n')
+		lineNumber++
+		line, readErr := readBoundedReasoningLine(reader, maxLineBytes)
+		if readErr == errReasoningLineTooLong {
+			_ = input.Close()
+			return fmt.Errorf("JSONL line %d exceeds maximum reasoning-redaction line size of %d bytes", lineNumber, maxLineBytes)
+		}
 		if len(line) > 0 {
 			redacted, redactErr := redactReasoningLine(line)
 			if redactErr != nil {
@@ -61,6 +71,23 @@ func redactReasoningRawStream(path string) error {
 		return err
 	}
 	return writer.Commit()
+}
+
+var errReasoningLineTooLong = errors.New("reasoning-redaction line too long")
+
+func readBoundedReasoningLine(reader *bufio.Reader, maxLineBytes int) ([]byte, error) {
+	line := make([]byte, 0, min(maxLineBytes, 64<<10))
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		if len(fragment) > maxLineBytes-len(line) {
+			return nil, errReasoningLineTooLong
+		}
+		line = append(line, fragment...)
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		return line, err
+	}
 }
 
 func redactReasoningLine(line []byte) ([]byte, error) {

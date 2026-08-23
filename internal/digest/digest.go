@@ -146,6 +146,7 @@ type Event struct {
 	FilePatchErrors []string               `json:"file_patch_errors,omitempty"`
 	Details         json.RawMessage        `json:"details,omitempty"`
 	RawEventLines   []int                  `json:"raw_event_lines,omitempty"`
+	Redacted        bool                   `json:"redacted,omitempty"`
 
 	srcLine       int // raw JSONL line that produced this event, for the sidecar join
 	inputFilePath string
@@ -175,6 +176,7 @@ func RedactReasoning(d *Digest) {
 		event := &d.Timeline[i]
 		identity := strings.ToLower(event.Kind + " " + event.ProviderEvent)
 		if event.Kind == KindReasoning || strings.Contains(identity, "reasoning") || strings.Contains(identity, "thinking") {
+			event.Redacted = true
 			event.Text = ""
 			event.localReasoningText = ""
 			event.Input = nil

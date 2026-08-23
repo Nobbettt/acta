@@ -90,7 +90,7 @@
         "process_containment": {"enum": ["posix_process_group", "windows_job", "direct_process"]},
         "agent_config_mode": {"enum": ["ambient_ephemeral", "project_only_ephemeral", "authoritative_bundle"]},
         "runtime_bundle_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "reasoning_redaction_state": {"enum": ["retained_local", "redacted"]}
+        "reasoning_redaction_state": {"enum": ["retained_local", "redacted", "failed"]}
       }
     },
     "span": {
@@ -124,7 +124,8 @@
         "changes": {"type": "array", "items": {"$ref": "#/$defs/mutation"}},
         "spans": {"type": "object", "additionalProperties": {"type": "array", "items": {"$ref": "#/$defs/span"}}},
         "patches": {"type": "array", "items": {"$ref": "#/$defs/patch"}}, "details": {},
-        "raw_event_lines": {"type": "array", "items": {"type": "integer", "minimum": 1}}
+        "raw_event_lines": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+        "redacted": {"type": "boolean"}
       }
     },
     "fileRead": {

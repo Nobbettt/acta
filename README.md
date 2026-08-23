@@ -149,12 +149,13 @@ records from outside the process, stages output beyond the agent's writable
 roots, and publishes the bundle after platform cleanup. Windows uses a Job
 Object. POSIX uses a process group; a child that creates a new session or
 process group is outside the portable guarantee.
-Both agents' events are digested into one normalized timeline, and the raw
-streams are preserved unmodified so old runs can be re-digested with better
-parsers (`acta digest`). A span the exporter dropped is gone; a bundle can be
-re-projected from its raw evidence. Live-only per-write patches are preserved
-from the prior digest and regeneration fails explicitly when that evidence
-cannot be validated.
+Both agents' events are digested into one normalized timeline. By default the
+raw streams are preserved byte-identical so old runs can be re-digested with
+better parsers (`acta digest`); `--redact-reasoning` instead rewrites the raw
+stdout stream to remove private reasoning text. A span the exporter dropped is
+gone; a bundle can be re-projected from its raw evidence. Live-only per-write
+patches are preserved from the prior digest and regeneration fails explicitly
+when that evidence cannot be validated.
 
 ## Watch runs live
 
@@ -188,6 +189,8 @@ local bundle remains full fidelity. The explicit
 content and marks its artifact metadata unredacted. The total snapshot budget
 defaults to 1 GiB; use
 `--max-upload-bytes 0` only when an explicit unlimited upload is intended.
+Reasoning redaction bounds each JSONL record to 8 MiB by default; use
+`--max-redaction-line-bytes` to set a different explicit bound.
 
 By default spans carry only structural metadata (tool names, ids, exit codes,
 tokens, timing). Content that can hold secrets or local paths stays out of the
@@ -196,8 +199,10 @@ surfaced messages and tool content, never provider reasoning/thinking text.
 Without `--redact-reasoning`, private reasoning is retained only in local raw
 streams and `agent.reasoning` normalized events; `run.json` records
 `reasoning_redaction_state: retained_local`. Redact mode removes its text from
-both persisted streams and records `reasoning_redaction_state: redacted`.
-Remote upload redaction is independent and never rewrites those local files.
+both persisted streams and records `reasoning_redaction_state: redacted`. If
+redaction fails, Acta retains the completed unredacted bundle locally, records
+`reasoning_redaction_state: failed`, and refuses default remote upload. Remote
+upload redaction is independent and never rewrites those local files.
 
 ## Where it's headed
 

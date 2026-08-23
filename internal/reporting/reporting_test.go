@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -239,13 +240,18 @@ func TestUploadRunRedactsRemoteReasoningByDefaultForEveryAgentShape(t *testing.T
 			if strings.Contains(remote.String(), secret) {
 				t.Fatalf("remote upload leaked private reasoning: %s", remote.String())
 			}
-			for filename, state := range redactionStates {
-				want := "not_required"
-				if filename == "run.json" || filename == rawName || filename == actaevents.Filename {
-					want = "redacted"
-				}
-				if state != want {
-					t.Errorf("artifact %s redaction_state = %q, want %s", filename, state, want)
+			wantStates := map[string]string{
+				"run.json":          "redacted",
+				rawName:             "redacted",
+				"digest.json":       "not_required",
+				actaevents.Filename: "redacted",
+			}
+			if len(redactionStates) != len(wantStates) {
+				t.Fatalf("uploaded artifact states = %v, want exact set %v", redactionStates, wantStates)
+			}
+			for filename, want := range wantStates {
+				if state, ok := redactionStates[filename]; !ok || state != want {
+					t.Errorf("artifact %s redaction_state = %q (present %v), want %s", filename, state, ok, want)
 				}
 			}
 			local, err := os.ReadFile(filepath.Join(runDir, rawName))
@@ -256,6 +262,130 @@ func TestUploadRunRedactsRemoteReasoningByDefaultForEveryAgentShape(t *testing.T
 				t.Fatal("default remote redaction changed the local full-fidelity bundle")
 			}
 		})
+	}
+}
+
+func TestUploadRunRedactsUnsupportedClaudeDetailsByDefault(t *testing.T) {
+	const secret = "private-redacted-thinking-48301"
+	runDir := t.TempDir()
+	rawName := "claude-output.jsonl"
+	writeFile(t, filepath.Join(runDir, rawName), `{"type":"assistant","message":{"content":[{"type":"redacted_thinking","data":"`+secret+`"}]}}`+"\n")
+	writeFile(t, filepath.Join(runDir, "run.json"), `{"id":"run-1","reasoning_redaction_state":"retained_local"}`+"\n")
+	writeFile(t, filepath.Join(runDir, "digest.json"), `{"run_id":"run-1"}`+"\n")
+	writeFile(t, filepath.Join(runDir, actaevents.Filename), strings.Join([]string{
+		`{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":1,"timestamp":"2026-07-06T12:00:00Z","source":"acta","type":"run.started","payload":{"agent":"claude","reasoning_redaction_state":"retained_local"}}`,
+		`{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":2,"timestamp":"2026-07-06T12:00:00.5Z","source":"acta","type":"agent.event.unsupported","payload":{"kind":"unsupported","provider_event":"assistant.redacted_thinking","details":{"type":"redacted_thinking","data":"` + secret + `"},"raw_event_lines":[1]},"artifact_refs":[{"kind":"raw_stdout","path":"` + rawName + `","lines":[1]}]}`,
+		`{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":3,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed","payload":{"status":"ok"},"artifact_refs":[{"kind":"run_record","path":"run.json"},{"kind":"raw_stdout","path":"` + rawName + `"},{"kind":"digest","path":"digest.json"},{"kind":"event_stream","path":"acta-events.jsonl"}]}`,
+		"",
+	}, "\n"))
+	record := testRecord(runDir)
+	record.Agent = "claude"
+	record.ReasoningRedactionState = "retained_local"
+
+	var remote bytes.Buffer
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/api/ingest/runs/run-1/events" || request.URL.Path == "/api/ingest/runs/run-1/artifacts" {
+			payload, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Error(err)
+			}
+			remote.Write(payload)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	if err := UploadRun(context.Background(), Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+	}, record); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(remote.String(), secret) || strings.Contains(remote.String(), `"details"`) {
+		t.Fatalf("remote upload retained unsupported reasoning details: %s", remote.String())
+	}
+	if !strings.Contains(remote.String(), `"provider_event":"assistant.redacted_thinking"`) ||
+		!strings.Contains(remote.String(), `"raw_event_lines":[1]`) ||
+		!strings.Contains(remote.String(), `"redacted":true`) {
+		t.Fatalf("remote upload lost structural unsupported-event references: %s", remote.String())
+	}
+}
+
+func TestUploadRunRedactsEvenWhenRunRecordClaimsRedacted(t *testing.T) {
+	const secret = "tampered-redaction-state-secret-8901"
+	runDir := writeBundle(t)
+	rawName := "codex-events.jsonl"
+	writeFile(t, filepath.Join(runDir, rawName), `{"type":"item.completed","item":{"type":"reasoning","text":"`+secret+`"}}`+"\n")
+	writeFile(t, filepath.Join(runDir, "run.json"), `{"id":"run-1","reasoning_redaction_state":"redacted"}`+"\n")
+	eventsPath := filepath.Join(runDir, actaevents.Filename)
+	events := readTestFile(t, eventsPath)
+	events = strings.Replace(events, `{"kind":"event_stream","path":"acta-events.jsonl"}`, `{"kind":"raw_stdout","path":"codex-events.jsonl"},{"kind":"event_stream","path":"acta-events.jsonl"}`, 1)
+	writeFile(t, eventsPath, events)
+	record := testRecord(runDir)
+	record.ReasoningRedactionState = "redacted"
+
+	var remote bytes.Buffer
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" {
+			payload, _ := io.ReadAll(request.Body)
+			remote.Write(payload)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	if err := UploadRun(context.Background(), Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+	}, record); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(remote.String(), secret) {
+		t.Fatalf("mutable redaction-state claim bypassed upload redaction: %s", remote.String())
+	}
+	if local := readTestFile(t, filepath.Join(runDir, rawName)); !strings.Contains(local, secret) {
+		t.Fatal("upload redaction rewrote the local artifact")
+	}
+}
+
+func TestRewriteJSONLSnapshotRejectsOversizedLineWithoutMutation(t *testing.T) {
+	const original = `{"type":"thinking","thinking":"private"}` + "\n"
+	file := writeSnapshotFile(t, original)
+	err := rewriteJSONLSnapshot(context.Background(), file, 16, redactProviderReasoningLine)
+	if err == nil || !strings.Contains(err.Error(), "line 1 exceeds maximum") {
+		t.Fatalf("rewrite error = %v, want explicit oversized-line error", err)
+	}
+	if got := readOpenFile(t, file); got != original {
+		t.Fatalf("oversized redaction changed snapshot = %q, want %q", got, original)
+	}
+}
+
+func TestRewriteJSONLSnapshotHonorsCancellationBetweenLines(t *testing.T) {
+	const original = "{\"type\":\"first\"}\n{\"type\":\"second\"}\n"
+	file := writeSnapshotFile(t, original)
+	ctx, cancel := context.WithCancel(context.Background())
+	transforms := 0
+	err := rewriteJSONLSnapshot(ctx, file, 1024, func(line []byte) ([]byte, error) {
+		transforms++
+		cancel()
+		return line, nil
+	})
+	if !errors.Is(err, context.Canceled) || transforms != 1 {
+		t.Fatalf("rewrite error = %v, transforms = %d; want cancellation after one line", err, transforms)
+	}
+	if got := readOpenFile(t, file); got != original {
+		t.Fatalf("canceled redaction changed snapshot = %q, want %q", got, original)
+	}
+}
+
+func TestRedactActaReasoningEventLineRedactsUnknownTypeByDefault(t *testing.T) {
+	const secret = "future-private-content-1209"
+	original := []byte(`{"type":"agent.future.event","payload":{"kind":"future","provider_event":"future.block","details":{"text":"` + secret + `"},"raw_event_lines":[7]}}` + "\n")
+	redacted, err := redactActaReasoningEventLine(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(redacted), secret) || strings.Contains(string(redacted), `"details"`) {
+		t.Fatalf("unknown event retained free-text payload: %s", redacted)
+	}
+	if !strings.Contains(string(redacted), `"raw_event_lines":[7]`) || !strings.Contains(string(redacted), `"redacted":true`) {
+		t.Fatalf("unknown event lost structural references: %s", redacted)
 	}
 }
 
@@ -668,6 +798,43 @@ func writeFile(t *testing.T, path string, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func readTestFile(t *testing.T, path string) string {
+	t.Helper()
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(payload)
+}
+
+func writeSnapshotFile(t *testing.T, content string) *os.File {
+	t.Helper()
+	file, err := os.CreateTemp(t.TempDir(), "snapshot-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	if _, err := file.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	return file
+}
+
+func readOpenFile(t *testing.T, file *os.File) string {
+	t.Helper()
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := io.ReadAll(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(payload)
 }
 
 func stringPtr(value string) *string {

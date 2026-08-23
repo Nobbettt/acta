@@ -134,15 +134,17 @@ Current fields:
 - `runtime_bundle_sha256` - SHA-256 of the exact validated bundle bytes when a
   runtime bundle was used; its path and contents are not copied into metadata
 - `reasoning_redaction_state` - `retained_local` when private reasoning remains
-  only in raw/normalized bundle streams, or `redacted` when its text was
-  removed from persisted bundle artifacts
+  only in raw/normalized bundle streams, `redacted` when its text was removed
+  from persisted bundle artifacts, or `failed` when redaction failed and the
+  completed bundle was retained locally with its original evidence
 - `published_bundle` - optional digest-bound artifact reference written only by
   an Acta-owned publication path; launchers must not substitute agent output
 
 ## Raw Files
 
 Within the configured combined raw-output budget, stdout and stderr are
-preserved without interpretation. Exceeding the budget fails the run.
+preserved without interpretation by default. `--redact-reasoning` atomically
+rewrites the stdout JSONL stream instead. Exceeding the budget fails the run.
 
 For Codex, stdout is expected to be JSONL from `codex exec --json`.
 

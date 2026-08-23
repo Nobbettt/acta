@@ -301,7 +301,9 @@ func (s *claudeParseState) consumeAssistantContent(content *ClaudeContent, item 
 		s.lastText = content.Text
 	case "thinking":
 		if strings.TrimSpace(content.Thinking) == "" {
-			return
+			// Reasoning redaction deliberately leaves an empty structural content
+			// block. Retain its event and raw-line reference on re-digestion.
+			e.Redacted = true
 		}
 		e.Kind = KindReasoning
 		e.ProviderEvent = "assistant.thinking"

@@ -96,6 +96,7 @@ func runCommand(ctx context.Context, args []string, stdin io.Reader, stdout io.W
 	fs.StringVar(&opts.ReportMode, "report-mode", "local", "report mode: local, hybrid, or stream")
 	fs.DurationVar(&opts.UploadTimeout, "upload-timeout", runner.DefaultUploadTimeout, "hybrid upload timeout such as 30s or 2m; 0 disables the upload deadline")
 	fs.Int64Var(&opts.MaxUploadBytes, "max-upload-bytes", reporting.DefaultMaxUploadBytes, "total immutable upload snapshot byte limit; 0 explicitly disables the limit")
+	fs.IntVar(&opts.MaxRedactionLineBytes, "max-redaction-line-bytes", reporting.DefaultMaxRedactionLineBytes, "maximum JSONL line size accepted while redacting reasoning")
 	fs.BoolVar(&opts.AllowInsecureHTTP, "allow-insecure-http", false, "allow plaintext HTTP report upload to a non-loopback backend")
 	fs.Func("git-evidence-exclude", "workspace-relative generated/control path to omit from Git evidence; repeatable", func(value string) error {
 		opts.GitEvidenceExcludes = append(opts.GitEvidenceExcludes, value)
@@ -126,6 +127,10 @@ func runCommand(ctx context.Context, args []string, stdin io.Reader, stdout io.W
 	}
 	if opts.MaxUploadBytes < 0 {
 		fmt.Fprintln(stderr, "--max-upload-bytes must not be negative")
+		return 2
+	}
+	if opts.MaxRedactionLineBytes < 0 {
+		fmt.Fprintln(stderr, "--max-redaction-line-bytes must not be negative")
 		return 2
 	}
 	if err := applyUploadAliases(&opts.ReportToken, ingestToken, &reportTokenEnv, ingestTokenEnv, &opts.ReportMode); err != nil {
@@ -211,6 +216,7 @@ func uploadCommand(ctx context.Context, args []string, stdout io.Writer, stderr 
 	var repositoryID string
 	var timeout time.Duration
 	var maxUploadBytes int64
+	var maxRedactionLineBytes int
 	var allowInsecureHTTP bool
 	var allowUnredactedRemoteReasoning bool
 	fs.StringVar(&runDir, "run-dir", "", "Acta run bundle directory; can also be passed as the single argument")
@@ -223,6 +229,7 @@ func uploadCommand(ctx context.Context, args []string, stdout io.Writer, stderr 
 	fs.StringVar(&repositoryID, "repository-id", "", "repository UUID for scoped report upload")
 	fs.DurationVar(&timeout, "timeout", 2*time.Minute, "upload timeout such as 30s or 2m; 0 disables timeout")
 	fs.Int64Var(&maxUploadBytes, "max-upload-bytes", reporting.DefaultMaxUploadBytes, "total immutable upload snapshot byte limit; 0 explicitly disables the limit")
+	fs.IntVar(&maxRedactionLineBytes, "max-redaction-line-bytes", reporting.DefaultMaxRedactionLineBytes, "maximum JSONL line size accepted while redacting reasoning")
 	fs.BoolVar(&allowInsecureHTTP, "allow-insecure-http", false, "allow plaintext HTTP upload to a non-loopback backend")
 	fs.BoolVar(&allowUnredactedRemoteReasoning, "allow-unredacted-remote-reasoning", false, "explicitly allow private reasoning text in the remote upload")
 
@@ -238,6 +245,10 @@ func uploadCommand(ctx context.Context, args []string, stdout io.Writer, stderr 
 	}
 	if maxUploadBytes < 0 {
 		fmt.Fprintln(stderr, "--max-upload-bytes must not be negative")
+		return 2
+	}
+	if maxRedactionLineBytes < 0 {
+		fmt.Fprintln(stderr, "--max-redaction-line-bytes must not be negative")
 		return 2
 	}
 	if err := applyUploadAliases(&reportToken, ingestToken, &reportTokenEnv, ingestTokenEnv, nil); err != nil {
@@ -287,6 +298,7 @@ func uploadCommand(ctx context.Context, args []string, stdout io.Writer, stderr 
 		OrganizationID:                 organizationID,
 		RepositoryID:                   repositoryID,
 		MaxUploadBytes:                 maxUploadBytes,
+		MaxRedactionLineBytes:          maxRedactionLineBytes,
 		AllowInsecureHTTP:              allowInsecureHTTP,
 		AllowUnredactedRemoteReasoning: allowUnredactedRemoteReasoning,
 	}, record); err != nil {

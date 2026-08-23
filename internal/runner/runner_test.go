@@ -19,6 +19,7 @@ import (
 
 	"github.com/nobbettt/acta/internal/actaevents"
 	"github.com/nobbettt/acta/internal/agents"
+	"github.com/nobbettt/acta/internal/reporting"
 	"github.com/nobbettt/acta/internal/runrecord"
 )
 
@@ -1146,6 +1147,63 @@ func TestRunRedactReasoningRemovesTextFromEntireBundle(t *testing.T) {
 	}
 }
 
+func TestRunRedactionFailurePublishesUnredactedEvidenceAndRefusesDefaultUpload(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	const malformed = "malformed-private-evidence-not-json"
+	cwd := t.TempDir()
+	fakeBin := t.TempDir()
+	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
+		`printf '`+malformed+`\n'`+"\n"+
+		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	record, err := runForTest(context.Background(), Options{
+		Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test", RedactReasoning: true,
+	}, io.Discard, io.Discard)
+	if err == nil || record == nil || !strings.Contains(err.Error(), "reasoning redaction failed") {
+		t.Fatalf("record=%+v error=%v, want a clear retained-bundle redaction failure", record, err)
+	}
+	if record.ReasoningRedactionState != "failed" || record.RunDir == "" || record.RecoveryDir != "" {
+		t.Fatalf("redaction-failure record = %+v", record)
+	}
+	if err := verifyCompleteBundle(record.RunDir, record); err != nil {
+		t.Fatalf("published redaction-failure bundle is incomplete: %v", err)
+	}
+	wantRaw := strings.Join([]string{
+		`{"type":"thread.started","thread_id":"thread-test"}`,
+		`{"type":"turn.started"}`,
+		malformed,
+		`{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`,
+		"",
+	}, "\n")
+	if got := readFile(t, filepath.Join(record.RunDir, record.RawStdoutArtifact)); got != wantRaw {
+		t.Fatalf("retained raw evidence = %q, want byte-identical %q", got, wantRaw)
+	}
+	saved, readErr := ReadRecord(record.RunDir)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if saved.ReasoningRedactionState != "failed" || !strings.Contains(saved.Error, "reasoning redaction failed") {
+		t.Fatalf("saved redaction-failure record = %+v", saved)
+	}
+	assertFileContains(t, filepath.Join(record.RunDir, actaevents.Filename), `"type":"run.failed"`)
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	uploadErr := reporting.UploadRun(context.Background(), reporting.Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+	}, saved)
+	if uploadErr == nil || !strings.Contains(uploadErr.Error(), "remote upload refused") || requests != 0 {
+		t.Fatalf("default failed-redaction upload error=%v requests=%d", uploadErr, requests)
+	}
+}
+
 // Run ids must be unique — the timestamp is only second-granular, so uniqueness
 // rests on the random suffix. A collision would let one run overwrite another's
 // bundle (guarded belt-and-suspenders by os.Mkdir on the run dir).
@@ -1221,6 +1279,7 @@ func TestRunRejectsNegativeResourceOptions(t *testing.T) {
 		{MaxRawOutputBytes: -1},
 		{MaxWorkspaceDiffBytes: -1},
 		{MaxUploadBytes: -1},
+		{MaxRedactionLineBytes: -1},
 	} {
 		if _, err := Run(context.Background(), opts, io.Discard, io.Discard); err == nil {
 			t.Fatalf("Run(%+v) accepted a negative resource option", opts)

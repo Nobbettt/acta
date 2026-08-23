@@ -76,7 +76,8 @@
         "file_patches": {"type": "array", "items": {"$ref": "#/$defs/patch"}},
         "file_patch_status": {"enum": ["captured", "partial", "unavailable", "preserved"]},
         "file_patch_errors": {"type": "array", "items": {"type": "string"}}, "details": {},
-        "raw_event_lines": {"type": "array", "items": {"type": "integer", "minimum": 1}}
+        "raw_event_lines": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+        "redacted": {"type": "boolean"}
       }
     },
     "tokens": {

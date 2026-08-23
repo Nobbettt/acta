@@ -79,8 +79,9 @@ type Record struct {
 	AgentConfigMode            string `json:"agent_config_mode,omitempty"`
 	RuntimeBundleSHA256        string `json:"runtime_bundle_sha256,omitempty"`
 	// ReasoningRedactionState records whether provider-private reasoning text
-	// remains in the local-only raw/normalized streams or was removed from the
-	// bundle entirely. Reasoning text is never written to digest.json or OTLP.
+	// remains in the local-only raw/normalized streams, was removed from the
+	// bundle entirely, or could not be redacted. Reasoning text is never written
+	// to digest.json or OTLP.
 	ReasoningRedactionState string `json:"reasoning_redaction_state,omitempty"`
 	// PublishedBundle is populated only by an Acta-owned publication path. A
 	// launcher may reuse this digest-bound reference instead of trusting a
@@ -144,7 +145,7 @@ func (r *Record) Validate() error {
 		if !oneOf(r.AgentConfigMode, "ambient_ephemeral", "project_only_ephemeral", "authoritative_bundle") {
 			return fmt.Errorf("run record has invalid agent_config_mode %q", r.AgentConfigMode)
 		}
-		if r.ReasoningRedactionState != "" && !oneOf(r.ReasoningRedactionState, "retained_local", "redacted") {
+		if r.ReasoningRedactionState != "" && !oneOf(r.ReasoningRedactionState, "retained_local", "redacted", "failed") {
 			return fmt.Errorf("run record has invalid reasoning_redaction_state %q", r.ReasoningRedactionState)
 		}
 		if r.PublishedBundle != nil {

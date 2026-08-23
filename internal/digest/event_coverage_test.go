@@ -122,3 +122,48 @@ func TestClaudeCapturesRuntimeTasksOrphansPermissionsAndTermination(t *testing.T
 		}
 	}
 }
+
+func TestClaudeRedactedThinkingRetainsStructuralReasoningEvent(t *testing.T) {
+	originalRaw := strings.Join([]string{
+		`{"type":"system","subtype":"init","session_id":"session-1"}`,
+		`{"type":"assistant","session_id":"session-1","message":{"id":"message-1","content":[{"type":"thinking","thinking":"private chain of thought"}]}}`,
+		`{"type":"result","subtype":"success","session_id":"session-1","is_error":false}`,
+	}, "\n") + "\n"
+	redactedRaw := strings.Replace(originalRaw, `{"type":"thinking","thinking":"private chain of thought"}`, `{"type":"thinking"}`, 1)
+
+	original, err := parseClaude(strings.NewReader(originalRaw), newWorkspace(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	redacted, err := parseClaude(strings.NewReader(redactedRaw), newWorkspace(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(redacted.Timeline) != len(original.Timeline) {
+		t.Fatalf("redacted timeline event count = %d, original = %d", len(redacted.Timeline), len(original.Timeline))
+	}
+	originalReasoning := findTimelineKind(original.Timeline, KindReasoning)
+	redactedReasoning := findTimelineKind(redacted.Timeline, KindReasoning)
+	if originalReasoning == nil || redactedReasoning == nil {
+		t.Fatalf("reasoning events original=%+v redacted=%+v", originalReasoning, redactedReasoning)
+	}
+	if originalReasoning.LocalReasoningText() != "private chain of thought" || originalReasoning.Redacted {
+		t.Fatalf("original reasoning event = %+v / %q", originalReasoning, originalReasoning.LocalReasoningText())
+	}
+	if !redactedReasoning.Redacted || redactedReasoning.LocalReasoningText() != "" ||
+		redactedReasoning.Kind != originalReasoning.Kind ||
+		redactedReasoning.ProviderEvent != originalReasoning.ProviderEvent ||
+		strings.TrimSpace(redactedReasoning.Text) != "" ||
+		len(redactedReasoning.RawEventLines) != 1 || redactedReasoning.RawEventLines[0] != 2 {
+		t.Fatalf("redacted structural reasoning event = %+v / %q", redactedReasoning, redactedReasoning.LocalReasoningText())
+	}
+}
+
+func findTimelineKind(timeline []Event, kind string) *Event {
+	for index := range timeline {
+		if timeline[index].Kind == kind {
+			return &timeline[index]
+		}
+	}
+	return nil
+}
