@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	SchemaVersion    = 2
+	SchemaVersion    = 3
 	MinSchemaVersion = 2
 
 	OutcomeCompleted   = "completed"
@@ -328,6 +328,35 @@ type Digest struct {
 
 	projectionBytes      int
 	projectionLimitBytes int
+}
+
+// Validate checks the versioned fields that readers must interpret before
+// using a persisted digest. Schema v3 adds not_sampled without changing the
+// closed v2 OTLP status vocabulary.
+func (d *Digest) Validate() error {
+	if d == nil {
+		return fmt.Errorf("digest is nil")
+	}
+	if d.SchemaVersion < MinSchemaVersion || d.SchemaVersion > SchemaVersion {
+		return fmt.Errorf("unsupported digest schema_version %d (supported %d..%d)", d.SchemaVersion, MinSchemaVersion, SchemaVersion)
+	}
+	validOTLPStatus := d.OTLPStatus == "" || oneOf(d.OTLPStatus, "not_configured", "exported", "failed")
+	if d.SchemaVersion >= 3 {
+		validOTLPStatus = validOTLPStatus || d.OTLPStatus == "not_sampled"
+	}
+	if !validOTLPStatus {
+		return fmt.Errorf("digest schema_version %d has invalid otlp_status %q", d.SchemaVersion, d.OTLPStatus)
+	}
+	return nil
+}
+
+func oneOf(value string, allowed ...string) bool {
+	for _, candidate := range allowed {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Digest) projectionLimit() int {

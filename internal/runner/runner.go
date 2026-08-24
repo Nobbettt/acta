@@ -154,7 +154,7 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 		return nil, err
 	}
 	if otlpFailurePolicy == OTLPExportFailurePolicyRequired {
-		if reason := tracing.DeliveryUnavailableReason(opts.OTLPEndpoint); reason != "" {
+		if reason := tracing.DeliveryUnavailableReasonWithForceRoot(opts.OTLPEndpoint, opts.OTLPForceRoot); reason != "" {
 			return nil, fmt.Errorf("--otlp-export-failure-policy required cannot deliver traces: %s", reason)
 		}
 	}
@@ -488,6 +488,9 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 		} else {
 			otlpStatus = "not_sampled"
 			record.TraceID = ""
+			if otlpFailurePolicy == OTLPExportFailurePolicyRequired {
+				telemetryErr = errors.Join(telemetryErr, errors.New("required OTLP export did not deliver a trace because the root span was not sampled"))
+			}
 		}
 	}
 	record.OTLPStatus = otlpStatus

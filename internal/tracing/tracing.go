@@ -54,6 +54,16 @@ func Enabled(endpointFlag string) bool {
 // DeliveryUnavailableReason reports startup configuration which makes a
 // required trace export impossible rather than merely fallible.
 func DeliveryUnavailableReason(endpointFlag string) string {
+	return deliveryUnavailableReason(endpointFlag, false)
+}
+
+// DeliveryUnavailableReasonWithForceRoot also accounts for the caller
+// deliberately ignoring otherwise valid inbound trace context.
+func DeliveryUnavailableReasonWithForceRoot(endpointFlag string, forceRoot bool) string {
+	return deliveryUnavailableReason(endpointFlag, forceRoot)
+}
+
+func deliveryUnavailableReason(endpointFlag string, forceRoot bool) string {
 	if sdkDisabled() {
 		return "OTEL_SDK_DISABLED=true disables OpenTelemetry"
 	}
@@ -66,6 +76,9 @@ func DeliveryUnavailableReason(endpointFlag string) string {
 	sampler := strings.ToLower(strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER")))
 	if sampler == "always_off" {
 		return "OTEL_TRACES_SAMPLER=always_off disables sampling"
+	}
+	if sampler == "parentbased_always_off" && (forceRoot || !inboundParentSpanContext().IsValid()) {
+		return "OTEL_TRACES_SAMPLER=parentbased_always_off disables sampling without an inbound parent context"
 	}
 	if sampler == "traceidratio" {
 		ratio, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER_ARG")), 64)
@@ -85,6 +98,14 @@ func endpointConfigured(endpointFlag string) bool {
 	return strings.TrimSpace(endpointFlag) != "" ||
 		strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")) != "" ||
 		strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")) != ""
+}
+
+func inboundParentSpanContext() trace.SpanContext {
+	parentCtx := propagation.TraceContext{}.Extract(context.Background(), propagation.MapCarrier{
+		"traceparent": os.Getenv("TRACEPARENT"),
+		"tracestate":  os.Getenv("TRACESTATE"),
+	})
+	return trace.SpanContextFromContext(parentCtx)
 }
 
 // Run is one live-traced agent run. All methods are nil-receiver safe so the
@@ -200,11 +221,8 @@ func newRun(ctx context.Context, provider *sdktrace.TracerProvider, cfg Config) 
 	}
 	if cfg.ForceRoot {
 		startOpts = append(startOpts, trace.WithNewRoot())
-	} else {
-		startCtx = propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier{
-			"traceparent": os.Getenv("TRACEPARENT"),
-			"tracestate":  os.Getenv("TRACESTATE"),
-		})
+	} else if parent := inboundParentSpanContext(); parent.IsValid() {
+		startCtx = trace.ContextWithRemoteSpanContext(ctx, parent)
 	}
 	r.rootCtx, r.root = r.tracer.Start(startCtx, "invoke_agent "+cfg.Agent, startOpts...)
 	r.sampled = r.root.IsRecording() && r.root.SpanContext().IsSampled()

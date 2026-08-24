@@ -156,7 +156,8 @@ delivery select `--otlp-export-failure-policy required`; setup/flush status
 remains recorded, and failure is returned after the bundle is finalized
 without changing the agent outcome. A required configuration that disables or
 cannot initialize delivery by construction is rejected at startup rather than
-being treated as an untraced success.
+being treated as an untraced success. A root sampled out at runtime is recorded
+as `not_sampled` and produces the same post-bundle operational failure.
 
 ## Report Upload
 

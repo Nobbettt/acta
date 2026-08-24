@@ -1073,12 +1073,17 @@ func TestRunRequiredOTLPRejectsImpossibleDeliveryAtStartup(t *testing.T) {
 			environment: map[string]string{"OTEL_TRACES_SAMPLER": "always_off"},
 			want:        "OTEL_TRACES_SAMPLER=always_off disables sampling",
 		},
+		{
+			name: "root sampling disabled without inbound parent", endpoint: "http://127.0.0.1:4318/v1/traces",
+			environment: map[string]string{"OTEL_TRACES_SAMPLER": "parentbased_always_off"},
+			want:        "OTEL_TRACES_SAMPLER=parentbased_always_off disables sampling without an inbound parent context",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			for _, name := range []string{
 				"OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG",
-				"OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+				"OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "TRACEPARENT", "TRACESTATE",
 			} {
 				t.Setenv(name, "")
 			}
@@ -1092,6 +1097,51 @@ func TestRunRequiredOTLPRejectsImpossibleDeliveryAtStartup(t *testing.T) {
 				t.Fatalf("startup result = record %#v, error %v; want clear impossible-delivery error containing %q", record, err, test.want)
 			}
 		})
+	}
+}
+
+func TestRunRequiredOTLPUnsampledRootPreservesOutcomeAndBundle(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	requests := make(chan struct{}, 1)
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case requests <- struct{}{}:
+		default:
+		}
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer collector.Close()
+
+	cwd := t.TempDir()
+	fakeBin := t.TempDir()
+	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
+		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("OTEL_TRACES_SAMPLER", "parentbased_always_on")
+	t.Setenv("TRACEPARENT", "00-0123456789abcdef0123456789abcdef-0123456789abcdef-00")
+
+	record, err := runForTest(context.Background(), Options{
+		Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test", OTLPEndpoint: collector.URL,
+		OTLPExportFailurePolicy: OTLPExportFailurePolicyRequired,
+	}, io.Discard, io.Discard)
+	if err == nil || !errors.Is(err, ErrTelemetryOnlyFailure) || !strings.Contains(err.Error(), "root span was not sampled") {
+		t.Fatalf("required unsampled run error = %v, want telemetry-only failure", err)
+	}
+	if record == nil || !record.OK || record.TerminationReason != "completed" || record.OTLPStatus != "not_sampled" || record.TraceID != "" {
+		t.Fatalf("required unsampled record = %#v, want preserved successful outcome and truthful telemetry status", record)
+	}
+	if err := verifyCompleteBundle(record.RunDir, record); err != nil {
+		t.Fatalf("required unsampled run did not preserve a complete bundle: %v", err)
+	}
+	assertFileContains(t, filepath.Join(record.RunDir, "digest.json"), `"otlp_status": "not_sampled"`)
+	assertFileContains(t, filepath.Join(record.RunDir, actaevents.Filename), `"otlp_status":"not_sampled"`)
+	select {
+	case <-requests:
+		t.Fatal("unsampled root unexpectedly exported a trace")
+	default:
 	}
 }
 

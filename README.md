@@ -176,7 +176,9 @@ Launchers must validate the successful Acta-owned `run.json` as well as the
 code before treating it as an operational warning. Required mode rejects
 startup configurations that make delivery impossible, including a missing
 endpoint, `OTEL_SDK_DISABLED=true`, `OTEL_TRACES_EXPORTER=none`, and an
-unconditionally disabled sampler.
+unconditionally disabled sampler. If parent sampling or another runtime
+decision still drops the root, Acta records `not_sampled`, preserves the
+bundle, and exits with telemetry-only code 86.
 The deprecated `--otlp-best-effort` alias still selects best-effort with a
 warning. Combining it with `--otlp-export-failure-policy required` is a startup
 error because those flags request conflicting delivery policies.
@@ -224,9 +226,10 @@ post-replacement commit is hash-checked and recorded as `partial` unless the
 original bytes are verified unchanged. Both states refuse default remote
 upload. Remote upload redaction is independent and never rewrites local files.
 
-Current writers emit run-record schema v3. It adds the `not_sampled` OTLP
-status without changing the closed v2 enum; readers accept both versions and
-reject `not_sampled` when a record still declares v2.
+Current writers emit schema v3 for run records, digests, and Acta events. It
+adds the `not_sampled` OTLP status without changing the closed v2 enums;
+readers accept both versions and reject `not_sampled` when an artifact still
+declares v2.
 
 ## Where it's headed
 

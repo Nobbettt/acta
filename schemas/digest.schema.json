@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Nobbettt/acta/schemas/digest.schema.json",
-  "title": "Acta digest v2",
+  "title": "Acta digest v3",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "producer", "run_id", "agent", "status", "timeline", "metrics", "files", "has_workspace_diff"],
   "properties": {
-    "schema_version": {"const": 2},
+    "schema_version": {"const": 3},
     "producer": {"$ref": "run-record.schema.json#/$defs/producer"},
     "run_id": {"type": "string", "minLength": 1},
     "agent": {"enum": ["codex", "claude"]},

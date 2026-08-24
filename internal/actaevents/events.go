@@ -22,10 +22,13 @@ import (
 )
 
 const (
-	SchemaVersion    = 2
+	SchemaVersion    = 3
 	MinSchemaVersion = 2
-	Source           = "acta"
-	Filename         = "acta-events.jsonl"
+	// ProjectionSchemaVersion versions projection.json independently from the
+	// digest and event contracts it binds by hash.
+	ProjectionSchemaVersion = 2
+	Source                  = "acta"
+	Filename                = "acta-events.jsonl"
 	// MaxEventsRequestBytes is the complete upload-request budget. MaxEventBytes
 	// reserves the JSON array envelope so every writer-valid individual event is
 	// also uploadable as a one-event batch.
@@ -116,7 +119,7 @@ func ValidateEnvelope(event Event, runID string, expectedSequence int) error {
 	return nil
 }
 
-// IsKnownType reports whether typ belongs to the published Acta v2 event
+// IsKnownType reports whether typ belongs to the published Acta event
 // vocabulary. Provider event names are payload metadata, never envelope types.
 func IsKnownType(typ string) bool {
 	switch typ {
@@ -136,15 +139,39 @@ func IsKnownType(typ string) bool {
 	}
 }
 
+func oneOf(value string, allowed ...string) bool {
+	for _, candidate := range allowed {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
+}
+
 func ValidateEvent(event Event, runID string, expectedSequence int) error {
 	if err := ValidateEnvelope(event, runID, expectedSequence); err != nil {
 		return err
 	}
 	if event.SchemaVersion >= 2 && !IsKnownType(event.Type) {
-		return fmt.Errorf("event sequence %d has unknown v2 type %q", event.Sequence, event.Type)
+		return fmt.Errorf("event sequence %d has unknown schema-v%d type %q", event.Sequence, event.SchemaVersion, event.Type)
 	}
 	if len(event.Payload) == 0 || !json.Valid(event.Payload) {
 		return fmt.Errorf("event sequence %d has invalid payload", event.Sequence)
+	}
+	if event.Type == TypeRunStarted {
+		var payload struct {
+			OTLPStatus string `json:"otlp_status"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return fmt.Errorf("event sequence %d has invalid run.started payload: %w", event.Sequence, err)
+		}
+		validOTLPStatus := payload.OTLPStatus == "" || oneOf(payload.OTLPStatus, "not_configured", "exported", "failed")
+		if event.SchemaVersion >= 3 {
+			validOTLPStatus = validOTLPStatus || payload.OTLPStatus == "not_sampled"
+		}
+		if !validOTLPStatus {
+			return fmt.Errorf("event sequence %d schema_version %d has invalid run.started otlp_status %q", event.Sequence, event.SchemaVersion, payload.OTLPStatus)
+		}
 	}
 	for _, ref := range event.ArtifactRefs {
 		if strings.TrimSpace(ref.Kind) == "" || strings.TrimSpace(ref.Path) == "" {
@@ -208,8 +235,10 @@ func BuildForBundle(bundleDir string, record *runrecord.Record, d *digest.Digest
 	if record.ID == "" || d.RunID != "" && d.RunID != record.ID {
 		return nil, fmt.Errorf("digest run_id %q does not match record run_id %q", d.RunID, record.ID)
 	}
-	if d.SchemaVersion != 0 && (d.SchemaVersion < digest.MinSchemaVersion || d.SchemaVersion > digest.SchemaVersion) {
-		return nil, fmt.Errorf("unsupported digest schema_version %d", d.SchemaVersion)
+	if d.SchemaVersion != 0 {
+		if err := d.Validate(); err != nil {
+			return nil, fmt.Errorf("validate digest: %w", err)
+		}
 	}
 	resolved := digest.ResolveOutcome(record, d)
 	if resolved.OK != record.OK {
@@ -453,7 +482,7 @@ func WriteProjectionForRunDir(runDir string, d *digest.Digest) error {
 		Generation    string             `json:"generation"`
 		DigestSHA256  string             `json:"digest_sha256"`
 		EventsSHA256  string             `json:"events_sha256"`
-	}{SchemaVersion: SchemaVersion, Producer: d.Producer, Generation: generation,
+	}{SchemaVersion: ProjectionSchemaVersion, Producer: d.Producer, Generation: generation,
 		DigestSHA256: fmt.Sprintf("%x", sha256.Sum256(digestPayload)), EventsSHA256: fmt.Sprintf("%x", sha256.Sum256(eventPayload))}, "", "  ")
 	if err != nil {
 		return err

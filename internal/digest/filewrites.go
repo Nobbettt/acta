@@ -348,8 +348,8 @@ func restoreCapturedFilePatches(ctx context.Context, runDir string, d *Digest) e
 		d.PatchPreservation = PatchPreservation{Status: "invalid", Error: err.Error()}
 		return fmt.Errorf("parse prior digest for write evidence: %w", err)
 	}
-	if prior.SchemaVersion < MinSchemaVersion || prior.SchemaVersion > SchemaVersion {
-		err := fmt.Errorf("unsupported prior digest schema_version %d", prior.SchemaVersion)
+	if err := prior.Validate(); err != nil {
+		err = fmt.Errorf("validate prior digest: %w", err)
 		d.PatchPreservation = PatchPreservation{Status: "invalid", Error: err.Error()}
 		return err
 	}
