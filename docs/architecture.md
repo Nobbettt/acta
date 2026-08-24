@@ -154,7 +154,9 @@ Export is a live view of the run; the bundle remains the source of truth.
 Configured exporters are best-effort by default. Launchers that require
 delivery select `--otlp-export-failure-policy required`; setup/flush status
 remains recorded, and failure is returned after the bundle is finalized
-without changing the agent outcome.
+without changing the agent outcome. A required configuration that disables or
+cannot initialize delivery by construction is rejected at startup rather than
+being treated as an untraced success.
 
 ## Report Upload
 
@@ -166,6 +168,16 @@ backend. Hybrid mode preserves the local bundle, then posts:
 - terminal event artifact references as raw-body artifact uploads to
   `POST /api/ingest/runs/{run_id}/artifacts`
 - terminal status to `POST /api/ingest/runs/{run_id}/complete`
+
+The default remote snapshot applies schema-aware reasoning redaction to Acta
+events, digests, and declared provider streams. Opaque text is classified for
+the entire artifact one line at a time: valid standalone JSON lines receive
+the provider redaction pass, while an unparseable brace/bracket-opening line or
+multiline JSON continuation marks the artifact `unverified` and withholds it
+from remote upload. Plain diagnostics remain uploadable. The explicit
+`--allow-unredacted-remote-reasoning` mode uploads ambiguous opaque artifacts
+as `unredacted`; all artifact labels in that mode come from content inspection,
+with only verified-clean content labeled `not_required`.
 
 Hybrid upload requires `--report-token` or `--report-token-env`, which Acta
 sends as an ingest bearer token. Local standalone uploads may use the raw local

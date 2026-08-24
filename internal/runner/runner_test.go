@@ -1047,6 +1047,54 @@ func TestRunRequiredOTLPExportFailurePreservesOutcomeAndBundle(t *testing.T) {
 	}
 }
 
+func TestRunRequiredOTLPRejectsImpossibleDeliveryAtStartup(t *testing.T) {
+	tests := []struct {
+		name        string
+		endpoint    string
+		environment map[string]string
+		want        string
+	}{
+		{
+			name: "SDK disabled", endpoint: "http://127.0.0.1:4318/v1/traces",
+			environment: map[string]string{"OTEL_SDK_DISABLED": "true"},
+			want:        "OTEL_SDK_DISABLED=true disables OpenTelemetry",
+		},
+		{
+			name: "trace exporter disabled", endpoint: "http://127.0.0.1:4318/v1/traces",
+			environment: map[string]string{"OTEL_TRACES_EXPORTER": "none"},
+			want:        "OTEL_TRACES_EXPORTER=none disables trace export",
+		},
+		{
+			name: "no endpoint",
+			want: "no OTLP endpoint is configured",
+		},
+		{
+			name: "sampling disabled", endpoint: "http://127.0.0.1:4318/v1/traces",
+			environment: map[string]string{"OTEL_TRACES_SAMPLER": "always_off"},
+			want:        "OTEL_TRACES_SAMPLER=always_off disables sampling",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			for _, name := range []string{
+				"OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG",
+				"OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+			} {
+				t.Setenv(name, "")
+			}
+			for name, value := range test.environment {
+				t.Setenv(name, value)
+			}
+			record, err := Run(context.Background(), Options{
+				OTLPEndpoint: test.endpoint, OTLPExportFailurePolicy: OTLPExportFailurePolicyRequired,
+			}, io.Discard, io.Discard)
+			if record != nil || err == nil || !strings.Contains(err.Error(), "--otlp-export-failure-policy required cannot deliver traces") || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("startup result = record %#v, error %v; want clear impossible-delivery error containing %q", record, err, test.want)
+			}
+		})
+	}
+}
+
 func TestRunBestEffortOTLPExportFailureIsDefault(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake shell agents require /bin/sh")

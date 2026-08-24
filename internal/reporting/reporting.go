@@ -85,6 +85,7 @@ type artifactUpload struct {
 	RedactionState string `json:"redaction_state"`
 	File           *os.File
 	TempPath       string
+	Withheld       bool `json:"-"`
 }
 
 type completionMetadata struct {
@@ -191,7 +192,7 @@ func UploadRun(ctx context.Context, cfg Config, record *runrecord.Record) error 
 	if err != nil {
 		return err
 	}
-	artifacts, err := buildArtifactsContext(ctx, record.RunDir, artifactRefs, eventFile, eventTempPath, artifactLimit, redactRemoteReasoning, remoteRedactionState, maxRedactionLineBytes)
+	artifacts, err := buildArtifactsContext(ctx, record.RunDir, artifactRefs, eventFile, eventTempPath, artifactLimit, redactRemoteReasoning, maxRedactionLineBytes)
 	if err != nil {
 		return err
 	}
@@ -251,6 +252,9 @@ func UploadRun(ctx context.Context, cfg Config, record *runrecord.Record) error 
 		return fmt.Errorf("upload events: %w", markUploadFailed(err))
 	}
 	for _, artifact := range artifacts {
+		if artifact.Withheld {
+			continue
+		}
 		if err := client.postArtifact(ctx, record.ID, artifact); err != nil {
 			return fmt.Errorf("upload artifact %s: %w", artifact.Filename, markUploadFailed(err))
 		}
@@ -695,7 +699,7 @@ func dedupeArtifactRefs(refs []actaevents.ArtifactRef) []actaevents.ArtifactRef 
 	return out
 }
 
-func buildArtifactsContext(ctx context.Context, runDir string, refs []actaevents.ArtifactRef, eventFile *os.File, eventTempPath string, maxBytes int64, redactReasoning bool, redactionState string, maxRedactionLineBytes int) ([]artifactUpload, error) {
+func buildArtifactsContext(ctx context.Context, runDir string, refs []actaevents.ArtifactRef, eventFile *os.File, eventTempPath string, maxBytes int64, redactReasoning bool, maxRedactionLineBytes int) ([]artifactUpload, error) {
 	resolvedRunDir, err := filepath.EvalSymlinks(runDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve run directory: %w", err)
@@ -735,7 +739,8 @@ func buildArtifactsContext(ctx context.Context, runDir string, refs []actaevents
 		}
 		var file *os.File
 		var tempPath string
-		redactionRequired := artifactReferenceMayContainJSON(ref)
+		redactionRequired := true
+		redactionVerified := true
 		if isCanonicalEventArtifact(ref.Path) && eventFile != nil {
 			file, tempPath = eventFile, eventTempPath
 			redactionRequired = true
@@ -750,7 +755,7 @@ func buildArtifactsContext(ctx context.Context, runDir string, refs []actaevents
 				return nil, fmt.Errorf("snapshot artifact %s: %w", ref.Path, err)
 			}
 			if redactReasoning {
-				redactionRequired, err = redactArtifactSnapshot(ctx, file, ref.Kind, ref.Path, maxRedactionLineBytes)
+				redactionVerified, err = redactArtifactSnapshot(ctx, file, ref.Kind, ref.Path, maxRedactionLineBytes)
 				if err != nil {
 					_ = file.Close()
 					_ = os.Remove(tempPath)
@@ -758,6 +763,19 @@ func buildArtifactsContext(ctx context.Context, runDir string, refs []actaevents
 					return nil, fmt.Errorf("redact reasoning from artifact %s: %w", ref.Path, err)
 				}
 			}
+		}
+		if !redactReasoning {
+			inspection, inspectErr := inspectArtifactSnapshot(ctx, file, ref.Kind, ref.Path, maxRedactionLineBytes)
+			if inspectErr != nil {
+				if tempPath != eventTempPath {
+					_ = file.Close()
+					_ = os.Remove(tempPath)
+				}
+				closeArtifacts(artifacts)
+				return nil, fmt.Errorf("inspect reasoning in artifact %s: %w", ref.Path, inspectErr)
+			}
+			redactionRequired = inspection.ContainsReasoning || !inspection.Verified
+			redactionVerified = inspection.Verified
 		}
 		sha256Hex, sizeBytes, err := hashFileContext(ctx, file)
 		if err != nil {
@@ -775,6 +793,17 @@ func buildArtifactsContext(ctx context.Context, runDir string, refs []actaevents
 			return nil, fmt.Errorf("artifact snapshot is %d bytes; maximum is %d", totalBytes, maxBytes)
 		}
 		schemaVersion := int32(actaevents.SchemaVersion)
+		artifactRedactionState := "not_required"
+		withheld := false
+		switch {
+		case !redactReasoning && redactionRequired:
+			artifactRedactionState = "unredacted"
+		case redactReasoning && !redactionVerified:
+			artifactRedactionState = "unverified"
+			withheld = true
+		case redactReasoning && redactionRequired:
+			artifactRedactionState = "redacted"
+		}
 		artifact := artifactUpload{
 			Kind:           ref.Kind,
 			Filename:       ref.Path,
@@ -782,9 +811,10 @@ func buildArtifactsContext(ctx context.Context, runDir string, refs []actaevents
 			SizeBytes:      sizeBytes,
 			SHA256:         sha256Hex,
 			Compression:    compression(ref.Path),
-			RedactionState: artifactReasoningRedactionState(redactionRequired, redactionState),
+			RedactionState: artifactRedactionState,
 			File:           file,
 			TempPath:       tempPath,
+			Withheld:       withheld,
 		}
 		if isCanonicalEventArtifact(ref.Path) {
 			artifact.SchemaVersion = &schemaVersion
@@ -794,11 +824,9 @@ func buildArtifactsContext(ctx context.Context, runDir string, refs []actaevents
 	return artifacts, nil
 }
 
-func artifactReasoningRedactionState(redactionRequired bool, reasoningState string) string {
-	if redactionRequired {
-		return reasoningState
-	}
-	return "not_required"
+type artifactInspection struct {
+	ContainsReasoning bool
+	Verified          bool
 }
 
 type artifactJSONFormat uint8
@@ -814,52 +842,29 @@ func isCanonicalEventArtifact(path string) bool {
 	return filepath.ToSlash(filepath.Clean(filepath.FromSlash(path))) == actaevents.Filename
 }
 
-func artifactReferenceMayContainJSON(ref actaevents.ArtifactRef) bool {
-	extension := strings.ToLower(filepath.Ext(ref.Path))
-	if extension == ".json" || extension == ".jsonl" || isCanonicalEventArtifact(ref.Path) {
-		return true
-	}
-	switch ref.Kind {
-	case "run_record", "digest", "raw_stdout", "event_stream", "event_times":
-		return true
-	default:
-		return false
-	}
-}
-
-// redactArtifactSnapshot classifies from the immutable path and bytes before
-// consulting the mutable artifact kind. JSON never bypasses the privacy pass:
-// unrecognized JSON gets the conservative provider/digest traversal, while a
-// declared JSON artifact whose bytes cannot be parsed is refused.
+// redactArtifactSnapshot uses the declared path/kind only to select a structured
+// schema. Everything else is opaque text: independently parseable JSON lines
+// receive the provider privacy pass, while any JSON-shaped ambiguity is marked
+// unverified so the caller can keep that artifact local-only.
 func redactArtifactSnapshot(ctx context.Context, file *os.File, kind, path string, maxLineBytes int) (bool, error) {
-	format, err := classifyArtifactJSON(file, kind, path, maxLineBytes)
-	if err != nil {
-		return true, err
-	}
+	format := classifyArtifactJSON(kind, path)
 	switch format {
 	case artifactOpaque:
-		// Opaque text can still contain JSON provider events after an arbitrary
-		// number of diagnostic lines. Stream every line: ordinary text remains
-		// byte-identical and JSON-shaped lines receive the privacy pass.
-		return true, rewriteJSONLSnapshot(ctx, file, maxLineBytes, redactJSONShapedProviderLine)
+		return rewriteOpaqueTextSnapshot(ctx, file, maxLineBytes)
 	case artifactJSONDocument:
 		if isRunRecordArtifact(path) {
-			return true, redactRunRecordSnapshot(file)
+			return true, redactRunRecordSnapshot(ctx, file)
 		}
 		if isDigestArtifact(path) {
-			return true, redactDigestSnapshot(file)
+			return true, redactDigestSnapshot(ctx, file)
 		}
-		return true, redactJSONDocumentSnapshot(file)
+		return true, redactJSONDocumentSnapshot(ctx, file)
 	case artifactJSONLines:
-		transform := redactProviderReasoningLine
-		if !artifactReferenceMayContainJSON(actaevents.ArtifactRef{Kind: kind, Path: path}) {
-			transform = redactJSONShapedProviderLine
-		}
-		return true, rewriteJSONLSnapshot(ctx, file, maxLineBytes, transform)
+		return true, rewriteJSONLSnapshot(ctx, file, maxLineBytes, redactProviderReasoningLine)
 	case artifactActaEventStream:
 		return true, rewriteJSONLSnapshot(ctx, file, maxLineBytes, redactActaReasoningEventLine)
 	default:
-		return true, fmt.Errorf("unsupported artifact JSON format")
+		return false, fmt.Errorf("unsupported artifact JSON format")
 	}
 }
 
@@ -871,88 +876,29 @@ func isDigestArtifact(path string) bool {
 	return filepath.ToSlash(filepath.Clean(filepath.FromSlash(path))) == "digest.json"
 }
 
-func classifyArtifactJSON(file *os.File, kind, path string, maxLineBytes int) (artifactJSONFormat, error) {
+func classifyArtifactJSON(kind, path string) artifactJSONFormat {
 	cleanPath := filepath.ToSlash(filepath.Clean(filepath.FromSlash(path)))
 	if cleanPath == actaevents.Filename {
-		return artifactActaEventStream, nil
+		return artifactActaEventStream
 	}
 	extension := strings.ToLower(filepath.Ext(cleanPath))
 	switch extension {
 	case ".jsonl":
-		return artifactJSONLines, nil
+		return artifactJSONLines
 	case ".json":
-		return artifactJSONDocument, nil
+		return artifactJSONDocument
 	}
 
-	// Kind is only a parser hint. A mismatch fails closed; it never turns a
-	// JSON-looking artifact into opaque bytes.
+	// Kind is only a parser hint for declared structured artifacts. Opaque text
+	// is never promoted by sniffing: its full contents are classified line by
+	// line so a later multiline fragment cannot bypass the privacy boundary.
 	switch kind {
 	case "run_record", "digest":
-		return artifactJSONDocument, nil
+		return artifactJSONDocument
 	case "raw_stdout", "event_stream", "event_times":
-		return artifactJSONLines, nil
+		return artifactJSONLines
 	}
-	return sniffArtifactJSON(file, maxLineBytes)
-}
-
-const artifactSniffNonEmptyLines = 16
-
-func sniffArtifactJSON(file *os.File, maxLineBytes int) (artifactJSONFormat, error) {
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return artifactOpaque, err
-	}
-	defer func() { _, _ = file.Seek(0, io.SeekStart) }()
-	reader := bufio.NewReaderSize(file, 64<<10)
-	potentialDocument := false
-	nonEmptyLines := 0
-	for nonEmptyLines < artifactSniffNonEmptyLines {
-		line, readErr := readBoundedJSONLLine(reader, maxLineBytes)
-		if errors.Is(readErr, errRedactionLineTooLong) {
-			return artifactOpaque, fmt.Errorf("potential JSON artifact exceeds maximum sniff line size of %d bytes", maxLineBytes)
-		}
-		trimmed := bytes.TrimSpace(line)
-		if len(trimmed) > 0 {
-			nonEmptyLines++
-			if looksLikeJSON(trimmed[0]) {
-				potentialDocument = true
-				if json.Valid(trimmed) {
-					// A valid JSON container on any inspected non-empty line is
-					// conservatively treated as JSONL. Opaque surrounding lines
-					// remain untouched when the artifact itself was not declared JSON.
-					return artifactJSONLines, nil
-				}
-			}
-		}
-		if readErr != nil {
-			if readErr != io.EOF {
-				return artifactOpaque, readErr
-			}
-			break
-		}
-	}
-	if !potentialDocument {
-		return artifactOpaque, nil
-	}
-	info, err := file.Stat()
-	if err != nil {
-		return artifactOpaque, err
-	}
-	if info.Size() > maxRedactionJSONDocumentBytes {
-		return artifactOpaque, fmt.Errorf("potential JSON artifact is %d bytes; maximum redaction document size is %d", info.Size(), maxRedactionJSONDocumentBytes)
-	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return artifactOpaque, err
-	}
-	payload, err := io.ReadAll(file)
-	if err != nil {
-		return artifactOpaque, err
-	}
-	if json.Valid(payload) {
-		return artifactJSONDocument, nil
-	}
-	// A container prefix is not enough to make an opaque log line JSON-shaped.
-	// Bracketed diagnostics such as "[WARN] retrying" remain plain text.
-	return artifactOpaque, nil
+	return artifactOpaque
 }
 
 func looksLikeJSON(first byte) bool {
@@ -960,6 +906,238 @@ func looksLikeJSON(first byte) bool {
 	// beginning with a timestamp, '-', or a JSON scalar as JSON would reject
 	// otherwise opaque stderr/workspace evidence without improving privacy.
 	return first == '{' || first == '['
+}
+
+func rewriteOpaqueTextSnapshot(ctx context.Context, file *os.File, maxLineBytes int) (bool, error) {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return false, err
+	}
+	if maxLineBytes <= 0 {
+		return false, fmt.Errorf("maximum redaction line size must be positive")
+	}
+	temp, err := os.CreateTemp("", "acta-redacted-snapshot-*")
+	if err != nil {
+		return false, err
+	}
+	tempPath := temp.Name()
+	defer func() {
+		_ = temp.Close()
+		_ = os.Remove(tempPath)
+	}()
+	reader := bufio.NewReaderSize(file, 64<<10)
+	for {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		line, readErr := readBoundedJSONLLine(reader, maxLineBytes)
+		if errors.Is(readErr, errRedactionLineTooLong) {
+			// An overlong opaque line cannot be classified within the configured
+			// privacy bound. Keep the artifact local rather than failing the run.
+			return false, nil
+		}
+		trimmed := bytes.TrimSpace(line)
+		if opaqueLineHasJSONAmbiguity(trimmed) {
+			return false, nil
+		}
+		output := line
+		if len(trimmed) > 0 && looksLikeJSON(trimmed[0]) {
+			output, err = redactProviderReasoningLine(line)
+			if err != nil {
+				return false, err
+			}
+		}
+		if len(output) > 0 {
+			if _, err := temp.Write(output); err != nil {
+				return false, err
+			}
+		}
+		if readErr != nil {
+			if readErr != io.EOF {
+				return false, readErr
+			}
+			break
+		}
+	}
+	if err := temp.Sync(); err != nil {
+		return false, err
+	}
+	if _, err := temp.Seek(0, io.SeekStart); err != nil {
+		return false, err
+	}
+	if err := replaceSnapshotFromReader(ctx, file, temp); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func opaqueLineHasJSONAmbiguity(trimmed []byte) bool {
+	if len(trimmed) == 0 {
+		return false
+	}
+	if looksLikeJSON(trimmed[0]) {
+		return !json.Valid(trimmed)
+	}
+	if trimmed[0] == '}' || trimmed[0] == ']' {
+		return true
+	}
+	if trimmed[0] != '"' {
+		return false
+	}
+	// A pretty-printed object member is not a standalone JSON value, but it
+	// becomes one when wrapped in braces. Recognize that continuation shape so
+	// an opaque log cannot hide a multiline reasoning object after diagnostics.
+	member := bytes.TrimSuffix(trimmed, []byte{','})
+	wrapped := make([]byte, 0, len(member)+2)
+	wrapped = append(wrapped, '{')
+	wrapped = append(wrapped, member...)
+	wrapped = append(wrapped, '}')
+	return json.Valid(wrapped)
+}
+
+func inspectArtifactSnapshot(ctx context.Context, file *os.File, kind, path string, maxLineBytes int) (artifactInspection, error) {
+	format := classifyArtifactJSON(kind, path)
+	switch format {
+	case artifactOpaque:
+		return inspectOpaqueTextSnapshot(ctx, file, maxLineBytes)
+	case artifactJSONDocument:
+		return inspectJSONDocumentSnapshot(ctx, file, maxRedactionJSONDocumentBytes)
+	case artifactJSONLines:
+		return inspectJSONLinesSnapshot(ctx, file, maxLineBytes, inspectProviderValue)
+	case artifactActaEventStream:
+		return inspectJSONLinesSnapshot(ctx, file, maxLineBytes, inspectActaEventValue)
+	default:
+		return artifactInspection{}, fmt.Errorf("unsupported artifact JSON format")
+	}
+}
+
+func inspectOpaqueTextSnapshot(ctx context.Context, file *os.File, maxLineBytes int) (artifactInspection, error) {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return artifactInspection{}, err
+	}
+	defer func() { _, _ = file.Seek(0, io.SeekStart) }()
+	if maxLineBytes <= 0 {
+		return artifactInspection{}, fmt.Errorf("maximum redaction line size must be positive")
+	}
+	reader := bufio.NewReaderSize(file, 64<<10)
+	inspection := artifactInspection{Verified: true}
+	for {
+		if err := ctx.Err(); err != nil {
+			return artifactInspection{}, err
+		}
+		line, readErr := readBoundedJSONLLine(reader, maxLineBytes)
+		if errors.Is(readErr, errRedactionLineTooLong) {
+			inspection.Verified = false
+			return inspection, nil
+		}
+		trimmed := bytes.TrimSpace(line)
+		if opaqueLineHasJSONAmbiguity(trimmed) {
+			inspection.Verified = false
+			return inspection, nil
+		}
+		if len(trimmed) > 0 && looksLikeJSON(trimmed[0]) {
+			var value any
+			if err := decodeJSONUseNumber(trimmed, &value); err != nil {
+				inspection.Verified = false
+				return inspection, nil
+			}
+			inspection.ContainsReasoning = redactReasoningValue(value) || inspection.ContainsReasoning
+		}
+		if readErr != nil {
+			if readErr != io.EOF {
+				return artifactInspection{}, readErr
+			}
+			return inspection, nil
+		}
+	}
+}
+
+type inspectJSONValue func(any) (containsReasoning bool, verified bool)
+
+func inspectJSONLinesSnapshot(ctx context.Context, file *os.File, maxLineBytes int, inspect inspectJSONValue) (artifactInspection, error) {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return artifactInspection{}, err
+	}
+	defer func() { _, _ = file.Seek(0, io.SeekStart) }()
+	if maxLineBytes <= 0 {
+		return artifactInspection{}, fmt.Errorf("maximum redaction line size must be positive")
+	}
+	reader := bufio.NewReaderSize(file, 64<<10)
+	inspection := artifactInspection{Verified: true}
+	for {
+		if err := ctx.Err(); err != nil {
+			return artifactInspection{}, err
+		}
+		line, readErr := readBoundedJSONLLine(reader, maxLineBytes)
+		if errors.Is(readErr, errRedactionLineTooLong) {
+			inspection.Verified = false
+			return inspection, nil
+		}
+		payload := bytes.TrimSpace(line)
+		if len(payload) > 0 {
+			var value any
+			if err := decodeJSONUseNumber(payload, &value); err != nil {
+				inspection.Verified = false
+				return inspection, nil
+			}
+			containsReasoning, verified := inspect(value)
+			inspection.ContainsReasoning = containsReasoning || inspection.ContainsReasoning
+			inspection.Verified = verified && inspection.Verified
+		}
+		if readErr != nil {
+			if readErr != io.EOF {
+				return artifactInspection{}, readErr
+			}
+			return inspection, nil
+		}
+	}
+}
+
+func inspectProviderValue(value any) (bool, bool) {
+	return redactReasoningValue(value), true
+}
+
+func inspectActaEventValue(value any) (bool, bool) {
+	event, ok := value.(map[string]any)
+	if !ok {
+		return false, false
+	}
+	typ, _ := event["type"].(string)
+	payload, hasPayload := event["payload"]
+	if typ == actaevents.TypeAgentReasoning {
+		if !hasPayload {
+			return false, true
+		}
+		_, changed := redactToStructuralReferences(payload)
+		return changed, true
+	}
+	if !reasoningFreeActaEventType(typ) {
+		return false, false
+	}
+	if !hasPayload {
+		return false, true
+	}
+	return redactReasoningValue(payload), true
+}
+
+func inspectJSONDocumentSnapshot(ctx context.Context, file *os.File, maxBytes int64) (artifactInspection, error) {
+	payload, exceeded, err := readFileContextLimit(ctx, file, maxBytes)
+	if err != nil {
+		return artifactInspection{}, err
+	}
+	if exceeded {
+		return artifactInspection{Verified: false}, nil
+	}
+	var value any
+	if err := decodeJSONUseNumberContext(ctx, payload, &value); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return artifactInspection{}, err
+		}
+		return artifactInspection{Verified: false}, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return artifactInspection{}, err
+	}
+	return artifactInspection{ContainsReasoning: redactReasoningValue(value), Verified: true}, nil
 }
 
 func rewriteJSONLSnapshot(ctx context.Context, file *os.File, maxLineBytes int, transform func([]byte) ([]byte, error)) error {
@@ -1052,6 +1230,20 @@ func copyContext(ctx context.Context, dst io.Writer, src io.Reader) error {
 	}
 }
 
+func replaceSnapshotFromReader(ctx context.Context, file *os.File, source io.Reader) error {
+	if err := file.Truncate(0); err != nil {
+		return err
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	if err := copyContext(ctx, file, source); err != nil {
+		return err
+	}
+	_, err := file.Seek(0, io.SeekStart)
+	return err
+}
+
 var errRedactionLineTooLong = errors.New("redaction line too long")
 
 func readBoundedJSONLLine(reader *bufio.Reader, maxLineBytes int) ([]byte, error) {
@@ -1067,14 +1259,6 @@ func readBoundedJSONLLine(reader *bufio.Reader, maxLineBytes int) ([]byte, error
 		}
 		return line, err
 	}
-}
-
-func redactJSONShapedProviderLine(line []byte) ([]byte, error) {
-	payload := bytes.TrimSpace(line)
-	if len(payload) == 0 || !looksLikeJSON(payload[0]) || !json.Valid(payload) {
-		return line, nil
-	}
-	return redactProviderReasoningLine(line)
 }
 
 func redactProviderReasoningLine(line []byte) ([]byte, error) {
@@ -1244,6 +1428,78 @@ func redactReasoningValue(value any) bool {
 	}
 }
 
+func redactReasoningValueContext(ctx context.Context, value any) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	switch typed := value.(type) {
+	case []any:
+		changed := false
+		for _, item := range typed {
+			itemChanged, err := redactReasoningValueContext(ctx, item)
+			if err != nil {
+				return false, err
+			}
+			changed = itemChanged || changed
+		}
+		return changed, nil
+	case map[string]any:
+		kind, _ := typed["type"].(string)
+		if kind == "" {
+			kind, _ = typed["kind"].(string)
+		}
+		kind = strings.ToLower(strings.TrimSpace(kind))
+		if providerReasoningBlockKind(kind) {
+			return redactToStructuralReferencesContext(ctx, typed)
+		}
+		changed := false
+		for key, item := range typed {
+			if err := ctx.Err(); err != nil {
+				return false, err
+			}
+			if userDataPayloadKey(typed, key) {
+				continue
+			}
+			if reasoningContentKey(key, item) {
+				if !isReasoningRedactionMarker(item) {
+					typed[key] = reasoningRedactionMarker
+					changed = true
+				}
+				continue
+			}
+			itemChanged, err := redactReasoningValueContext(ctx, item)
+			if err != nil {
+				return false, err
+			}
+			changed = itemChanged || changed
+		}
+		return changed, nil
+	default:
+		return false, nil
+	}
+}
+
+func redactToStructuralReferencesContext(ctx context.Context, payload map[string]any) (bool, error) {
+	changed := false
+	for key, item := range payload {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		if structuralPayloadKey(key) {
+			continue
+		}
+		if !isReasoningRedactionMarker(item) {
+			payload[key] = reasoningRedactionMarker
+			changed = true
+		}
+	}
+	if redacted, _ := payload["redacted"].(bool); !redacted {
+		payload["redacted"] = true
+		changed = true
+	}
+	return changed, nil
+}
+
 // providerReasoningBlockKind matches the exact provider/digest discriminators
 // Acta understands. Substring matches are deliberately excluded: user-defined
 // values such as "reasoning_result" are data, not provider reasoning blocks.
@@ -1318,18 +1574,60 @@ func setReasoningRedactionState(value any) bool {
 	return changed
 }
 
-func redactRunRecordSnapshot(file *os.File) error {
-	return rewriteJSONDocumentSnapshot(file, runrecord.MaxRecordBytes, func(value any) bool {
+func setReasoningRedactionStateContext(ctx context.Context, value any) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	changed := false
+	switch typed := value.(type) {
+	case []any:
+		for _, item := range typed {
+			itemChanged, err := setReasoningRedactionStateContext(ctx, item)
+			if err != nil {
+				return false, err
+			}
+			changed = itemChanged || changed
+		}
+	case map[string]any:
+		for key, item := range typed {
+			if err := ctx.Err(); err != nil {
+				return false, err
+			}
+			if userDataPayloadKey(typed, key) {
+				continue
+			}
+			if key == "reasoning_redaction_state" {
+				if item != "redacted" {
+					typed[key] = "redacted"
+					changed = true
+				}
+				continue
+			}
+			itemChanged, err := setReasoningRedactionStateContext(ctx, item)
+			if err != nil {
+				return false, err
+			}
+			changed = itemChanged || changed
+		}
+	}
+	return changed, nil
+}
+
+func redactRunRecordSnapshot(ctx context.Context, file *os.File) error {
+	return rewriteJSONDocumentSnapshot(ctx, file, runrecord.MaxRecordBytes, func(ctx context.Context, value any) (bool, error) {
 		record, ok := value.(map[string]any)
 		if !ok {
-			return redactReasoningValue(value)
+			return redactReasoningValueContext(ctx, value)
 		}
-		changed := redactReasoningValue(record)
+		changed, err := redactReasoningValueContext(ctx, record)
+		if err != nil {
+			return false, err
+		}
 		if record["reasoning_redaction_state"] != "redacted" {
 			record["reasoning_redaction_state"] = "redacted"
 			changed = true
 		}
-		return changed
+		return changed, nil
 	})
 }
 
@@ -1338,53 +1636,102 @@ func redactRunRecordSnapshot(file *os.File) error {
 // recursive fallback covers legacy/unknown locations, while reasoning-shaped
 // objects preserve their keys and mask every value outside the structural
 // allowlist used for Acta events.
-func redactDigestSnapshot(file *os.File) error {
-	return rewriteJSONDocumentSnapshot(file, maxRedactionJSONDocumentBytes, func(value any) bool {
-		changed := setReasoningRedactionState(value)
-		return redactReasoningValue(value) || changed
+func redactDigestSnapshot(ctx context.Context, file *os.File) error {
+	return rewriteJSONDocumentSnapshot(ctx, file, maxRedactionJSONDocumentBytes, func(ctx context.Context, value any) (bool, error) {
+		changed, err := setReasoningRedactionStateContext(ctx, value)
+		if err != nil {
+			return false, err
+		}
+		reasoningChanged, err := redactReasoningValueContext(ctx, value)
+		return reasoningChanged || changed, err
 	})
 }
 
-func redactJSONDocumentSnapshot(file *os.File) error {
-	return rewriteJSONDocumentSnapshot(file, maxRedactionJSONDocumentBytes, func(value any) bool {
-		changed := setReasoningRedactionState(value)
-		return redactReasoningValue(value) || changed
+func redactJSONDocumentSnapshot(ctx context.Context, file *os.File) error {
+	return rewriteJSONDocumentSnapshot(ctx, file, maxRedactionJSONDocumentBytes, func(ctx context.Context, value any) (bool, error) {
+		changed, err := setReasoningRedactionStateContext(ctx, value)
+		if err != nil {
+			return false, err
+		}
+		reasoningChanged, err := redactReasoningValueContext(ctx, value)
+		return reasoningChanged || changed, err
 	})
 }
 
-func rewriteJSONDocumentSnapshot(file *os.File, maxBytes int64, transform func(any) bool) error {
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return err
-	}
-	payload, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+func rewriteJSONDocumentSnapshot(ctx context.Context, file *os.File, maxBytes int64, transform func(context.Context, any) (bool, error)) error {
+	payload, exceeded, err := readFileContextLimit(ctx, file, maxBytes)
 	if err != nil {
 		return err
 	}
-	if int64(len(payload)) > maxBytes {
+	if exceeded {
 		return fmt.Errorf("JSON artifact exceeds %d-byte redaction limit", maxBytes)
 	}
 	var value any
-	if err := decodeJSONUseNumber(payload, &value); err != nil {
+	if err := decodeJSONUseNumberContext(ctx, payload, &value); err != nil {
 		return err
 	}
-	if !transform(value) {
+	changed, err := transform(ctx, value)
+	if err != nil {
+		return err
+	}
+	if !changed {
 		_, err := file.Seek(0, io.SeekStart)
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	redacted, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(payload) > 0 && payload[len(payload)-1] == '\n' {
 		redacted = append(redacted, '\n')
 	}
-	return replaceSnapshotContents(file, redacted)
+	return replaceSnapshotContentsContext(ctx, file, redacted)
+}
+
+func readFileContextLimit(ctx context.Context, file *os.File, maxBytes int64) ([]byte, bool, error) {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, false, err
+	}
+	defer func() { _, _ = file.Seek(0, io.SeekStart) }()
+	var payload bytes.Buffer
+	if err := copyContext(ctx, &payload, io.LimitReader(file, maxBytes+1)); err != nil {
+		return nil, false, err
+	}
+	if int64(payload.Len()) > maxBytes {
+		return nil, true, nil
+	}
+	return payload.Bytes(), false, nil
 }
 
 func decodeJSONUseNumber(payload []byte, value any) error {
-	decoder := json.NewDecoder(bytes.NewReader(payload))
+	return decodeJSONUseNumberContext(context.Background(), payload, value)
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(payload []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(payload)
+}
+
+func decodeJSONUseNumberContext(ctx context.Context, payload []byte, value any) error {
+	decoder := json.NewDecoder(contextReader{ctx: ctx, reader: bytes.NewReader(payload)})
 	decoder.UseNumber()
 	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	var extra any
@@ -1394,17 +1741,17 @@ func decodeJSONUseNumber(payload []byte, value any) error {
 		}
 		return err
 	}
-	return nil
+	return ctx.Err()
 }
 
-func replaceSnapshotContents(file *os.File, payload []byte) error {
+func replaceSnapshotContentsContext(ctx context.Context, file *os.File, payload []byte) error {
 	if err := file.Truncate(0); err != nil {
 		return err
 	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
-	if _, err := file.Write(payload); err != nil {
+	if err := copyContext(ctx, file, bytes.NewReader(payload)); err != nil {
 		return err
 	}
 	_, err := file.Seek(0, io.SeekStart)

@@ -42,15 +42,49 @@ type Config struct {
 // flag or one of the standard endpoint env vars. Otherwise no provider is
 // constructed and runs carry zero tracing overhead.
 func Enabled(endpointFlag string) bool {
-	if disabled, err := strconv.ParseBool(strings.TrimSpace(os.Getenv("OTEL_SDK_DISABLED"))); err == nil && disabled {
+	if sdkDisabled() {
 		return false
 	}
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("OTEL_TRACES_EXPORTER")), "none") {
 		return false
 	}
+	return endpointConfigured(endpointFlag)
+}
+
+// DeliveryUnavailableReason reports startup configuration which makes a
+// required trace export impossible rather than merely fallible.
+func DeliveryUnavailableReason(endpointFlag string) string {
+	if sdkDisabled() {
+		return "OTEL_SDK_DISABLED=true disables OpenTelemetry"
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("OTEL_TRACES_EXPORTER")), "none") {
+		return "OTEL_TRACES_EXPORTER=none disables trace export"
+	}
+	if !endpointConfigured(endpointFlag) {
+		return "no OTLP endpoint is configured; set --otlp-endpoint, OTEL_EXPORTER_OTLP_ENDPOINT, or OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
+	}
+	sampler := strings.ToLower(strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER")))
+	if sampler == "always_off" {
+		return "OTEL_TRACES_SAMPLER=always_off disables sampling"
+	}
+	if sampler == "traceidratio" {
+		ratio, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER_ARG")), 64)
+		if err == nil && ratio == 0 {
+			return "OTEL_TRACES_SAMPLER=traceidratio with OTEL_TRACES_SAMPLER_ARG=0 disables sampling"
+		}
+	}
+	return ""
+}
+
+func sdkDisabled() bool {
+	disabled, err := strconv.ParseBool(strings.TrimSpace(os.Getenv("OTEL_SDK_DISABLED")))
+	return err == nil && disabled
+}
+
+func endpointConfigured(endpointFlag string) bool {
 	return strings.TrimSpace(endpointFlag) != "" ||
-		os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" ||
-		os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") != ""
+		strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")) != "" ||
+		strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")) != ""
 }
 
 // Run is one live-traced agent run. All methods are nil-receiver safe so the

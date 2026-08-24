@@ -191,10 +191,73 @@ func TestUploadRunPostsRunEventsArtifactsAndCompletion(t *testing.T) {
 	}
 }
 
-func TestUploadRunPreservesBracketedPlainTextStderr(t *testing.T) {
-	const original = "[WARN] retrying\n"
+func TestUploadRunPreservesPlainTextStderr(t *testing.T) {
+	const original = "warning: retrying provider request\n"
 	if uploaded := uploadBundleStderr(t, original); uploaded != original {
 		t.Fatalf("uploaded stderr = %q, want byte-identical %q", uploaded, original)
+	}
+}
+
+func TestUploadRunWithholdsAmbiguousOpaqueStderrByDefault(t *testing.T) {
+	const secret = "pretty-printed-private-thinking-7041"
+	runDir := writeBundle(t)
+	const stderrName = "agent.stderr.log"
+	writeFile(t, filepath.Join(runDir, stderrName), "provider diagnostic\n"+strings.Join([]string{
+		"{",
+		`  "type": "thinking",`,
+		`  "thinking": "` + secret + `"`,
+		"}",
+		"",
+	}, "\n"))
+	addArtifactRef(t, runDir, `{"kind":"raw_stderr","path":"`+stderrName+`"}`)
+	eventFile, eventTempPath, err := snapshotEventStreamLimit(context.Background(), runDir, 0, true, DefaultMaxRedactionLineBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(eventTempPath)
+	refs, err := terminalArtifactRefsFromFile(context.Background(), eventFile, testRecord(runDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts, err := buildArtifactsContext(context.Background(), runDir, refs, eventFile, eventTempPath, 0, true, DefaultMaxRedactionLineBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeArtifacts(artifacts)
+	foundUnverified := false
+	for _, artifact := range artifacts {
+		if artifact.Filename == stderrName {
+			foundUnverified = artifact.Withheld && artifact.RedactionState == "unverified"
+		}
+	}
+	if !foundUnverified {
+		t.Fatalf("ambiguous opaque stderr was not classified as withheld/unverified: %#v", artifacts)
+	}
+
+	uploaded := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == stderrName {
+			uploaded = true
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	if err := UploadRun(context.Background(), Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+	}, testRecord(runDir)); err != nil {
+		t.Fatal(err)
+	}
+	if uploaded {
+		t.Fatal("ambiguous opaque stderr was uploaded by default")
+	}
+
+	file := writeSnapshotFile(t, "provider diagnostic\n{\n  \"thinking\": \""+secret+"\"\n}\n")
+	verified, err := redactArtifactSnapshot(context.Background(), file, "raw_stderr", stderrName, DefaultMaxRedactionLineBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verified {
+		t.Fatal("ambiguous opaque stderr was classified as verified")
 	}
 }
 
@@ -462,37 +525,37 @@ func TestRewriteJSONLSnapshotRejectsOversizedLineWithoutMutation(t *testing.T) {
 	}
 }
 
-func TestRedactArtifactSnapshotSniffsJSONLAfterLeadingBlankLines(t *testing.T) {
+func TestRedactArtifactSnapshotProcessesJSONLAfterLeadingBlankLines(t *testing.T) {
 	const secret = "reasoning-after-blank-line-4812"
 	file := writeSnapshotFile(t, "\n \t\n"+`{"type":"thinking","thinking":"`+secret+`"}`+"\n")
-	required, err := redactArtifactSnapshot(context.Background(), file, "stderr", "agent.stderr.log", DefaultMaxRedactionLineBytes)
+	verified, err := redactArtifactSnapshot(context.Background(), file, "stderr", "agent.stderr.log", DefaultMaxRedactionLineBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
 	redacted := readOpenFile(t, file)
-	if !required || strings.Contains(redacted, secret) || !strings.Contains(redacted, `"redacted":true`) {
-		t.Fatalf("redaction required=%v snapshot=%q", required, redacted)
+	if !verified || strings.Contains(redacted, secret) || !strings.Contains(redacted, `"redacted":true`) {
+		t.Fatalf("redaction verified=%v snapshot=%q", verified, redacted)
 	}
 }
 
-func TestRedactArtifactSnapshotProcessesJSONAfterSniffWindow(t *testing.T) {
+func TestRedactArtifactSnapshotProcessesJSONAfterManyDiagnosticLines(t *testing.T) {
 	const secret = "reasoning-after-sixteen-plain-lines-8402"
 	var original strings.Builder
-	for i := 0; i < artifactSniffNonEmptyLines; i++ {
+	for i := 0; i < 32; i++ {
 		fmt.Fprintf(&original, "diagnostic line %d\n", i+1)
 	}
 	original.WriteString(`{"type":"thinking","thinking":"` + secret + `"}` + "\n")
 
 	file := writeSnapshotFile(t, original.String())
-	required, err := redactArtifactSnapshot(context.Background(), file, "stderr", "agent.stderr.log", DefaultMaxRedactionLineBytes)
+	verified, err := redactArtifactSnapshot(context.Background(), file, "stderr", "agent.stderr.log", DefaultMaxRedactionLineBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
 	redacted := readOpenFile(t, file)
-	if !required || strings.Contains(redacted, secret) || !strings.Contains(redacted, `"thinking":"`+reasoningRedactionMarker+`"`) {
-		t.Fatalf("redaction required=%v snapshot=%q", required, redacted)
+	if !verified || strings.Contains(redacted, secret) || !strings.Contains(redacted, `"thinking":"`+reasoningRedactionMarker+`"`) {
+		t.Fatalf("redaction verified=%v snapshot=%q", verified, redacted)
 	}
-	if !strings.HasPrefix(redacted, "diagnostic line 1\n") || !strings.Contains(redacted, "diagnostic line 16\n") {
+	if !strings.HasPrefix(redacted, "diagnostic line 1\n") || !strings.Contains(redacted, "diagnostic line 32\n") {
 		t.Fatalf("plain diagnostic lines changed: %q", redacted)
 	}
 }
@@ -512,6 +575,22 @@ func TestRewriteJSONLSnapshotHonorsCancellationBetweenLines(t *testing.T) {
 	}
 	if got := readOpenFile(t, file); got != original {
 		t.Fatalf("canceled redaction changed snapshot = %q, want %q", got, original)
+	}
+}
+
+func TestRewriteJSONDocumentSnapshotHonorsCancellationBetweenChunks(t *testing.T) {
+	original := `{"thinking":"private","padding":"` + strings.Repeat("x", 512<<10) + `"}` + "\n"
+	file := writeSnapshotFile(t, original)
+	ctx := &cancelAfterChecksContext{Context: context.Background(), checksRemaining: 3}
+	err := rewriteJSONDocumentSnapshot(ctx, file, int64(len(original)+1), func(context.Context, any) (bool, error) {
+		t.Fatal("transform ran after cancellation during document read")
+		return false, nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("rewrite error = %v, want context cancellation", err)
+	}
+	if got := readOpenFile(t, file); got != original {
+		t.Fatal("canceled JSON-document redaction changed the snapshot")
 	}
 }
 
@@ -636,6 +715,78 @@ func TestUploadRunAllowsExplicitUnredactedRemoteReasoning(t *testing.T) {
 	}
 	if !strings.Contains(remote.String(), secret) || rawState != "unredacted" {
 		t.Fatalf("explicit upload remote=%q redaction_state=%q", remote.String(), rawState)
+	}
+}
+
+func TestUploadRunDerivesUnredactedLabelsFromArtifactContent(t *testing.T) {
+	const secret = "reasoning-inside-opaque-log-6492"
+	runDir := writeBundle(t)
+	const logName = "provider.stderr.log"
+	const cleanLogName = "provider-clean.stderr.log"
+	writeFile(t, filepath.Join(runDir, logName), "provider diagnostic\n"+`{"type":"thinking","thinking":"`+secret+`"}`+"\n")
+	writeFile(t, filepath.Join(runDir, cleanLogName), "plain provider diagnostic\n")
+	addArtifactRef(t, runDir, `{"kind":"raw_stderr","path":"`+logName+`"}`)
+	addArtifactRef(t, runDir, `{"kind":"raw_stderr","path":"`+cleanLogName+`"}`)
+
+	var remoteLog string
+	remoteStates := map[string]string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" {
+			filename := request.URL.Query().Get("filename")
+			remoteStates[filename] = request.URL.Query().Get("redaction_state")
+			if filename == logName {
+				body, err := io.ReadAll(request.Body)
+				if err != nil {
+					t.Error(err)
+				}
+				remoteLog = string(body)
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	if err := UploadRun(context.Background(), Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+		AllowUnredactedRemoteReasoning: true,
+	}, testRecord(runDir)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(remoteLog, secret) || remoteStates[logName] != "unredacted" {
+		t.Fatalf("reasoning log body/states = %q / %v, want retained content labeled unredacted", remoteLog, remoteStates)
+	}
+	if remoteStates[cleanLogName] != "not_required" {
+		t.Fatalf("clean log state = %q, want not_required; all states: %v", remoteStates[cleanLogName], remoteStates)
+	}
+}
+
+func TestUploadRunExplicitlyUploadsAmbiguousOpaqueStderrAsUnredacted(t *testing.T) {
+	const secret = "explicit-pretty-private-thinking-8093"
+	runDir := writeBundle(t)
+	const stderrName = "provider.stderr.log"
+	writeFile(t, filepath.Join(runDir, stderrName), "diagnostic\n{\n  \"thinking\": \""+secret+"\"\n}\n")
+	addArtifactRef(t, runDir, `{"kind":"raw_stderr","path":"`+stderrName+`"}`)
+
+	var remoteStderr, remoteState string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == stderrName {
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Error(err)
+			}
+			remoteStderr = string(body)
+			remoteState = request.URL.Query().Get("redaction_state")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	if err := UploadRun(context.Background(), Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+		AllowUnredactedRemoteReasoning: true,
+	}, testRecord(runDir)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(remoteStderr, secret) || remoteState != "unredacted" {
+		t.Fatalf("ambiguous stderr body/state = %q / %q, want explicit unredacted upload", remoteStderr, remoteState)
 	}
 }
 
@@ -988,19 +1139,24 @@ func writeBundle(t *testing.T) string {
 	return runDir
 }
 
+func addArtifactRef(t *testing.T, runDir, ref string) {
+	t.Helper()
+	eventsPath := filepath.Join(runDir, actaevents.Filename)
+	events := readTestFile(t, eventsPath)
+	events = strings.Replace(events,
+		`{"kind":"event_stream","path":"acta-events.jsonl"}`,
+		ref+`,{"kind":"event_stream","path":"acta-events.jsonl"}`,
+		1,
+	)
+	writeFile(t, eventsPath, events)
+}
+
 func uploadBundleStderr(t *testing.T, content string) string {
 	t.Helper()
 	runDir := writeBundle(t)
 	const stderrName = "agent.stderr.log"
 	writeFile(t, filepath.Join(runDir, stderrName), content)
-	eventsPath := filepath.Join(runDir, actaevents.Filename)
-	events := readTestFile(t, eventsPath)
-	events = strings.Replace(events,
-		`{"kind":"event_stream","path":"acta-events.jsonl"}`,
-		`{"kind":"raw_stderr","path":"`+stderrName+`"},{"kind":"event_stream","path":"acta-events.jsonl"}`,
-		1,
-	)
-	writeFile(t, eventsPath, events)
+	addArtifactRef(t, runDir, `{"kind":"raw_stderr","path":"`+stderrName+`"}`)
 
 	var uploaded string
 	created := false
@@ -1122,6 +1278,19 @@ func (writer *cancelAfterWrite) Write(payload []byte) (int, error) {
 	writer.writes++
 	writer.cancel()
 	return len(payload), nil
+}
+
+type cancelAfterChecksContext struct {
+	context.Context
+	checksRemaining int
+}
+
+func (ctx *cancelAfterChecksContext) Err() error {
+	if ctx.checksRemaining == 0 {
+		return context.Canceled
+	}
+	ctx.checksRemaining--
+	return nil
 }
 
 func stringPtr(value string) *string {

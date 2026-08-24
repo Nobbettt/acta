@@ -173,7 +173,10 @@ recorded without changing the agent outcome. Use
 requirement. Required mode still finishes and preserves the bundle and its
 semantic result before Acta exits with the documented telemetry-only code 86.
 Launchers must validate the successful Acta-owned `run.json` as well as the
-code before treating it as an operational warning.
+code before treating it as an operational warning. Required mode rejects
+startup configurations that make delivery impossible, including a missing
+endpoint, `OTEL_SDK_DISABLED=true`, `OTEL_TRACES_EXPORTER=none`, and an
+unconditionally disabled sampler.
 
 When `TRACEPARENT` contains valid W3C Trace Context, the `invoke_agent` span
 joins that trace as a child of the supplied remote parent; valid `TRACESTATE`
@@ -186,8 +189,16 @@ Hybrid and standalone upload pin an immutable bundle snapshot before sending
 it. Remote snapshots remove provider-private reasoning by default while the
 local bundle remains full fidelity. The explicit
 `--allow-unredacted-remote-reasoning` flag opts a remote upload back into that
-content and marks its artifact metadata unredacted. The total snapshot budget
-defaults to 1 GiB; use
+content. Artifact labels are content-derived in this mode: detected reasoning
+or content that cannot be verified is `unredacted`, while verified-clean
+artifacts are `not_required`. Declared structured artifacts (Acta events,
+digests, and provider streams) use their schema-specific privacy passes.
+Opaque text is handled only line by line: standalone JSON lines are redacted,
+but an unparseable brace/bracket-opening line or multiline JSON continuation
+makes the artifact `unverified` and local-only for the default upload. The
+explicit unredacted opt-in uploads such an artifact as `unredacted`. Ordinary
+plain-text diagnostics still upload. The total snapshot budget defaults to 1
+GiB; use
 `--max-upload-bytes 0` only when an explicit unlimited upload is intended.
 Reasoning redaction bounds each JSONL record to 8 MiB by default; use
 `--max-redaction-line-bytes` to set a different explicit bound.
