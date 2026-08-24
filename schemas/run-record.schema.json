@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Nobbettt/acta/schemas/run-record.schema.json",
-  "title": "Acta run record v2",
+  "title": "Acta run record v3",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "producer", "id", "agent", "agent_version", "cwd", "run_dir", "command", "started_at", "completed_at", "duration_ms", "ok", "timeout", "termination_reason", "raw_stdout_path", "raw_stderr_path", "raw_stdout_artifact", "raw_stderr_artifact", "prompt_source", "otlp_status", "process_containment", "agent_config_mode"],
   "properties": {
-    "schema_version": {"const": 2},
+    "schema_version": {"const": 3},
     "producer": {"$ref": "#/$defs/producer"},
     "id": {"type": "string", "minLength": 1},
     "trace_id": {"type": "string"},

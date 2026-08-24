@@ -69,10 +69,18 @@ const (
 	TypeTokensReported         = "tokens.reported"
 )
 
+const (
+	ArtifactStatusWithheld           = "withheld"
+	ArtifactRedactionStateUnverified = "unverified"
+)
+
 type ArtifactRef struct {
-	Kind  string `json:"kind"`
-	Path  string `json:"path"`
-	Lines []int  `json:"lines,omitempty"`
+	Kind           string `json:"kind"`
+	Path           string `json:"path"`
+	Lines          []int  `json:"lines,omitempty"`
+	Status         string `json:"status,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+	RedactionState string `json:"redaction_state,omitempty"`
 }
 
 type Event struct {
@@ -137,6 +145,23 @@ func ValidateEvent(event Event, runID string, expectedSequence int) error {
 	}
 	if len(event.Payload) == 0 || !json.Valid(event.Payload) {
 		return fmt.Errorf("event sequence %d has invalid payload", event.Sequence)
+	}
+	for _, ref := range event.ArtifactRefs {
+		if strings.TrimSpace(ref.Kind) == "" || strings.TrimSpace(ref.Path) == "" {
+			return fmt.Errorf("event sequence %d has an invalid artifact reference", event.Sequence)
+		}
+		switch ref.Status {
+		case "":
+			if ref.Reason != "" || ref.RedactionState != "" {
+				return fmt.Errorf("event sequence %d artifact %q has status metadata without a status", event.Sequence, ref.Path)
+			}
+		case ArtifactStatusWithheld:
+			if strings.TrimSpace(ref.Reason) == "" || ref.RedactionState != ArtifactRedactionStateUnverified {
+				return fmt.Errorf("event sequence %d withheld artifact %q requires a reason and redaction_state unverified", event.Sequence, ref.Path)
+			}
+		default:
+			return fmt.Errorf("event sequence %d artifact %q has invalid status %q", event.Sequence, ref.Path, ref.Status)
+		}
 	}
 	return nil
 }

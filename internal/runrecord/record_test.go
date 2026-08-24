@@ -1,6 +1,7 @@
 package runrecord
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -41,6 +42,41 @@ func TestValidateAllowsNotSampledWithoutTraceID(t *testing.T) {
 	record.TraceID = ""
 	if err := record.Validate(); err != nil {
 		t.Fatalf("Validate() rejected not_sampled record: %v", err)
+	}
+}
+
+func TestParseVersionedOTLPStatus(t *testing.T) {
+	tests := []struct {
+		name          string
+		schemaVersion int
+		otlpStatus    string
+		wantError     bool
+	}{
+		{name: "v2 record", schemaVersion: 2, otlpStatus: "not_configured"},
+		{name: "v3 not sampled", schemaVersion: 3, otlpStatus: "not_sampled"},
+		{name: "v2 rejects not sampled", schemaVersion: 2, otlpStatus: "not_sampled", wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			record := validRecord()
+			record.SchemaVersion = test.schemaVersion
+			record.OTLPStatus = test.otlpStatus
+			payload, err := json.Marshal(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var parsed Record
+			if err := json.Unmarshal(payload, &parsed); err != nil {
+				t.Fatal(err)
+			}
+			err = parsed.Validate()
+			if test.wantError && err == nil {
+				t.Fatal("versioned parser accepted incompatible OTLP status")
+			}
+			if !test.wantError && err != nil {
+				t.Fatalf("versioned parser rejected record: %v", err)
+			}
+		})
 	}
 }
 

@@ -3,6 +3,16 @@
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and Semantic Versioning. Dates use ISO 8601.
 
+## Unreleased
+
+### Changed
+
+- Run-record writers now emit schema v3, which adds `not_sampled` to the
+  closed `otlp_status` enum. Readers continue to accept v2 with its original
+  enum and reject v2 records containing the new value.
+- Remote event manifests explicitly mark privacy-withheld artifacts instead
+  of leaving references indistinguishable from missing uploads.
+
 ## v0.1.0 - 2026-08-21
 
 Initial public release.

@@ -109,6 +109,13 @@ func runCommand(ctx context.Context, args []string, stdin io.Reader, stdout io.W
 		}
 		return 2
 	}
+	if opts.OTLPBestEffort && strings.EqualFold(strings.TrimSpace(opts.OTLPExportFailurePolicy), runner.OTLPExportFailurePolicyRequired) {
+		fmt.Fprintf(stderr, "--otlp-best-effort cannot be combined with --otlp-export-failure-policy=%s\n", runner.OTLPExportFailurePolicyRequired)
+		return 2
+	}
+	if opts.OTLPBestEffort {
+		fmt.Fprintln(stderr, "acta: warning: --otlp-best-effort is deprecated; use --otlp-export-failure-policy=best-effort")
+	}
 	if opts.Timeout < 0 {
 		fmt.Fprintln(stderr, "--timeout must not be negative")
 		return 2

@@ -234,10 +234,18 @@ func TestUploadRunWithholdsAmbiguousOpaqueStderrByDefault(t *testing.T) {
 		t.Fatalf("ambiguous opaque stderr was not classified as withheld/unverified: %#v", artifacts)
 	}
 
-	uploaded := false
+	uploaded := map[string]bool{}
+	var remoteEvents []actaevents.Event
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == stderrName {
-			uploaded = true
+		switch request.URL.Path {
+		case "/api/ingest/runs/run-1/events":
+			var body eventsRequest
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			remoteEvents = append(remoteEvents, body.Events...)
+		case "/api/ingest/runs/run-1/artifacts":
+			uploaded[request.URL.Query().Get("filename")] = true
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -247,8 +255,43 @@ func TestUploadRunWithholdsAmbiguousOpaqueStderrByDefault(t *testing.T) {
 	}, testRecord(runDir)); err != nil {
 		t.Fatal(err)
 	}
-	if uploaded {
+	if uploaded[stderrName] {
 		t.Fatal("ambiguous opaque stderr was uploaded by default")
+	}
+	var terminalRefs []actaevents.ArtifactRef
+	for _, event := range remoteEvents {
+		if event.Type == actaevents.TypeRunCompleted {
+			terminalRefs = event.ArtifactRefs
+		}
+	}
+	if len(terminalRefs) == 0 {
+		t.Fatal("uploaded replay stream has no terminal artifact manifest")
+	}
+	foundWithheld := false
+	for _, ref := range terminalRefs {
+		if ref.Path == stderrName {
+			foundWithheld = ref.Status == actaevents.ArtifactStatusWithheld && ref.Reason == withheldArtifactReason && ref.RedactionState == actaevents.ArtifactRedactionStateUnverified
+			continue
+		}
+		if ref.Status == "" && !uploaded[ref.Path] {
+			t.Errorf("uploaded event stream has dangling artifact reference %#v", ref)
+		}
+	}
+	if !foundWithheld {
+		t.Fatalf("remote terminal manifest did not mark ambiguous stderr withheld: %#v", terminalRefs)
+	}
+	var replay strings.Builder
+	for _, event := range remoteEvents {
+		encoded, err := json.Marshal(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		replay.Write(encoded)
+		replay.WriteByte('\n')
+	}
+	replayFile := writeSnapshotFile(t, replay.String())
+	if _, err := scanEventsFile(context.Background(), replayFile, "run-1", nil); err != nil {
+		t.Fatalf("replay tooling rejected remote withheld-artifact manifest: %v", err)
 	}
 
 	file := writeSnapshotFile(t, "provider diagnostic\n{\n  \"thinking\": \""+secret+"\"\n}\n")

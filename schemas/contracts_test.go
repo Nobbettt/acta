@@ -28,7 +28,7 @@ func TestPublishedExamplesValidateAgainstDraft202012Schemas(t *testing.T) {
 		jsonl  bool
 	}{
 		{path: "runtime-bundle.v1.json", schema: "runtime-bundle.schema.json"},
-		{path: "run-record.v2.json", schema: "run-record.schema.json"},
+		{path: "run-record.v3.json", schema: "run-record.schema.json"},
 		{path: "digest.v2.json", schema: "digest.schema.json"},
 		{path: "acta-events.v2.jsonl", schema: "acta-event.schema.json", jsonl: true},
 		{path: "projection.v2.json", schema: "projection.schema.json"},
@@ -38,6 +38,74 @@ func TestPublishedExamplesValidateAgainstDraft202012Schemas(t *testing.T) {
 			validateFile(t, schemas[test.schema], filepath.Join("examples", test.path), test.jsonl)
 		})
 	}
+}
+
+func TestPublishedRunRecordVersionsRemainCompatible(t *testing.T) {
+	tests := []struct {
+		path       string
+		version    int
+		otlpStatus string
+	}{
+		{path: "run-record.v2.json", version: 2, otlpStatus: "not_configured"},
+		{path: "run-record.v3.json", version: 3, otlpStatus: "not_sampled"},
+	}
+	for _, test := range tests {
+		t.Run(test.path, func(t *testing.T) {
+			payload, err := os.ReadFile(filepath.Join("examples", test.path))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var record runrecord.Record
+			if err := json.Unmarshal(payload, &record); err != nil {
+				t.Fatal(err)
+			}
+			if record.SchemaVersion != test.version || record.OTLPStatus != test.otlpStatus {
+				t.Fatalf("record version/status = %d/%q", record.SchemaVersion, record.OTLPStatus)
+			}
+			if err := record.Validate(); err != nil {
+				t.Fatalf("published record did not parse: %v", err)
+			}
+		})
+	}
+
+	payload, err := os.ReadFile(filepath.Join("examples", "run-record.v2.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var incompatible runrecord.Record
+	if err := json.Unmarshal(payload, &incompatible); err != nil {
+		t.Fatal(err)
+	}
+	incompatible.OTLPStatus = "not_sampled"
+	if err := incompatible.Validate(); err == nil {
+		t.Fatal("v2 run record accepted the v3 not_sampled status")
+	}
+}
+
+func TestWithheldArtifactManifestValidatesForReplayAndSchema(t *testing.T) {
+	event := actaevents.Event{
+		SchemaVersion: actaevents.SchemaVersion,
+		Producer:      runrecord.Producer{Name: "acta", Version: "test"},
+		RunID:         "run-1",
+		Sequence:      1,
+		Timestamp:     time.Date(2026, 8, 24, 0, 0, 0, 0, time.UTC),
+		Source:        actaevents.Source,
+		Type:          actaevents.TypeRunCompleted,
+		Payload:       json.RawMessage(`{"status":"ok","ok":true,"timeout":false,"duration_ms":1}`),
+		ArtifactRefs: []actaevents.ArtifactRef{{
+			Kind: "raw_stderr", Path: "agent.stderr.log",
+			Status: actaevents.ArtifactStatusWithheld, Reason: "reasoning_redaction_unverified",
+			RedactionState: actaevents.ArtifactRedactionStateUnverified,
+		}},
+	}
+	if err := actaevents.ValidateEvent(event, "run-1", 1); err != nil {
+		t.Fatalf("replay validator rejected withheld artifact manifest: %v", err)
+	}
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validateJSON(t, compileSchemas(t)["acta-event.schema.json"], encoded)
 }
 
 func TestGoProducedCurrentArtifactsValidateAgainstPublishedSchemas(t *testing.T) {
@@ -63,7 +131,7 @@ func TestGoProducedCurrentArtifactsValidateAgainstPublishedSchemas(t *testing.T)
 				StartedAt: now, CompletedAt: now.Add(time.Second), DurationMillis: 1000, ExitCode: &exit, OK: true, Timeout: false,
 				TerminationReason: "completed", RawStdoutPath: "/workspace/.acta/runs/run-example/codex-events.jsonl",
 				RawStderrPath: "/workspace/.acta/runs/run-example/codex.stderr.log", RawStdoutArtifact: "codex-events.jsonl",
-				RawStderrArtifact: "codex.stderr.log", PromptSource: "flag", OTLPStatus: "not_configured",
+				RawStderrArtifact: "codex.stderr.log", PromptSource: "flag", OTLPStatus: "not_sampled",
 				ProcessContainment: "posix_process_group", AgentConfigMode: "ambient_ephemeral",
 			},
 		},
@@ -157,7 +225,7 @@ func TestPublishedBundleArtifactIDSchemaAndGoValidatorAgree(t *testing.T) {
 		t.Fatalf("schema artifact_id pattern = %q, Go pattern = %q", got, runrecord.PublishedBundleArtifactIDPattern)
 	}
 
-	basePayload, err := os.ReadFile(filepath.Join("examples", "run-record.v2.json"))
+	basePayload, err := os.ReadFile(filepath.Join("examples", "run-record.v3.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

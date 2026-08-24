@@ -3,7 +3,8 @@
 Acta publishes five machine-readable contracts under [`schemas/`](../schemas/):
 
 - `runtime-bundle.schema.json` — launcher input, schema version 1
-- `run-record.schema.json` — `run.json`, schema version 2
+- `run-record.schema.json` — `run.json`, schema version 3 (readers also accept
+  the published v2 contract)
 - `digest.schema.json` — `digest.json`, schema version 2
 - `acta-event.schema.json` — each `acta-events.jsonl` line, schema version 2
 - `projection.schema.json` — the transactional re-projection completion
@@ -19,9 +20,11 @@ are vendor evidence and do not use Acta schema versions.
 
 ## Compatibility rules
 
-- The schema versions listed above are the first published versions of each
-  contract. Nothing older exists publicly, and readers reject lower versions
-  outright.
+- Version 2 is the first published run-record contract; v3 extends its closed
+  `otlp_status` enum with `not_sampled`. Readers accept both, but a v2 record
+  containing `not_sampled` is invalid. The versions listed for the other
+  contracts are their first published versions, and readers reject lower
+  versions outright.
 - Adding an optional field without changing existing meaning is compatible
   and may retain the current schema version.
 - Removing or renaming a field, changing a field's type or semantics, changing

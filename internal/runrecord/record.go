@@ -12,7 +12,7 @@ import (
 // MaxRecordBytes is the largest run.json payload Acta will write or read.
 const (
 	MaxRecordBytes   int64 = 4 << 20
-	SchemaVersion          = 2
+	SchemaVersion          = 3
 	MinSchemaVersion       = 2
 )
 
@@ -140,7 +140,11 @@ func (r *Record) Validate() error {
 		if r.OK && (r.ExitCode == nil || *r.ExitCode != 0) {
 			return fmt.Errorf("successful run record requires exit_code 0")
 		}
-		if !oneOf(r.OTLPStatus, "not_configured", "not_sampled", "exported", "failed") || r.OTLPStatus == "failed" && strings.TrimSpace(r.OTLPError) == "" || r.OTLPStatus != "failed" && r.OTLPError != "" {
+		validOTLPStatus := oneOf(r.OTLPStatus, "not_configured", "exported", "failed")
+		if r.SchemaVersion >= 3 {
+			validOTLPStatus = validOTLPStatus || r.OTLPStatus == "not_sampled"
+		}
+		if !validOTLPStatus || r.OTLPStatus == "failed" && strings.TrimSpace(r.OTLPError) == "" || r.OTLPStatus != "failed" && r.OTLPError != "" {
 			return fmt.Errorf("run record OTLP status and error are inconsistent")
 		}
 		if r.OTLPStatus == "exported" && strings.TrimSpace(r.TraceID) == "" || r.OTLPStatus != "exported" && r.TraceID != "" {

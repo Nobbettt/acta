@@ -143,6 +143,38 @@ func TestExecuteRunUsesDistinctTelemetryOnlyExitCode(t *testing.T) {
 	}
 }
 
+func TestExecuteRunRejectsConflictingOTLPPolicyFlagsAtStartup(t *testing.T) {
+	var stderr bytes.Buffer
+	code := Execute(context.Background(), []string{
+		"run", "--otlp-best-effort", "--otlp-export-failure-policy", "required",
+	}, strings.NewReader(""), io.Discard, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "--otlp-best-effort") || !strings.Contains(stderr.String(), "--otlp-export-failure-policy") {
+		t.Fatalf("exit = %d, stderr = %q; want startup conflict naming both flags", code, stderr.String())
+	}
+}
+
+func TestExecuteRunDeprecatedOTLPBestEffortWarnsAndRuns(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agent requires /bin/sh")
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(fakeCodexScript(
+		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n",
+	)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stderr bytes.Buffer
+	code := Execute(context.Background(), []string{
+		"run", "--agent", "codex", "--prompt", "test", "--cwd", t.TempDir(),
+		"--runs-dir", t.TempDir(), "--stream=false", "--otlp-best-effort",
+	}, strings.NewReader(""), io.Discard, &stderr)
+	if code != 0 || !strings.Contains(stderr.String(), "--otlp-best-effort is deprecated") {
+		t.Fatalf("exit = %d, stderr = %q; want successful run with deprecation warning", code, stderr.String())
+	}
+}
+
 func TestExecuteRunReadsIssueBodyFile(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake shell agents require /bin/sh")

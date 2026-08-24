@@ -174,7 +174,8 @@ events, digests, and declared provider streams. Opaque text is classified for
 the entire artifact one line at a time: valid standalone JSON lines receive
 the provider redaction pass, while an unparseable brace/bracket-opening line or
 multiline JSON continuation marks the artifact `unverified` and withholds it
-from remote upload. Plain diagnostics remain uploadable. The explicit
+from remote upload while retaining an explicitly `withheld` terminal manifest
+entry with a reason. Plain diagnostics remain uploadable. The explicit
 `--allow-unredacted-remote-reasoning` mode uploads ambiguous opaque artifacts
 as `unredacted`; all artifact labels in that mode come from content inspection,
 with only verified-clean content labeled `not_required`.

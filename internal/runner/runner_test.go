@@ -1113,6 +1113,21 @@ func TestRunBestEffortOTLPExportFailureIsDefault(t *testing.T) {
 	}
 }
 
+func TestNormalizeOTLPExportFailurePolicyRejectsDeprecatedRequiredConflict(t *testing.T) {
+	_, err := normalizeOTLPExportFailurePolicy(Options{
+		OTLPBestEffort:          true,
+		OTLPExportFailurePolicy: OTLPExportFailurePolicyRequired,
+	})
+	if err == nil || !strings.Contains(err.Error(), "--otlp-best-effort") || !strings.Contains(err.Error(), "--otlp-export-failure-policy") {
+		t.Fatalf("conflicting OTLP policy error = %v, want both flag names", err)
+	}
+
+	policy, err := normalizeOTLPExportFailurePolicy(Options{OTLPBestEffort: true})
+	if err != nil || policy != OTLPExportFailurePolicyBestEffort {
+		t.Fatalf("deprecated flag policy = %q, error = %v", policy, err)
+	}
+}
+
 func TestPrepareAgentEnvironmentForwardsOnlyTraceCorrelationTelemetry(t *testing.T) {
 	environment := []string{
 		"PATH=/bin",

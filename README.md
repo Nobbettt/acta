@@ -177,6 +177,9 @@ code before treating it as an operational warning. Required mode rejects
 startup configurations that make delivery impossible, including a missing
 endpoint, `OTEL_SDK_DISABLED=true`, `OTEL_TRACES_EXPORTER=none`, and an
 unconditionally disabled sampler.
+The deprecated `--otlp-best-effort` alias still selects best-effort with a
+warning. Combining it with `--otlp-export-failure-policy required` is a startup
+error because those flags request conflicting delivery policies.
 
 When `TRACEPARENT` contains valid W3C Trace Context, the `invoke_agent` span
 joins that trace as a child of the supplied remote parent; valid `TRACESTATE`
@@ -196,6 +199,10 @@ digests, and provider streams) use their schema-specific privacy passes.
 Opaque text is handled only line by line: standalone JSON lines are redacted,
 but an unparseable brace/bracket-opening line or multiline JSON continuation
 makes the artifact `unverified` and local-only for the default upload. The
+uploaded terminal artifact manifest retains that reference with
+`status: withheld`, a machine-readable reason, and
+`redaction_state: unverified`, so remote completeness checks can distinguish
+privacy withholding from a missing upload. The
 explicit unredacted opt-in uploads such an artifact as `unredacted`. Ordinary
 plain-text diagnostics still upload. The total snapshot budget defaults to 1
 GiB; use
@@ -216,6 +223,10 @@ bundle locally and records `reasoning_redaction_state: failed`. An ambiguous
 post-replacement commit is hash-checked and recorded as `partial` unless the
 original bytes are verified unchanged. Both states refuse default remote
 upload. Remote upload redaction is independent and never rewrites local files.
+
+Current writers emit run-record schema v3. It adds the `not_sampled` OTLP
+status without changing the closed v2 enum; readers accept both versions and
+reject `not_sampled` when a record still declares v2.
 
 ## Where it's headed
 

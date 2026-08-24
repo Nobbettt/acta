@@ -50,6 +50,7 @@ const (
 	DefaultMaxUploadBytes         int64 = 1 << 30
 	DefaultMaxRedactionLineBytes        = 8 << 20
 	maxRedactionJSONDocumentBytes int64 = 64 << 20
+	withheldArtifactReason              = "reasoning_redaction_unverified"
 )
 
 type createRunRequest struct {
@@ -197,6 +198,15 @@ func UploadRun(ctx context.Context, cfg Config, record *runrecord.Record) error 
 		return err
 	}
 	defer closeArtifacts(artifacts)
+	annotated, err := annotateWithheldArtifactRefsContext(ctx, eventFile, record.ID, artifacts)
+	if err != nil {
+		return err
+	}
+	if annotated {
+		if err := refreshEventArtifactContext(ctx, artifacts, artifactLimit); err != nil {
+			return err
+		}
+	}
 
 	status := "failed"
 	if record.OK {
@@ -822,6 +832,113 @@ func buildArtifactsContext(ctx context.Context, runDir string, refs []actaevents
 		artifacts = append(artifacts, artifact)
 	}
 	return artifacts, nil
+}
+
+func annotateWithheldArtifactRefsContext(ctx context.Context, eventFile *os.File, runID string, artifacts []artifactUpload) (bool, error) {
+	withheld := make(map[string]artifactUpload)
+	for _, artifact := range artifacts {
+		if artifact.Withheld {
+			withheld[artifact.Kind+"\x00"+artifact.Filename] = artifact
+		}
+	}
+	if len(withheld) == 0 {
+		return false, nil
+	}
+	if _, err := eventFile.Seek(0, io.SeekStart); err != nil {
+		return false, fmt.Errorf("rewind event snapshot for withheld artifact annotations: %w", err)
+	}
+
+	annotated, err := os.CreateTemp("", "acta-upload-events-withheld-*")
+	if err != nil {
+		return false, fmt.Errorf("create annotated event snapshot: %w", err)
+	}
+	annotatedPath := annotated.Name()
+	defer func() {
+		_ = annotated.Close()
+		_ = os.Remove(annotatedPath)
+	}()
+
+	scanner := bufio.NewScanner(eventFile)
+	scanner.Buffer(make([]byte, 64<<10), maxEventsRequestBytes)
+	eventCount := 0
+	totalBytes := 0
+	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		eventCount++
+		var event actaevents.Event
+		if err := json.Unmarshal(line, &event); err != nil {
+			return false, fmt.Errorf("decode %s for withheld artifact annotations: %w", actaevents.Filename, err)
+		}
+		for i := range event.ArtifactRefs {
+			ref := &event.ArtifactRefs[i]
+			artifact, ok := withheld[ref.Kind+"\x00"+ref.Path]
+			if !ok {
+				continue
+			}
+			ref.Status = actaevents.ArtifactStatusWithheld
+			ref.Reason = withheldArtifactReason
+			ref.RedactionState = artifact.RedactionState
+		}
+		encoded, err := json.Marshal(event)
+		if err != nil {
+			return false, fmt.Errorf("encode event sequence %d with withheld artifact annotations: %w", event.Sequence, err)
+		}
+		if len(encoded)+1 > actaevents.MaxEventBytes {
+			return false, fmt.Errorf("event sequence %d is %d bytes after withheld artifact annotations; maximum is %d", event.Sequence, len(encoded)+1, actaevents.MaxEventBytes)
+		}
+		totalBytes += len(encoded) + 1
+		if totalBytes > actaevents.MaxStreamBytes {
+			return false, fmt.Errorf("event stream exceeds maximum size %d after withheld artifact annotations", actaevents.MaxStreamBytes)
+		}
+		encoded = append(encoded, '\n')
+		if n, writeErr := annotated.Write(encoded); writeErr != nil {
+			return false, fmt.Errorf("write annotated event snapshot: %w", writeErr)
+		} else if n != len(encoded) {
+			return false, io.ErrShortWrite
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return false, fmt.Errorf("read event snapshot for withheld artifact annotations: %w", err)
+	}
+	if eventCount == 0 {
+		return false, fmt.Errorf("%s contains no events", actaevents.Filename)
+	}
+	if _, err := annotated.Seek(0, io.SeekStart); err != nil {
+		return false, fmt.Errorf("rewind annotated event snapshot: %w", err)
+	}
+	if err := replaceSnapshotReaderContext(ctx, eventFile, annotated); err != nil {
+		return false, fmt.Errorf("publish annotated event snapshot: %w", err)
+	}
+	if _, err := scanEventsFile(ctx, eventFile, runID, nil); err != nil {
+		return false, fmt.Errorf("validate annotated replay event snapshot: %w", err)
+	}
+	return true, nil
+}
+
+func refreshEventArtifactContext(ctx context.Context, artifacts []artifactUpload, maxBytes int64) error {
+	var totalBytes int64
+	for i := range artifacts {
+		artifact := &artifacts[i]
+		if isCanonicalEventArtifact(artifact.Filename) {
+			sha256Hex, sizeBytes, err := hashFileContext(ctx, artifact.File)
+			if err != nil {
+				return fmt.Errorf("hash annotated event snapshot: %w", err)
+			}
+			artifact.SHA256 = sha256Hex
+			artifact.SizeBytes = sizeBytes
+		}
+		totalBytes += artifact.SizeBytes
+	}
+	if maxBytes > 0 && totalBytes > maxBytes {
+		return fmt.Errorf("artifact snapshot is %d bytes after withheld artifact annotations; maximum is %d", totalBytes, maxBytes)
+	}
+	return nil
 }
 
 type artifactInspection struct {
@@ -1745,13 +1862,17 @@ func decodeJSONUseNumberContext(ctx context.Context, payload []byte, value any) 
 }
 
 func replaceSnapshotContentsContext(ctx context.Context, file *os.File, payload []byte) error {
+	return replaceSnapshotReaderContext(ctx, file, bytes.NewReader(payload))
+}
+
+func replaceSnapshotReaderContext(ctx context.Context, file *os.File, reader io.Reader) error {
 	if err := file.Truncate(0); err != nil {
 		return err
 	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
-	if err := copyContext(ctx, file, bytes.NewReader(payload)); err != nil {
+	if err := copyContext(ctx, file, reader); err != nil {
 		return err
 	}
 	_, err := file.Seek(0, io.SeekStart)

@@ -580,7 +580,7 @@ func FromRunDirContext(ctx context.Context, runDir string, workspaceDir string) 
 	}
 	applyRecord(d, &record, runDir)
 	// Re-digestion is a new Acta-owned projection even when the execution
-	// record already uses schema v2. Attribute the derived artifacts to the
+	// record already uses a supported published schema. Attribute the derived artifacts to the
 	// binary performing this projection, never to the historical producer.
 	d.Producer = runrecord.CurrentProducer()
 	markUnavailableFilePatches(d)
