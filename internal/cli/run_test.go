@@ -153,6 +153,17 @@ func TestExecuteRunRejectsConflictingOTLPPolicyFlagsAtStartup(t *testing.T) {
 	}
 }
 
+func TestExecuteRunRejectsInvalidOTLPPolicyDespiteDeprecatedBestEffort(t *testing.T) {
+	var stderr bytes.Buffer
+	code := Execute(context.Background(), []string{
+		"run", "--agent", "codex", "--prompt", "test", "--cwd", t.TempDir(),
+		"--otlp-best-effort", "--otlp-export-failure-policy", "garbage",
+	}, strings.NewReader(""), io.Discard, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "--otlp-export-failure-policy must be") {
+		t.Fatalf("exit = %d, stderr = %q; want invalid policy error", code, stderr.String())
+	}
+}
+
 func TestExecuteRunDeprecatedOTLPBestEffortWarnsAndRuns(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake shell agent requires /bin/sh")

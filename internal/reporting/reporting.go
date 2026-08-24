@@ -802,7 +802,6 @@ func buildArtifactsContext(ctx context.Context, runDir string, refs []actaevents
 			closeArtifacts(artifacts)
 			return nil, fmt.Errorf("artifact snapshot is %d bytes; maximum is %d", totalBytes, maxBytes)
 		}
-		schemaVersion := int32(actaevents.SchemaVersion)
 		artifactRedactionState := "not_required"
 		withheld := false
 		switch {
@@ -827,6 +826,15 @@ func buildArtifactsContext(ctx context.Context, runDir string, refs []actaevents
 			Withheld:       withheld,
 		}
 		if isCanonicalEventArtifact(ref.Path) {
+			schemaVersion, schemaErr := eventArtifactSchemaVersionContext(ctx, file)
+			if schemaErr != nil {
+				if tempPath != eventTempPath {
+					_ = file.Close()
+					_ = os.Remove(tempPath)
+				}
+				closeArtifacts(artifacts)
+				return nil, fmt.Errorf("read schema version from artifact %s: %w", ref.Path, schemaErr)
+			}
 			artifact.SchemaVersion = &schemaVersion
 		}
 		artifacts = append(artifacts, artifact)
@@ -957,6 +965,39 @@ const (
 
 func isCanonicalEventArtifact(path string) bool {
 	return filepath.ToSlash(filepath.Clean(filepath.FromSlash(path))) == actaevents.Filename
+}
+
+func eventArtifactSchemaVersionContext(ctx context.Context, file *os.File) (int32, error) {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return 0, err
+	}
+	defer func() { _, _ = file.Seek(0, io.SeekStart) }()
+
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64<<10), maxEventsRequestBytes)
+	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var envelope struct {
+			SchemaVersion int32 `json:"schema_version"`
+		}
+		if err := json.Unmarshal(line, &envelope); err != nil {
+			return 0, err
+		}
+		if envelope.SchemaVersion == 0 {
+			return 0, errors.New("event artifact has no schema_version")
+		}
+		return envelope.SchemaVersion, nil
+	}
+	if err := scanner.Err(); err != nil {
+		return 0, err
+	}
+	return 0, errors.New("event artifact contains no events")
 }
 
 // redactArtifactSnapshot uses the declared path/kind only to select a structured
@@ -1736,9 +1777,26 @@ func redactRunRecordSnapshot(ctx context.Context, file *os.File) error {
 		if !ok {
 			return redactReasoningValueContext(ctx, value)
 		}
-		changed, err := redactReasoningValueContext(ctx, record)
+		contentChanged, err := redactReasoningValueContext(ctx, record)
 		if err != nil {
 			return false, err
+		}
+		schemaVersion := int64(0)
+		if encoded, ok := record["schema_version"].(json.Number); ok {
+			schemaVersion, _ = encoded.Int64()
+		}
+		if schemaVersion < runrecord.SchemaVersion && !contentChanged {
+			// Legacy schemas do not define reasoning_redaction_state. Keep a
+			// content-safe record byte-for-byte intact and carry the result only
+			// in the artifact upload metadata.
+			return false, nil
+		}
+		changed := contentChanged
+		if schemaVersion < runrecord.SchemaVersion {
+			// A legacy record whose content needed rewriting can no longer claim
+			// its original contract once v3 redaction metadata is attached.
+			record["schema_version"] = runrecord.SchemaVersion
+			changed = true
 		}
 		if record["reasoning_redaction_state"] != "redacted" {
 			record["reasoning_redaction_state"] = "redacted"

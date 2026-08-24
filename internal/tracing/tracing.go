@@ -80,13 +80,21 @@ func deliveryUnavailableReason(endpointFlag string, forceRoot bool) string {
 	if sampler == "parentbased_always_off" && (forceRoot || !inboundParentSpanContext().IsValid()) {
 		return "OTEL_TRACES_SAMPLER=parentbased_always_off disables sampling without an inbound parent context"
 	}
-	if sampler == "traceidratio" {
-		ratio, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER_ARG")), 64)
-		if err == nil && ratio == 0 {
-			return "OTEL_TRACES_SAMPLER=traceidratio with OTEL_TRACES_SAMPLER_ARG=0 disables sampling"
+	if sampler == "traceidratio" && samplerRatioEffectivelyZero() {
+		return "OTEL_TRACES_SAMPLER=traceidratio with OTEL_TRACES_SAMPLER_ARG=0 disables sampling"
+	}
+	if sampler == "parentbased_traceidratio" && samplerRatioEffectivelyZero() {
+		parent := inboundParentSpanContext()
+		if forceRoot || !parent.IsValid() || !parent.IsSampled() {
+			return "OTEL_TRACES_SAMPLER=parentbased_traceidratio with an effectively zero root ratio disables sampling without a sampled inbound parent context"
 		}
 	}
 	return ""
+}
+
+func samplerRatioEffectivelyZero() bool {
+	ratio, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER_ARG")), 64)
+	return err == nil && ratio >= 0 && ratio <= 1 && uint64(ratio*(1<<63)) == 0
 }
 
 func sdkDisabled() bool {

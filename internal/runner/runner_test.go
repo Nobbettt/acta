@@ -1078,6 +1078,11 @@ func TestRunRequiredOTLPRejectsImpossibleDeliveryAtStartup(t *testing.T) {
 			environment: map[string]string{"OTEL_TRACES_SAMPLER": "parentbased_always_off"},
 			want:        "OTEL_TRACES_SAMPLER=parentbased_always_off disables sampling without an inbound parent context",
 		},
+		{
+			name: "parent-based ratio disables root sampling without inbound parent", endpoint: "http://127.0.0.1:4318/v1/traces",
+			environment: map[string]string{"OTEL_TRACES_SAMPLER": "parentbased_traceidratio", "OTEL_TRACES_SAMPLER_ARG": "0"},
+			want:        "OTEL_TRACES_SAMPLER=parentbased_traceidratio",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1175,6 +1180,16 @@ func TestNormalizeOTLPExportFailurePolicyRejectsDeprecatedRequiredConflict(t *te
 	policy, err := normalizeOTLPExportFailurePolicy(Options{OTLPBestEffort: true})
 	if err != nil || policy != OTLPExportFailurePolicyBestEffort {
 		t.Fatalf("deprecated flag policy = %q, error = %v", policy, err)
+	}
+}
+
+func TestNormalizeOTLPExportFailurePolicyRejectsInvalidPolicyBeforeDeprecatedOverride(t *testing.T) {
+	_, err := normalizeOTLPExportFailurePolicy(Options{
+		OTLPBestEffort:          true,
+		OTLPExportFailurePolicy: "garbage",
+	})
+	if err == nil || !strings.Contains(err.Error(), "--otlp-export-failure-policy must be") {
+		t.Fatalf("invalid OTLP policy error = %v, want enum validation error", err)
 	}
 }
 

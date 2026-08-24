@@ -626,6 +626,9 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 
 func normalizeOTLPExportFailurePolicy(opts Options) (string, error) {
 	policy := strings.ToLower(strings.TrimSpace(opts.OTLPExportFailurePolicy))
+	if policy != "" && policy != OTLPExportFailurePolicyBestEffort && policy != OTLPExportFailurePolicyRequired {
+		return "", fmt.Errorf("--otlp-export-failure-policy must be %q or %q", OTLPExportFailurePolicyBestEffort, OTLPExportFailurePolicyRequired)
+	}
 	if opts.OTLPBestEffort && policy == OTLPExportFailurePolicyRequired {
 		return "", fmt.Errorf("--otlp-best-effort cannot be combined with --otlp-export-failure-policy=%s", OTLPExportFailurePolicyRequired)
 	}

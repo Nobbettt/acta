@@ -36,6 +36,7 @@ func TestUploadRunPostsRunEventsArtifactsAndCompletion(t *testing.T) {
 	var paths []string
 	var sawAuth bool
 	var artifactFilename string
+	var eventArtifactSchemaVersion string
 	var artifactChecks int
 	var createStatus string
 	var createOrganizationID string
@@ -91,6 +92,9 @@ func TestUploadRunPostsRunEventsArtifactsAndCompletion(t *testing.T) {
 			}
 			if artifactFilename == "" {
 				artifactFilename = r.URL.Query().Get("filename")
+			}
+			if r.URL.Query().Get("filename") == actaevents.Filename {
+				eventArtifactSchemaVersion = r.URL.Query().Get("schema_version")
 			}
 			if r.URL.Query().Get("kind") == "" {
 				t.Fatal("artifact request had empty kind query parameter")
@@ -150,6 +154,9 @@ func TestUploadRunPostsRunEventsArtifactsAndCompletion(t *testing.T) {
 	if artifactChecks != 3 {
 		t.Fatalf("artifact checks = %d, want 3", artifactChecks)
 	}
+	if eventArtifactSchemaVersion != "2" {
+		t.Fatalf("v2 event artifact schema_version metadata = %q, want 2", eventArtifactSchemaVersion)
+	}
 	if createStatus != "running" {
 		t.Fatalf("create status = %q, want running", createStatus)
 	}
@@ -188,6 +195,84 @@ func TestUploadRunPostsRunEventsArtifactsAndCompletion(t *testing.T) {
 	}
 	if completeMetadata.TerminationReason != "completed" {
 		t.Fatalf("completion termination_reason = %#v, want completed", completeMetadata.TerminationReason)
+	}
+}
+
+func TestUploadRunLegacyRecordUsesMetadataOrExplicitSchemaUpgrade(t *testing.T) {
+	legacyBody := readTestFile(t, filepath.Join("..", "..", "schemas", "examples", "run-record.v2.json"))
+	const secret = "legacy-run-record-reasoning-6204"
+	legacyWithReasoning := strings.TrimSuffix(strings.TrimSpace(legacyBody), "}") +
+		`,"reasoning":"` + secret + `"}` + "\n"
+
+	tests := []struct {
+		name          string
+		body          string
+		wantByteExact bool
+		wantSchema    float64
+		wantReasoning any
+		wantBodyState any
+	}{
+		{
+			name:          "metadata only when body needs no content redaction",
+			body:          legacyBody,
+			wantByteExact: true,
+		},
+		{
+			name:          "upgrade to v3 when body content is redacted",
+			body:          legacyWithReasoning,
+			wantSchema:    runrecord.SchemaVersion,
+			wantReasoning: reasoningRedactionMarker,
+			wantBodyState: "redacted",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runDir := writeBundle(t)
+			writeFile(t, filepath.Join(runDir, "run.json"), test.body)
+
+			var uploadedBody string
+			var uploadedState string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				if request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == "run.json" {
+					body, err := io.ReadAll(request.Body)
+					if err != nil {
+						t.Error(err)
+					}
+					uploadedBody = string(body)
+					uploadedState = request.URL.Query().Get("redaction_state")
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+
+			if err := UploadRun(context.Background(), Config{
+				BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+			}, testRecord(runDir)); err != nil {
+				t.Fatal(err)
+			}
+			if uploadedState != "redacted" {
+				t.Fatalf("run record redaction_state metadata = %q, want redacted", uploadedState)
+			}
+			if local := readTestFile(t, filepath.Join(runDir, "run.json")); local != test.body {
+				t.Fatal("upload redaction modified the local legacy run record")
+			}
+			if test.wantByteExact {
+				if uploadedBody != test.body {
+					t.Fatalf("content-safe v2 upload body changed:\n%s", uploadedBody)
+				}
+				return
+			}
+			if strings.Contains(uploadedBody, secret) {
+				t.Fatalf("rewritten legacy upload retained reasoning: %s", uploadedBody)
+			}
+			var uploaded map[string]any
+			if err := json.Unmarshal([]byte(uploadedBody), &uploaded); err != nil {
+				t.Fatal(err)
+			}
+			if uploaded["schema_version"] != test.wantSchema || uploaded["reasoning"] != test.wantReasoning || uploaded["reasoning_redaction_state"] != test.wantBodyState {
+				t.Fatalf("rewritten legacy run record = %#v", uploaded)
+			}
+		})
 	}
 }
 
