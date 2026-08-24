@@ -329,15 +329,36 @@ func (d *Digest) projectionLimit() int {
 
 func (d *Digest) appendEvent(event Event) bool {
 	normalizeEvent(&event)
-	encoded, err := json.Marshal(event)
-	if err != nil || len(d.Timeline) >= MaxTimelineEvents || d.projectionBytes+len(encoded) > d.projectionLimit() {
+	eventBytes, err := eventProjectionBytes(event)
+	if err != nil || len(d.Timeline) >= MaxTimelineEvents || d.projectionBytes+eventBytes > d.projectionLimit() {
 		d.Metrics.DroppedEvents++
 		d.Metrics.ProjectionTruncated = true
 		return false
 	}
-	d.projectionBytes += len(encoded)
+	d.projectionBytes += eventBytes
 	d.Timeline = append(d.Timeline, event)
 	return true
+}
+
+// eventProjectionBytes accounts for the encoded event plus local-only
+// reasoning exactly as if that text occupied the normalized event's text
+// field. Reasoning is excluded from digest JSON, but it is retained in memory
+// and copied into the local Acta event stream, so it shares the same projection
+// budget as every other retained string.
+func eventProjectionBytes(event Event) (int, error) {
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		return 0, err
+	}
+	size := len(encoded)
+	if event.localReasoningText != "" {
+		reasoning, err := json.Marshal(event.localReasoningText)
+		if err != nil {
+			return 0, err
+		}
+		size += len(`,"text":`) + len(reasoning)
+	}
+	return size, nil
 }
 
 func normalizeEvent(event *Event) {

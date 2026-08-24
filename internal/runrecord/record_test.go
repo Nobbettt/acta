@@ -51,6 +51,37 @@ func TestValidateCurrentRecord(t *testing.T) {
 	}
 }
 
+func TestValidatePublishedBundleArtifactIDUsesSchemaASCIIWhitespace(t *testing.T) {
+	sha256 := strings.Repeat("a", 64)
+	tests := []struct {
+		name       string
+		artifactID string
+		wantError  bool
+	}{
+		{name: "plain", artifactID: "artifact id"},
+		{name: "Unicode NBSP edges", artifactID: "\u00a0artifact\u00a0"},
+		{name: "vertical tab edges", artifactID: "\vartifact\v"},
+		{name: "leading ASCII space", artifactID: " artifact", wantError: true},
+		{name: "trailing ASCII tab", artifactID: "artifact\t", wantError: true},
+		{name: "leading ASCII newline", artifactID: "\nartifact", wantError: true},
+		{name: "trailing ASCII form feed", artifactID: "artifact\f", wantError: true},
+		{name: "empty", artifactID: "", wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			record := validRecord()
+			record.PublishedBundle = &PublishedBundle{ArtifactID: test.artifactID, SHA256: sha256}
+			err := record.Validate()
+			if test.wantError && err == nil {
+				t.Fatal("Validate() accepted invalid artifact ID")
+			}
+			if !test.wantError && err != nil {
+				t.Fatalf("Validate() rejected schema-valid artifact ID: %v", err)
+			}
+		})
+	}
+}
+
 func TestValidateCurrentRecordInvariants(t *testing.T) {
 	tests := []struct {
 		name string

@@ -154,6 +154,10 @@ func TestPublishedBundleArtifactIDRejectsOuterWhitespace(t *testing.T) {
 	if err := schema.Validate(record); err != nil {
 		t.Fatalf("run-record schema rejected an artifact id with no outer whitespace: %v", err)
 	}
+	record["published_bundle"].(map[string]any)["artifact_id"] = "\u00a0artifact\u00a0"
+	if err := schema.Validate(record); err != nil {
+		t.Fatalf("run-record schema rejected ASCII-pattern-valid NBSP edges: %v", err)
+	}
 }
 
 func TestGoBuiltActaEventStreamValidatesPayloadContracts(t *testing.T) {

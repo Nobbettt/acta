@@ -149,7 +149,7 @@ func (r *Record) Validate() error {
 			return fmt.Errorf("run record has invalid reasoning_redaction_state %q", r.ReasoningRedactionState)
 		}
 		if r.PublishedBundle != nil {
-			if strings.TrimSpace(r.PublishedBundle.ArtifactID) == "" || strings.TrimSpace(r.PublishedBundle.ArtifactID) != r.PublishedBundle.ArtifactID {
+			if !validPublishedBundleArtifactID(r.PublishedBundle.ArtifactID) {
 				return fmt.Errorf("published_bundle.artifact_id is invalid")
 			}
 			if !isLowerHexSHA256(r.PublishedBundle.SHA256) {
@@ -176,6 +176,26 @@ func (r *Record) Validate() error {
 		return fmt.Errorf("runtime_bundle_sha256 must be 64 lowercase hexadecimal characters")
 	}
 	return nil
+}
+
+// validPublishedBundleArtifactID mirrors the schema's ASCII-only \s/\S
+// pattern. Unicode whitespace such as NBSP is data here; only the five ASCII
+// whitespace bytes recognized by the published pattern are forbidden at the
+// edges.
+func validPublishedBundleArtifactID(value string) bool {
+	if value == "" {
+		return false
+	}
+	return !asciiPatternWhitespace(value[0]) && !asciiPatternWhitespace(value[len(value)-1])
+}
+
+func asciiPatternWhitespace(value byte) bool {
+	switch value {
+	case ' ', '\t', '\n', '\f', '\r':
+		return true
+	default:
+		return false
+	}
 }
 
 func oneOf(value string, allowed ...string) bool {

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -293,7 +294,7 @@ func TestUploadRunRedactsReasoningFromLegacyDigest(t *testing.T) {
 	}, record); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(remoteDigest, secret) || strings.Contains(remoteDigest, `"text"`) {
+	if strings.Contains(remoteDigest, secret) || !strings.Contains(remoteDigest, `"text":"`+reasoningRedactionMarker+`"`) {
 		t.Fatalf("remote legacy digest retained reasoning: %s", remoteDigest)
 	}
 	if !strings.Contains(remoteDigest, `"kind":"reasoning"`) ||
@@ -381,7 +382,7 @@ func TestUploadRunRedactsUnsupportedClaudeDetailsByDefault(t *testing.T) {
 	}, record); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(remote.String(), secret) || strings.Contains(remote.String(), `"details"`) {
+	if strings.Contains(remote.String(), secret) || !strings.Contains(remote.String(), `"details":"`+reasoningRedactionMarker+`"`) {
 		t.Fatalf("remote upload retained unsupported reasoning details: %s", remote.String())
 	}
 	if !strings.Contains(remote.String(), `"provider_event":"assistant.redacted_thinking"`) ||
@@ -451,6 +452,28 @@ func TestRedactArtifactSnapshotSniffsJSONLAfterLeadingBlankLines(t *testing.T) {
 	}
 }
 
+func TestRedactArtifactSnapshotProcessesJSONAfterSniffWindow(t *testing.T) {
+	const secret = "reasoning-after-sixteen-plain-lines-8402"
+	var original strings.Builder
+	for i := 0; i < artifactSniffNonEmptyLines; i++ {
+		fmt.Fprintf(&original, "diagnostic line %d\n", i+1)
+	}
+	original.WriteString(`{"type":"thinking","thinking":"` + secret + `"}` + "\n")
+
+	file := writeSnapshotFile(t, original.String())
+	required, err := redactArtifactSnapshot(context.Background(), file, "stderr", "agent.stderr.log", DefaultMaxRedactionLineBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redacted := readOpenFile(t, file)
+	if !required || strings.Contains(redacted, secret) || !strings.Contains(redacted, `"thinking":"`+reasoningRedactionMarker+`"`) {
+		t.Fatalf("redaction required=%v snapshot=%q", required, redacted)
+	}
+	if !strings.HasPrefix(redacted, "diagnostic line 1\n") || !strings.Contains(redacted, "diagnostic line 16\n") {
+		t.Fatalf("plain diagnostic lines changed: %q", redacted)
+	}
+}
+
 func TestRewriteJSONLSnapshotHonorsCancellationBetweenLines(t *testing.T) {
 	const original = "{\"type\":\"first\"}\n{\"type\":\"second\"}\n"
 	file := writeSnapshotFile(t, original)
@@ -469,6 +492,15 @@ func TestRewriteJSONLSnapshotHonorsCancellationBetweenLines(t *testing.T) {
 	}
 }
 
+func TestCopyContextHonorsCancellationDuringFinalSnapshotCopy(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	destination := &cancelAfterWrite{cancel: cancel}
+	err := copyContext(ctx, destination, bytes.NewReader(make([]byte, 3*(128<<10))))
+	if !errors.Is(err, context.Canceled) || destination.writes != 1 {
+		t.Fatalf("copy error = %v, writes = %d; want cancellation after one chunk", err, destination.writes)
+	}
+}
+
 func TestRedactActaReasoningEventLineRedactsUnknownTypeByDefault(t *testing.T) {
 	const secret = "future-private-content-1209"
 	original := []byte(`{"type":"agent.future.event","payload":{"kind":"future","provider_event":"future.block","details":{"text":"` + secret + `"},"raw_event_lines":[7]}}` + "\n")
@@ -476,7 +508,7 @@ func TestRedactActaReasoningEventLineRedactsUnknownTypeByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(redacted), secret) || strings.Contains(string(redacted), `"details"`) {
+	if strings.Contains(string(redacted), secret) || !strings.Contains(string(redacted), `"details":"`+reasoningRedactionMarker+`"`) {
 		t.Fatalf("unknown event retained free-text payload: %s", redacted)
 	}
 	if !strings.Contains(string(redacted), `"raw_event_lines":[7]`) || !strings.Contains(string(redacted), `"redacted":true`) {
@@ -496,6 +528,54 @@ func TestRedactProviderReasoningLinePreservesLargeInteger(t *testing.T) {
 	}
 	if !strings.Contains(string(redacted), `"boundary":9007199254740993`) {
 		t.Fatalf("large integer changed during redaction: %s", redacted)
+	}
+	if !strings.Contains(string(redacted), `"thinking":"`+reasoningRedactionMarker+`"`) ||
+		!strings.Contains(string(redacted), `"redacted":true`) {
+		t.Fatalf("provider thinking block was not fully masked in place: %s", redacted)
+	}
+}
+
+func TestRedactProviderReasoningPreservesUserPayloadFields(t *testing.T) {
+	tests := map[string][]byte{
+		"provider tool payload":        []byte(`{"type":"item.completed","item":{"type":"mcp_tool_call","arguments":{"reasoning":"input explanation"},"result":{"thinking":"output explanation"}},"structured_output":{"reasoning":"final explanation"}}` + "\n"),
+		"Acta structured output":       []byte(`{"type":"agent.output.structured","payload":{"kind":"structured_output","details":{"reasoning":"final explanation"}}}` + "\n"),
+		"non-provider discriminator":   []byte(`{"type":"reasoning_result","text":"visible user data"}` + "\n"),
+		"substring-only discriminator": []byte(`{"kind":"rethinking","text":"visible user data"}` + "\n"),
+	}
+	for name, original := range tests {
+		t.Run(name, func(t *testing.T) {
+			var (
+				redacted []byte
+				err      error
+			)
+			if name == "Acta structured output" {
+				redacted, err = redactActaReasoningEventLine(original)
+			} else {
+				redacted, err = redactProviderReasoningLine(original)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(redacted, original) {
+				t.Fatalf("user payload changed:\n got %s\nwant %s", redacted, original)
+			}
+		})
+	}
+}
+
+func TestRedactProviderReasoningMasksAmbiguousFieldWithoutDeletingKey(t *testing.T) {
+	original := []byte(`{"metadata":{"reasoning":"ambiguous private text","label":"kept"}}` + "\n")
+	redacted, err := redactProviderReasoningLine(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value map[string]any
+	if err := json.Unmarshal(redacted, &value); err != nil {
+		t.Fatal(err)
+	}
+	metadata, ok := value["metadata"].(map[string]any)
+	if !ok || metadata["reasoning"] != reasoningRedactionMarker || metadata["label"] != "kept" {
+		t.Fatalf("ambiguous reasoning field was not masked in place: %#v", value)
 	}
 }
 
@@ -964,6 +1044,17 @@ func readOpenFile(t *testing.T, file *os.File) string {
 		t.Fatal(err)
 	}
 	return string(payload)
+}
+
+type cancelAfterWrite struct {
+	cancel context.CancelFunc
+	writes int
+}
+
+func (writer *cancelAfterWrite) Write(payload []byte) (int, error) {
+	writer.writes++
+	writer.cancel()
+	return len(payload), nil
 }
 
 func stringPtr(value string) *string {

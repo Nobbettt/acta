@@ -838,7 +838,10 @@ func redactArtifactSnapshot(ctx context.Context, file *os.File, kind, path strin
 	}
 	switch format {
 	case artifactOpaque:
-		return false, nil
+		// Opaque text can still contain JSON provider events after an arbitrary
+		// number of diagnostic lines. Stream every line: ordinary text remains
+		// byte-identical and JSON-shaped lines receive the privacy pass.
+		return true, rewriteJSONLSnapshot(ctx, file, maxLineBytes, redactJSONShapedProviderLine)
 	case artifactJSONDocument:
 		if isRunRecordArtifact(path) {
 			return true, redactRunRecordSnapshot(file)
@@ -848,7 +851,11 @@ func redactArtifactSnapshot(ctx context.Context, file *os.File, kind, path strin
 		}
 		return true, redactJSONDocumentSnapshot(file)
 	case artifactJSONLines:
-		return true, rewriteJSONLSnapshot(ctx, file, maxLineBytes, redactProviderReasoningLine)
+		transform := redactProviderReasoningLine
+		if !artifactReferenceMayContainJSON(actaevents.ArtifactRef{Kind: kind, Path: path}) {
+			transform = redactJSONShapedProviderLine
+		}
+		return true, rewriteJSONLSnapshot(ctx, file, maxLineBytes, transform)
 	case artifactActaEventStream:
 		return true, rewriteJSONLSnapshot(ctx, file, maxLineBytes, redactActaReasoningEventLine)
 	default:
@@ -1008,11 +1015,39 @@ func rewriteJSONLSnapshot(ctx context.Context, file *os.File, maxLineBytes int, 
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
-	if _, err := io.Copy(file, temp); err != nil {
+	if err := copyContext(ctx, file, temp); err != nil {
 		return err
 	}
 	_, err = file.Seek(0, io.SeekStart)
 	return err
+}
+
+func copyContext(ctx context.Context, dst io.Writer, src io.Reader) error {
+	buffer := make([]byte, 128<<10)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		n, readErr := src.Read(buffer)
+		if n > 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			written, writeErr := dst.Write(buffer[:n])
+			if writeErr != nil {
+				return writeErr
+			}
+			if written != n {
+				return io.ErrShortWrite
+			}
+		}
+		if readErr == io.EOF {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
 }
 
 var errRedactionLineTooLong = errors.New("redaction line too long")
@@ -1030,6 +1065,14 @@ func readBoundedJSONLLine(reader *bufio.Reader, maxLineBytes int) ([]byte, error
 		}
 		return line, err
 	}
+}
+
+func redactJSONShapedProviderLine(line []byte) ([]byte, error) {
+	payload := bytes.TrimSpace(line)
+	if len(payload) == 0 || !looksLikeJSON(payload[0]) {
+		return line, nil
+	}
+	return redactProviderReasoningLine(line)
 }
 
 func redactProviderReasoningLine(line []byte) ([]byte, error) {
@@ -1121,15 +1164,17 @@ func reasoningFreeActaEventType(typ string) bool {
 func redactToStructuralReferences(value any) (any, bool) {
 	payload, ok := value.(map[string]any)
 	if !ok {
-		return map[string]any{"redacted": true}, true
+		return reasoningRedactionMarker, !isReasoningRedactionMarker(value)
 	}
 	changed := false
-	for key := range payload {
+	for key, item := range payload {
 		if structuralPayloadKey(key) {
 			continue
 		}
-		delete(payload, key)
-		changed = true
+		if !isReasoningRedactionMarker(item) {
+			payload[key] = reasoningRedactionMarker
+			changed = true
+		}
 	}
 	if redacted, _ := payload["redacted"].(bool); !redacted {
 		payload["redacted"] = true
@@ -1152,6 +1197,13 @@ func structuralPayloadKey(key string) bool {
 	}
 }
 
+const reasoningRedactionMarker = "[REDACTED]"
+
+func isReasoningRedactionMarker(value any) bool {
+	marker, ok := value.(string)
+	return ok && marker == reasoningRedactionMarker
+}
+
 func redactReasoningValue(value any) bool {
 	switch typed := value.(type) {
 	case []any:
@@ -1166,15 +1218,20 @@ func redactReasoningValue(value any) bool {
 			kind, _ = typed["kind"].(string)
 		}
 		kind = strings.ToLower(strings.TrimSpace(kind))
-		if strings.Contains(kind, "reasoning") || strings.Contains(kind, "thinking") {
+		if providerReasoningBlockKind(kind) {
 			_, changed := redactToStructuralReferences(typed)
 			return changed
 		}
 		changed := false
 		for key, item := range typed {
+			if userDataPayloadKey(typed, key) {
+				continue
+			}
 			if reasoningContentKey(key, item) {
-				delete(typed, key)
-				changed = true
+				if !isReasoningRedactionMarker(item) {
+					typed[key] = reasoningRedactionMarker
+					changed = true
+				}
 				continue
 			}
 			changed = redactReasoningValue(item) || changed
@@ -1185,11 +1242,44 @@ func redactReasoningValue(value any) bool {
 	}
 }
 
+// providerReasoningBlockKind matches the exact provider/digest discriminators
+// Acta understands. Substring matches are deliberately excluded: user-defined
+// values such as "reasoning_result" are data, not provider reasoning blocks.
+func providerReasoningBlockKind(kind string) bool {
+	switch kind {
+	case "reasoning", "thinking", "redacted_thinking":
+		return true
+	default:
+		return false
+	}
+}
+
+// userDataPayloadKey identifies containers whose contents belong to the user
+// or a tool. Reasoning-shaped field names inside these values are data unless
+// the surrounding provider event itself is an exact reasoning block.
+func userDataPayloadKey(parent map[string]any, key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "input", "arguments", "result", "output", "structured_output", "tool_use_result":
+		return true
+	case "details":
+		kind, _ := parent["kind"].(string)
+		return strings.EqualFold(strings.TrimSpace(kind), "structured_output")
+	case "content":
+		kind, _ := parent["type"].(string)
+		role, _ := parent["role"].(string)
+		kind = strings.ToLower(strings.TrimSpace(kind))
+		role = strings.ToLower(strings.TrimSpace(role))
+		return kind == "tool_result" || kind == "user" || role == "user"
+	default:
+		return false
+	}
+}
+
 func reasoningContentKey(key string, value any) bool {
 	switch strings.ToLower(strings.TrimSpace(key)) {
 	case "reasoning", "thinking", "reasoning_text", "thinking_text", "reasoning_content", "thinking_content", "chain_of_thought":
 		// Numeric reasoning-token counters are non-content evidence and must
-		// survive redaction. Suspicious text or structured content is removed.
+		// survive redaction. Suspicious text or structured content is masked.
 		switch value.(type) {
 		case string, []any, map[string]any:
 			return true
@@ -1210,6 +1300,9 @@ func setReasoningRedactionState(value any) bool {
 		}
 	case map[string]any:
 		for key, item := range typed {
+			if userDataPayloadKey(typed, key) {
+				continue
+			}
 			if key == "reasoning_redaction_state" {
 				if item != "redacted" {
 					typed[key] = "redacted"
@@ -1241,7 +1334,8 @@ func redactRunRecordSnapshot(file *os.File) error {
 // redactDigestSnapshot handles both current digests and pre-privacy-boundary
 // schema-v2 digests which persisted reasoning text in timeline entries. The
 // recursive fallback covers legacy/unknown locations, while reasoning-shaped
-// objects retain only the same structural allowlist used for Acta events.
+// objects preserve their keys and mask every value outside the structural
+// allowlist used for Acta events.
 func redactDigestSnapshot(file *os.File) error {
 	return rewriteJSONDocumentSnapshot(file, maxRedactionJSONDocumentBytes, func(value any) bool {
 		changed := setReasoningRedactionState(value)

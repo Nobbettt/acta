@@ -58,6 +58,39 @@ func TestNormalizeEventBoundsEveryFreeFormField(t *testing.T) {
 	}
 }
 
+func TestProjectionBudgetIncludesLocalReasoning(t *testing.T) {
+	// Quotes exercise JSON expansion as well as the retained string bytes. The
+	// event stream must fit the same projection budget after reasoning is copied
+	// into its text field.
+	reasoning := strings.Repeat(`"`, MaxEventTextBytes)
+	d := &Digest{}
+	attempted := MaxProjectionBytes/MaxEventTextBytes + 256
+	for range attempted {
+		d.appendEvent(Event{Kind: KindReasoning, localReasoningText: reasoning})
+	}
+	if !d.Metrics.ProjectionTruncated || d.Metrics.DroppedEvents == 0 {
+		t.Fatalf("projection metrics = %+v, want dropped reasoning events", d.Metrics)
+	}
+	if d.projectionBytes > MaxProjectionBytes {
+		t.Fatalf("projection retained %d bytes, maximum is %d", d.projectionBytes, MaxProjectionBytes)
+	}
+
+	accounted := 0
+	for _, event := range d.Timeline {
+		eventBytes, err := eventProjectionBytes(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		accounted += eventBytes
+		if len(event.LocalReasoningText()) != MaxEventTextBytes {
+			t.Fatalf("reasoning event retained %d bytes, want %d", len(event.LocalReasoningText()), MaxEventTextBytes)
+		}
+	}
+	if accounted != d.projectionBytes {
+		t.Fatalf("accounted projection bytes = %d, digest tracks %d", accounted, d.projectionBytes)
+	}
+}
+
 func FuzzProviderParsersDoNotPanic(f *testing.F) {
 	f.Add([]byte(`{"type":"turn.completed"}` + "\n"))
 	f.Add([]byte(`{"type":"result","subtype":"success"}` + "\n"))
