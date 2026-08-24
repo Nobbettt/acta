@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/nobbettt/acta/internal/reasoning"
 	"github.com/nobbettt/acta/internal/securefile"
 )
 
@@ -187,22 +188,20 @@ func redactReasoningValue(value any) bool {
 }
 
 func redactCodexReasoningBlock(event map[string]any) bool {
-	switch event["type"] {
-	case "item.started", "item.updated", "item.completed":
-	default:
+	eventType, _ := event["type"].(string)
+	item, ok := event["item"].(map[string]any)
+	if !ok {
 		return false
 	}
-	item, ok := event["item"].(map[string]any)
-	if !ok || item["type"] != "reasoning" {
+	itemType, _ := item["type"].(string)
+	if !reasoning.IsCodexBlock(eventType, itemType) {
 		return false
 	}
 	return stripReasoningBlock(item)
 }
 
 func redactClaudeReasoningBlocks(event map[string]any) bool {
-	if event["type"] != "assistant" {
-		return false
-	}
+	eventType, _ := event["type"].(string)
 	message, ok := event["message"].(map[string]any)
 	if !ok {
 		return false
@@ -217,8 +216,8 @@ func redactClaudeReasoningBlocks(event map[string]any) bool {
 		if !ok {
 			continue
 		}
-		switch block["type"] {
-		case "thinking", "redacted_thinking":
+		blockType, _ := block["type"].(string)
+		if reasoning.IsClaudeBlock(eventType, blockType) {
 			changed = stripReasoningBlock(block) || changed
 		}
 	}

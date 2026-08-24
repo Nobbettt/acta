@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/nobbettt/acta/internal/reasoning"
 	"github.com/nobbettt/acta/internal/runrecord"
 	"github.com/nobbettt/acta/internal/securefile"
 )
@@ -176,8 +177,7 @@ func RedactReasoning(d *Digest) {
 	}
 	for i := range d.Timeline {
 		event := &d.Timeline[i]
-		identity := strings.ToLower(event.Kind + " " + event.ProviderEvent)
-		if event.Kind == KindReasoning || strings.Contains(identity, "reasoning") || strings.Contains(identity, "thinking") {
+		if isReasoningEvent(*event) {
 			event.Redacted = true
 			event.Text = ""
 			event.localReasoningText = ""
@@ -191,6 +191,16 @@ func RedactReasoning(d *Digest) {
 			event.Details = nil
 		}
 	}
+}
+
+func isReasoningEvent(event Event) bool {
+	var details struct {
+		Type string `json:"type"`
+	}
+	if len(event.Details) > 0 {
+		_ = json.Unmarshal(event.Details, &details)
+	}
+	return reasoning.IsNormalizedEvent(event.Kind, event.ProviderEvent, details.Type)
 }
 
 type FileMutation struct {
