@@ -133,30 +133,77 @@ func TestTopLevelSchemasCoverEveryPublishedGoField(t *testing.T) {
 	}
 }
 
-func TestPublishedBundleArtifactIDRejectsOuterWhitespace(t *testing.T) {
+func TestPublishedBundleArtifactIDSchemaAndGoValidatorAgree(t *testing.T) {
 	schema := compileSchemas(t)["run-record.schema.json"]
-	payload, err := os.ReadFile(filepath.Join("examples", "run-record.v2.json"))
+	schemaPayload, err := os.ReadFile("run-record.schema.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var record map[string]any
-	if err := json.Unmarshal(payload, &record); err != nil {
+	var document struct {
+		Defs struct {
+			PublishedBundle struct {
+				Properties struct {
+					ArtifactID struct {
+						Pattern string `json:"pattern"`
+					} `json:"artifact_id"`
+				} `json:"properties"`
+			} `json:"published_bundle"`
+		} `json:"$defs"`
+	}
+	if err := json.Unmarshal(schemaPayload, &document); err != nil {
 		t.Fatal(err)
 	}
-	record["published_bundle"] = map[string]any{
-		"artifact_id": " id ",
-		"sha256":      strings.Repeat("a", 64),
+	if got := document.Defs.PublishedBundle.Properties.ArtifactID.Pattern; got != runrecord.PublishedBundleArtifactIDPattern {
+		t.Fatalf("schema artifact_id pattern = %q, Go pattern = %q", got, runrecord.PublishedBundleArtifactIDPattern)
 	}
-	if err := schema.Validate(record); err == nil {
-		t.Fatal("run-record schema accepted a whitespace-padded published_bundle.artifact_id")
+
+	basePayload, err := os.ReadFile(filepath.Join("examples", "run-record.v2.json"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	record["published_bundle"].(map[string]any)["artifact_id"] = "artifact id"
-	if err := schema.Validate(record); err != nil {
-		t.Fatalf("run-record schema rejected an artifact id with no outer whitespace: %v", err)
+	tests := []struct {
+		name       string
+		artifactID string
+		wantValid  bool
+	}{
+		{name: "single character", artifactID: "a", wantValid: true},
+		{name: "machine ID", artifactID: "Bundle_2026.08-24", wantValid: true},
+		{name: "maximum length", artifactID: "a" + strings.Repeat("-", 127), wantValid: true},
+		{name: "empty", artifactID: ""},
+		{name: "leading dot", artifactID: ".artifact"},
+		{name: "leading hyphen", artifactID: "-artifact"},
+		{name: "embedded space", artifactID: "artifact id"},
+		{name: "NBSP", artifactID: "artifact\u00a0id"},
+		{name: "vertical tab", artifactID: "artifact\vid"},
+		{name: "slash", artifactID: "artifact/id"},
+		{name: "non-ASCII", artifactID: "artifáct"},
+		{name: "too long", artifactID: "a" + strings.Repeat("-", 128)},
 	}
-	record["published_bundle"].(map[string]any)["artifact_id"] = "\u00a0artifact\u00a0"
-	if err := schema.Validate(record); err != nil {
-		t.Fatalf("run-record schema rejected ASCII-pattern-valid NBSP edges: %v", err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var schemaRecord map[string]any
+			if err := json.Unmarshal(basePayload, &schemaRecord); err != nil {
+				t.Fatal(err)
+			}
+			schemaRecord["published_bundle"] = map[string]any{
+				"artifact_id": test.artifactID,
+				"sha256":      strings.Repeat("a", 64),
+			}
+			schemaValid := schema.Validate(schemaRecord) == nil
+
+			var goRecord runrecord.Record
+			if err := json.Unmarshal(basePayload, &goRecord); err != nil {
+				t.Fatal(err)
+			}
+			goRecord.PublishedBundle = &runrecord.PublishedBundle{
+				ArtifactID: test.artifactID,
+				SHA256:     strings.Repeat("a", 64),
+			}
+			goValid := goRecord.Validate() == nil
+			if schemaValid != goValid || schemaValid != test.wantValid {
+				t.Fatalf("artifact ID %q: schema valid=%v, Go valid=%v, want valid=%v", test.artifactID, schemaValid, goValid, test.wantValid)
+			}
+		})
 	}
 }
 

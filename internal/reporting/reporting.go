@@ -903,7 +903,7 @@ func sniffArtifactJSON(file *os.File, maxLineBytes int) (artifactJSONFormat, err
 	}
 	defer func() { _, _ = file.Seek(0, io.SeekStart) }()
 	reader := bufio.NewReaderSize(file, 64<<10)
-	jsonLooking := false
+	potentialDocument := false
 	nonEmptyLines := 0
 	for nonEmptyLines < artifactSniffNonEmptyLines {
 		line, readErr := readBoundedJSONLLine(reader, maxLineBytes)
@@ -914,11 +914,11 @@ func sniffArtifactJSON(file *os.File, maxLineBytes int) (artifactJSONFormat, err
 		if len(trimmed) > 0 {
 			nonEmptyLines++
 			if looksLikeJSON(trimmed[0]) {
-				jsonLooking = true
+				potentialDocument = true
 				if json.Valid(trimmed) {
-					// A valid JSON value on any inspected non-empty line is
-					// conservatively treated as JSONL. If surrounding opaque
-					// lines exist, the JSONL rewriter will refuse the artifact.
+					// A valid JSON container on any inspected non-empty line is
+					// conservatively treated as JSONL. Opaque surrounding lines
+					// remain untouched when the artifact itself was not declared JSON.
 					return artifactJSONLines, nil
 				}
 			}
@@ -930,7 +930,7 @@ func sniffArtifactJSON(file *os.File, maxLineBytes int) (artifactJSONFormat, err
 			break
 		}
 	}
-	if !jsonLooking {
+	if !potentialDocument {
 		return artifactOpaque, nil
 	}
 	info, err := file.Stat()
@@ -950,7 +950,9 @@ func sniffArtifactJSON(file *os.File, maxLineBytes int) (artifactJSONFormat, err
 	if json.Valid(payload) {
 		return artifactJSONDocument, nil
 	}
-	return artifactOpaque, fmt.Errorf("artifact contains JSON-looking content but is neither valid JSON nor JSONL")
+	// A container prefix is not enough to make an opaque log line JSON-shaped.
+	// Bracketed diagnostics such as "[WARN] retrying" remain plain text.
+	return artifactOpaque, nil
 }
 
 func looksLikeJSON(first byte) bool {
@@ -1069,7 +1071,7 @@ func readBoundedJSONLLine(reader *bufio.Reader, maxLineBytes int) ([]byte, error
 
 func redactJSONShapedProviderLine(line []byte) ([]byte, error) {
 	payload := bytes.TrimSpace(line)
-	if len(payload) == 0 || !looksLikeJSON(payload[0]) {
+	if len(payload) == 0 || !looksLikeJSON(payload[0]) || !json.Valid(payload) {
 		return line, nil
 	}
 	return redactProviderReasoningLine(line)

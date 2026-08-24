@@ -10,13 +10,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/nobbettt/acta/internal/securefile"
 )
 
 // redactReasoningRawStream atomically rewrites a provider JSONL stream so
-// objects identified as reasoning/thinking retain structural identity only.
+// known Codex and Claude reasoning blocks retain structural identity only.
 // Invalid non-empty JSON fails closed: redact mode must never publish bytes it
 // could not classify.
 func redactReasoningRawStream(path string, maxLineBytes int) (string, error) {
@@ -179,32 +178,62 @@ func redactReasoningLine(line []byte) ([]byte, error) {
 }
 
 func redactReasoningValue(value any) bool {
-	switch typed := value.(type) {
-	case []any:
-		changed := false
-		for _, item := range typed {
-			changed = redactReasoningValue(item) || changed
-		}
-		return changed
-	case map[string]any:
-		kind, _ := typed["type"].(string)
-		kind = strings.ToLower(strings.TrimSpace(kind))
-		if strings.Contains(kind, "reasoning") || strings.Contains(kind, "thinking") {
-			for key := range typed {
-				switch key {
-				case "type", "id", "status":
-				default:
-					delete(typed, key)
-				}
-			}
-			return true
-		}
-		changed := false
-		for _, item := range typed {
-			changed = redactReasoningValue(item) || changed
-		}
-		return changed
+	event, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	changed := redactCodexReasoningBlock(event)
+	return redactClaudeReasoningBlocks(event) || changed
+}
+
+func redactCodexReasoningBlock(event map[string]any) bool {
+	switch event["type"] {
+	case "item.started", "item.updated", "item.completed":
 	default:
 		return false
 	}
+	item, ok := event["item"].(map[string]any)
+	if !ok || item["type"] != "reasoning" {
+		return false
+	}
+	return stripReasoningBlock(item)
+}
+
+func redactClaudeReasoningBlocks(event map[string]any) bool {
+	if event["type"] != "assistant" {
+		return false
+	}
+	message, ok := event["message"].(map[string]any)
+	if !ok {
+		return false
+	}
+	content, ok := message["content"].([]any)
+	if !ok {
+		return false
+	}
+	changed := false
+	for _, value := range content {
+		block, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch block["type"] {
+		case "thinking", "redacted_thinking":
+			changed = stripReasoningBlock(block) || changed
+		}
+	}
+	return changed
+}
+
+func stripReasoningBlock(block map[string]any) bool {
+	changed := false
+	for key := range block {
+		switch key {
+		case "type", "id", "status":
+		default:
+			delete(block, key)
+			changed = true
+		}
+	}
+	return changed
 }

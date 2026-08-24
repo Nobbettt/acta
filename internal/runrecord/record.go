@@ -2,6 +2,7 @@ package runrecord
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -94,6 +95,12 @@ type PublishedBundle struct {
 	SHA256     string `json:"sha256"`
 }
 
+// PublishedBundleArtifactIDPattern is shared with the published run-record
+// schema and defines the complete machine-ID syntax.
+const PublishedBundleArtifactIDPattern = `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`
+
+var publishedBundleArtifactIDRegexp = regexp.MustCompile(PublishedBundleArtifactIDPattern)
+
 // Validate rejects records from schemas this build cannot interpret.
 func (r *Record) Validate() error {
 	if r == nil {
@@ -178,24 +185,8 @@ func (r *Record) Validate() error {
 	return nil
 }
 
-// validPublishedBundleArtifactID mirrors the schema's ASCII-only \s/\S
-// pattern. Unicode whitespace such as NBSP is data here; only the five ASCII
-// whitespace bytes recognized by the published pattern are forbidden at the
-// edges.
 func validPublishedBundleArtifactID(value string) bool {
-	if value == "" {
-		return false
-	}
-	return !asciiPatternWhitespace(value[0]) && !asciiPatternWhitespace(value[len(value)-1])
-}
-
-func asciiPatternWhitespace(value byte) bool {
-	switch value {
-	case ' ', '\t', '\n', '\f', '\r':
-		return true
-	default:
-		return false
-	}
+	return publishedBundleArtifactIDRegexp.MatchString(value)
 }
 
 func oneOf(value string, allowed ...string) bool {

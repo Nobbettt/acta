@@ -51,20 +51,22 @@ func TestValidateCurrentRecord(t *testing.T) {
 	}
 }
 
-func TestValidatePublishedBundleArtifactIDUsesSchemaASCIIWhitespace(t *testing.T) {
+func TestValidatePublishedBundleArtifactIDUsesMachineIDPattern(t *testing.T) {
 	sha256 := strings.Repeat("a", 64)
 	tests := []struct {
 		name       string
 		artifactID string
 		wantError  bool
 	}{
-		{name: "plain", artifactID: "artifact id"},
-		{name: "Unicode NBSP edges", artifactID: "\u00a0artifact\u00a0"},
-		{name: "vertical tab edges", artifactID: "\vartifact\v"},
-		{name: "leading ASCII space", artifactID: " artifact", wantError: true},
-		{name: "trailing ASCII tab", artifactID: "artifact\t", wantError: true},
-		{name: "leading ASCII newline", artifactID: "\nartifact", wantError: true},
-		{name: "trailing ASCII form feed", artifactID: "artifact\f", wantError: true},
+		{name: "plain", artifactID: "artifact-01"},
+		{name: "allowed punctuation", artifactID: "A._-9"},
+		{name: "maximum length", artifactID: "a" + strings.Repeat("-", 127)},
+		{name: "embedded space", artifactID: "artifact id", wantError: true},
+		{name: "Unicode NBSP", artifactID: "artifact\u00a0id", wantError: true},
+		{name: "vertical tab", artifactID: "artifact\vid", wantError: true},
+		{name: "leading dot", artifactID: ".artifact", wantError: true},
+		{name: "leading hyphen", artifactID: "-artifact", wantError: true},
+		{name: "too long", artifactID: "a" + strings.Repeat("-", 128), wantError: true},
 		{name: "empty", artifactID: "", wantError: true},
 	}
 	for _, test := range tests {

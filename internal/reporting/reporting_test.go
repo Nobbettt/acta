@@ -191,6 +191,29 @@ func TestUploadRunPostsRunEventsArtifactsAndCompletion(t *testing.T) {
 	}
 }
 
+func TestUploadRunPreservesBracketedPlainTextStderr(t *testing.T) {
+	const original = "[WARN] retrying\n"
+	if uploaded := uploadBundleStderr(t, original); uploaded != original {
+		t.Fatalf("uploaded stderr = %q, want byte-identical %q", uploaded, original)
+	}
+}
+
+func TestUploadRunConservativelyRedactsValidUnknownStderrJSON(t *testing.T) {
+	const secret = "ambiguous private reasoning"
+	uploaded := uploadBundleStderr(t, `{"metadata":{"label":"kept","reasoning":"`+secret+`"}}`+"\n")
+	if strings.Contains(uploaded, secret) {
+		t.Fatalf("uploaded valid unknown JSON retained reasoning: %s", uploaded)
+	}
+	var value map[string]any
+	if err := json.Unmarshal([]byte(uploaded), &value); err != nil {
+		t.Fatal(err)
+	}
+	metadata, ok := value["metadata"].(map[string]any)
+	if !ok || metadata["label"] != "kept" || metadata["reasoning"] != reasoningRedactionMarker {
+		t.Fatalf("valid unknown JSON did not receive conservative redaction: %#v", value)
+	}
+}
+
 func TestUploadRunRedactsRemoteReasoningByDefaultForEveryAgentShape(t *testing.T) {
 	const secret = "private-remote-reasoning-57291"
 	tests := map[string]string{
@@ -963,6 +986,50 @@ func writeBundle(t *testing.T) string {
 		"",
 	}, "\n"))
 	return runDir
+}
+
+func uploadBundleStderr(t *testing.T, content string) string {
+	t.Helper()
+	runDir := writeBundle(t)
+	const stderrName = "agent.stderr.log"
+	writeFile(t, filepath.Join(runDir, stderrName), content)
+	eventsPath := filepath.Join(runDir, actaevents.Filename)
+	events := readTestFile(t, eventsPath)
+	events = strings.Replace(events,
+		`{"kind":"event_stream","path":"acta-events.jsonl"}`,
+		`{"kind":"raw_stderr","path":"`+stderrName+`"},{"kind":"event_stream","path":"acta-events.jsonl"}`,
+		1,
+	)
+	writeFile(t, eventsPath, events)
+
+	var uploaded string
+	created := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/api/ingest/runs" {
+			created = true
+		}
+		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == stderrName {
+			payload, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Error(err)
+			}
+			uploaded = string(payload)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	record := testRecord(runDir)
+	record.ReasoningRedactionState = "retained_local"
+	if err := UploadRun(context.Background(), Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+	}, record); err != nil {
+		t.Fatalf("UploadRun() error = %v", err)
+	}
+	if !created {
+		t.Fatal("upload did not create the remote run")
+	}
+	return uploaded
 }
 
 func testEvent(sequence int, text string) actaevents.Event {

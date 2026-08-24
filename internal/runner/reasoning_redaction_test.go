@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -12,7 +13,7 @@ import (
 
 func TestRedactReasoningRawStreamRejectsOversizedLineWithoutMutation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "provider.jsonl")
-	original := `{"type":"thinking","thinking":"private oversized reasoning"}` + "\n"
+	original := `{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"private oversized reasoning"}]}}` + "\n"
 	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -32,10 +33,65 @@ func TestRedactReasoningRawStreamRejectsOversizedLineWithoutMutation(t *testing.
 	}
 }
 
+func TestRedactReasoningLineRedactsExactProviderBlocks(t *testing.T) {
+	const secret = "private provider reasoning"
+	tests := map[string][]byte{
+		"codex":  []byte(`{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","text":"` + secret + `"}}` + "\n"),
+		"claude": []byte(`{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"` + secret + `"}]}}` + "\n"),
+	}
+	for name, original := range tests {
+		t.Run(name, func(t *testing.T) {
+			redacted, err := redactReasoningLine(original)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(redacted, []byte(secret)) {
+				t.Fatalf("provider reasoning was not redacted: %s", redacted)
+			}
+			if !bytes.Contains(redacted, []byte(`"type":"reasoning"`)) && !bytes.Contains(redacted, []byte(`"type":"thinking"`)) {
+				t.Fatalf("provider reasoning block lost its discriminator: %s", redacted)
+			}
+		})
+	}
+}
+
+func TestRedactReasoningLinePreservesNestedToolResultLookalike(t *testing.T) {
+	original := []byte(`{"type":"item.completed","item":{"id":"mcp-1","type":"mcp_tool_call","result":{"type":"reasoning_result","text":"visible output"}}}` + "\n")
+	redacted, err := redactReasoningLine(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(redacted, original) {
+		t.Fatalf("nested tool result changed:\n got %s\nwant %s", redacted, original)
+	}
+}
+
+func TestRedactReasoningLineRequiresExactProviderDiscriminator(t *testing.T) {
+	original := []byte(`{"type":"item.completed","item":{"id":"result-1","type":"reasoning_result","text":"visible output"}}` + "\n")
+	redacted, err := redactReasoningLine(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(redacted, original) {
+		t.Fatalf("lookalike provider item changed:\n got %s\nwant %s", redacted, original)
+	}
+}
+
+func TestRedactReasoningLineRequiresProviderEventPosition(t *testing.T) {
+	original := []byte(`{"type":"thinking","thinking":"visible non-provider data"}` + "\n")
+	redacted, err := redactReasoningLine(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(redacted, original) {
+		t.Fatalf("non-provider object changed:\n got %s\nwant %s", redacted, original)
+	}
+}
+
 func TestRedactReasoningRawStreamMarksPostRenameCommitFailurePartial(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "provider.jsonl")
 	const secret = "private commit-failure reasoning"
-	original := `{"type":"thinking","thinking":"` + secret + `"}` + "\n"
+	original := `{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"` + secret + `"}]}}` + "\n"
 	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
