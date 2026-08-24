@@ -276,6 +276,87 @@ func TestUploadRunLegacyRecordUsesMetadataOrExplicitSchemaUpgrade(t *testing.T) 
 	}
 }
 
+func TestV2RewritePathsEmitByteIdenticalV2OrSchemaV3(t *testing.T) {
+	const (
+		producer = `"producer":{"name":"acta","version":"test"}`
+		started  = `{"schema_version":2,` + producer + `,"run_id":"run-1","sequence":1,"timestamp":"2026-07-06T12:00:00Z","source":"acta","type":"run.started","payload":{"agent":"codex"}}`
+	)
+	reasoningStream := strings.Join([]string{
+		started,
+		`{"schema_version":2,` + producer + `,"run_id":"run-1","sequence":2,"timestamp":"2026-07-06T12:00:00.5Z","source":"acta","type":"agent.reasoning","payload":{"kind":"reasoning","text":"private"}}`,
+		`{"schema_version":2,` + producer + `,"run_id":"run-1","sequence":3,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed","payload":{"status":"ok"}}`,
+		"",
+	}, "\n")
+	withheldStream := strings.Join([]string{
+		started,
+		`{"schema_version":2,` + producer + `,"run_id":"run-1","sequence":2,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed","payload":{"status":"ok"},"artifact_refs":[{"kind":"raw_stderr","path":"agent.stderr.log"}]}`,
+		"",
+	}, "\n")
+
+	tests := []struct {
+		name    string
+		input   string
+		rewrite func(*os.File) error
+	}{
+		{
+			name:  "run record reasoning redaction",
+			input: `{"schema_version":2,"id":"run-1","reasoning":"private"}` + "\n",
+			rewrite: func(file *os.File) error {
+				return redactRunRecordSnapshot(context.Background(), file)
+			},
+		},
+		{
+			name:  "legacy digest reasoning redaction",
+			input: `{"schema_version":2,"run_id":"run-1","timeline":[{"kind":"reasoning","text":"private"}]}` + "\n",
+			rewrite: func(file *os.File) error {
+				return redactDigestSnapshot(context.Background(), file)
+			},
+		},
+		{
+			name:  "remote event reasoning redaction",
+			input: reasoningStream,
+			rewrite: func(file *os.File) error {
+				return redactActaEventSnapshot(context.Background(), file, DefaultMaxRedactionLineBytes)
+			},
+		},
+		{
+			name:  "remote withheld reference annotation",
+			input: withheldStream,
+			rewrite: func(file *os.File) error {
+				_, err := annotateWithheldArtifactRefsContext(context.Background(), file, "run-1", []artifactUpload{{
+					Kind: "raw_stderr", Filename: "agent.stderr.log", RedactionState: "unverified", Withheld: true,
+				}})
+				return err
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			file := writeSnapshotFile(t, test.input)
+			if err := test.rewrite(file); err != nil {
+				t.Fatal(err)
+			}
+			assertV2RewriteOutput(t, test.input, readOpenFile(t, file))
+		})
+	}
+}
+
+func assertV2RewriteOutput(t *testing.T, original, emitted string) {
+	t.Helper()
+	if emitted == original {
+		return
+	}
+	for lineNumber, line := range strings.Split(strings.TrimSpace(emitted), "\n") {
+		var document map[string]any
+		if err := json.Unmarshal([]byte(line), &document); err != nil {
+			t.Fatalf("decode emitted document %d: %v", lineNumber+1, err)
+		}
+		if document["schema_version"] != float64(3) {
+			t.Fatalf("rewritten document %d retained schema_version %#v:\n%s", lineNumber+1, document["schema_version"], emitted)
+		}
+	}
+}
+
 func TestUploadRunPreservesPlainTextStderr(t *testing.T) {
 	const original = "warning: retrying provider request\n"
 	if uploaded := uploadBundleStderr(t, original); uploaded != original {
@@ -321,6 +402,7 @@ func TestUploadRunWithholdsAmbiguousOpaqueStderrByDefault(t *testing.T) {
 
 	uploaded := map[string]bool{}
 	var remoteEvents []actaevents.Event
+	var eventArtifactSchemaVersion string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/api/ingest/runs/run-1/events":
@@ -330,7 +412,11 @@ func TestUploadRunWithholdsAmbiguousOpaqueStderrByDefault(t *testing.T) {
 			}
 			remoteEvents = append(remoteEvents, body.Events...)
 		case "/api/ingest/runs/run-1/artifacts":
-			uploaded[request.URL.Query().Get("filename")] = true
+			filename := request.URL.Query().Get("filename")
+			uploaded[filename] = true
+			if filename == actaevents.Filename {
+				eventArtifactSchemaVersion = request.URL.Query().Get("schema_version")
+			}
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -343,8 +429,14 @@ func TestUploadRunWithholdsAmbiguousOpaqueStderrByDefault(t *testing.T) {
 	if uploaded[stderrName] {
 		t.Fatal("ambiguous opaque stderr was uploaded by default")
 	}
+	if eventArtifactSchemaVersion != "3" {
+		t.Fatalf("rewritten event artifact schema_version metadata = %q, want 3", eventArtifactSchemaVersion)
+	}
 	var terminalRefs []actaevents.ArtifactRef
 	for _, event := range remoteEvents {
+		if event.SchemaVersion != actaevents.SchemaVersion {
+			t.Errorf("rewritten remote event sequence %d schema_version = %d, want %d", event.Sequence, event.SchemaVersion, actaevents.SchemaVersion)
+		}
 		if event.Type == actaevents.TypeRunCompleted {
 			terminalRefs = event.ArtifactRefs
 		}

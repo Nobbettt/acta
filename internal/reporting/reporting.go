@@ -893,6 +893,9 @@ func annotateWithheldArtifactRefsContext(ctx context.Context, eventFile *os.File
 			ref.Reason = withheldArtifactReason
 			ref.RedactionState = artifact.RedactionState
 		}
+		if _, err := stampRewrittenDocumentSchemaVersion(&event, true); err != nil {
+			return false, fmt.Errorf("upgrade event sequence %d after withheld artifact annotations: %w", event.Sequence, err)
+		}
 		encoded, err := json.Marshal(event)
 		if err != nil {
 			return false, fmt.Errorf("encode event sequence %d with withheld artifact annotations: %w", event.Sequence, err)
@@ -938,8 +941,13 @@ func refreshEventArtifactContext(ctx context.Context, artifacts []artifactUpload
 			if err != nil {
 				return fmt.Errorf("hash annotated event snapshot: %w", err)
 			}
+			schemaVersion, err := eventArtifactSchemaVersionContext(ctx, artifact.File)
+			if err != nil {
+				return fmt.Errorf("read schema version from annotated event snapshot: %w", err)
+			}
 			artifact.SHA256 = sha256Hex
 			artifact.SizeBytes = sizeBytes
+			artifact.SchemaVersion = &schemaVersion
 		}
 		totalBytes += artifact.SizeBytes
 	}
@@ -1020,7 +1028,7 @@ func redactArtifactSnapshot(ctx context.Context, file *os.File, kind, path strin
 	case artifactJSONLines:
 		return true, rewriteJSONLSnapshot(ctx, file, maxLineBytes, redactProviderReasoningLine)
 	case artifactActaEventStream:
-		return true, rewriteJSONLSnapshot(ctx, file, maxLineBytes, redactActaReasoningEventLine)
+		return true, redactActaEventSnapshot(ctx, file, maxLineBytes)
 	default:
 		return false, fmt.Errorf("unsupported artifact JSON format")
 	}
@@ -1360,6 +1368,75 @@ func rewriteJSONLSnapshot(ctx context.Context, file *os.File, maxLineBytes int, 
 	return err
 }
 
+// redactActaEventSnapshot upgrades the entire stream when any event body is
+// rewritten. Event streams require a single schema version, so upgrading only
+// the event that acquired v3 redaction fields would produce an invalid mixed
+// v2/v3 stream.
+func redactActaEventSnapshot(ctx context.Context, file *os.File, maxLineBytes int) error {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	if maxLineBytes <= 0 {
+		return fmt.Errorf("maximum redaction line size must be positive")
+	}
+	reader := bufio.NewReaderSize(file, 64<<10)
+	lineNumber := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		lineNumber++
+		line, readErr := readBoundedJSONLLine(reader, maxLineBytes)
+		if errors.Is(readErr, errRedactionLineTooLong) {
+			return fmt.Errorf("JSONL line %d exceeds maximum redaction line size of %d bytes", lineNumber, maxLineBytes)
+		}
+		redacted, err := redactActaReasoningEventLine(line)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(redacted, line) {
+			break
+		}
+		if readErr != nil {
+			if readErr != io.EOF {
+				return readErr
+			}
+			_, err := file.Seek(0, io.SeekStart)
+			return err
+		}
+	}
+	return rewriteJSONLSnapshot(ctx, file, maxLineBytes, func(line []byte) ([]byte, error) {
+		redacted, err := redactActaReasoningEventLine(line)
+		if err != nil {
+			return nil, err
+		}
+		return stampActaEventLineSchemaVersion(redacted)
+	})
+}
+
+func stampActaEventLineSchemaVersion(line []byte) ([]byte, error) {
+	hasNewline := len(line) > 0 && line[len(line)-1] == '\n'
+	payload := bytes.TrimSpace(line)
+	if len(payload) == 0 {
+		return line, nil
+	}
+	var event map[string]any
+	if err := decodeJSONUseNumber(payload, &event); err != nil {
+		return nil, fmt.Errorf("parse Acta event for schema upgrade: %w", err)
+	}
+	if _, err := stampRewrittenDocumentSchemaVersion(event, true); err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		return nil, err
+	}
+	if hasNewline {
+		encoded = append(encoded, '\n')
+	}
+	return encoded, nil
+}
+
 func copyContext(ctx context.Context, dst io.Writer, src io.Reader) error {
 	buffer := make([]byte, 128<<10)
 	for {
@@ -1470,6 +1547,9 @@ func redactActaReasoningEventLine(line []byte) ([]byte, error) {
 	}
 	if !changed {
 		return line, nil
+	}
+	if _, err := stampRewrittenDocumentSchemaVersion(event, true); err != nil {
+		return nil, err
 	}
 	encoded, err := json.Marshal(event)
 	if err != nil {
@@ -1771,11 +1851,36 @@ func setReasoningRedactionStateContext(ctx context.Context, value any) (bool, er
 	return changed, nil
 }
 
+// stampRewrittenDocumentSchemaVersion is the single version boundary for Acta
+// documents rewritten during remote redaction. Schema v2 does not define the
+// redaction and withheld-reference fields introduced by these rewrites, so an
+// altered emitted copy must declare v3. Unchanged legacy documents stay byte
+// identical.
+func stampRewrittenDocumentSchemaVersion(document any, rewritten bool) (bool, error) {
+	if !rewritten {
+		return false, nil
+	}
+	const rewrittenSchemaVersion = 3
+	switch typed := document.(type) {
+	case map[string]any:
+		typed["schema_version"] = rewrittenSchemaVersion
+	case *actaevents.Event:
+		typed.SchemaVersion = rewrittenSchemaVersion
+	default:
+		return false, fmt.Errorf("rewritten Acta document has unsupported root type %T", document)
+	}
+	return true, nil
+}
+
 func redactRunRecordSnapshot(ctx context.Context, file *os.File) error {
 	return rewriteJSONDocumentSnapshot(ctx, file, runrecord.MaxRecordBytes, func(ctx context.Context, value any) (bool, error) {
 		record, ok := value.(map[string]any)
 		if !ok {
-			return redactReasoningValueContext(ctx, value)
+			changed, err := redactReasoningValueContext(ctx, value)
+			if err != nil {
+				return false, err
+			}
+			return stampRewrittenDocumentSchemaVersion(value, changed)
 		}
 		contentChanged, err := redactReasoningValueContext(ctx, record)
 		if err != nil {
@@ -1792,17 +1897,11 @@ func redactRunRecordSnapshot(ctx context.Context, file *os.File) error {
 			return false, nil
 		}
 		changed := contentChanged
-		if schemaVersion < runrecord.SchemaVersion {
-			// A legacy record whose content needed rewriting can no longer claim
-			// its original contract once v3 redaction metadata is attached.
-			record["schema_version"] = runrecord.SchemaVersion
-			changed = true
-		}
 		if record["reasoning_redaction_state"] != "redacted" {
 			record["reasoning_redaction_state"] = "redacted"
 			changed = true
 		}
-		return changed, nil
+		return stampRewrittenDocumentSchemaVersion(record, changed)
 	})
 }
 
@@ -1818,7 +1917,10 @@ func redactDigestSnapshot(ctx context.Context, file *os.File) error {
 			return false, err
 		}
 		reasoningChanged, err := redactReasoningValueContext(ctx, value)
-		return reasoningChanged || changed, err
+		if err != nil {
+			return false, err
+		}
+		return stampRewrittenDocumentSchemaVersion(value, reasoningChanged || changed)
 	})
 }
 
