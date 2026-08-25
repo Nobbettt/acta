@@ -227,6 +227,7 @@ func TestWithheldArtifactManifestValidatesForReplayAndSchema(t *testing.T) {
 func TestGoProducedCurrentArtifactsValidateAgainstPublishedSchemas(t *testing.T) {
 	schemas := compileSchemas(t)
 	producer := runrecord.Producer{Name: "acta", Version: "v0.1.0", Commit: "abc", Date: "2026-08-19T10:00:00Z"}
+	regenerator := runrecord.Producer{Name: "acta", Version: "v0.2.0", Commit: "def", Date: "2026-08-25T10:00:00Z"}
 	now := time.Date(2026, 8, 19, 10, 0, 0, 0, time.UTC)
 	exit := 0
 
@@ -262,7 +263,7 @@ func TestGoProducedCurrentArtifactsValidateAgainstPublishedSchemas(t *testing.T)
 		{
 			name: "Acta event", schema: "acta-event.schema.json",
 			value: actaevents.Event{
-				SchemaVersion: actaevents.SchemaVersion, Producer: producer, RunID: "run-example", Sequence: 1,
+				SchemaVersion: actaevents.SchemaVersion, Producer: producer, RegeneratedBy: &regenerator, RunID: "run-example", Sequence: 1,
 				Timestamp: now, Source: actaevents.Source, Type: actaevents.TypeRunStarted,
 				Payload: json.RawMessage(`{"agent":"codex","agent_version":"0.147.0","cwd":"/workspace","run_dir":"/workspace/.acta/runs/run-example","prompt_source":"flag","otlp_status":"not_sampled"}`),
 			},

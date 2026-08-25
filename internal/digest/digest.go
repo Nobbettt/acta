@@ -407,7 +407,7 @@ func (d *Digest) Validate() error {
 		return fmt.Errorf("unsupported digest schema_version %d (supported %d..%d)", d.SchemaVersion, MinSchemaVersion, SchemaVersion)
 	}
 	validOTLPStatus := d.OTLPStatus == "" || oneOf(d.OTLPStatus, "not_configured", "exported", "failed")
-	if d.SchemaVersion >= 3 {
+	if runrecord.SupportsV3Fields(d.SchemaVersion) {
 		validOTLPStatus = validOTLPStatus || d.OTLPStatus == "not_sampled"
 	}
 	if !validOTLPStatus {

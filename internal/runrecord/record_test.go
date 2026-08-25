@@ -2,6 +2,7 @@ package runrecord
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -77,6 +78,46 @@ func TestParseVersionedOTLPStatus(t *testing.T) {
 				t.Fatalf("versioned parser rejected record: %v", err)
 			}
 		})
+	}
+}
+
+func TestValidateVersionGatesV3Fields(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+		edit  func(*Record)
+	}{
+		{
+			name:  "reasoning redaction state",
+			field: "reasoning_redaction_state",
+			edit:  func(record *Record) { record.ReasoningRedactionState = "redacted" },
+		},
+		{
+			name:  "published bundle",
+			field: "published_bundle",
+			edit: func(record *Record) {
+				record.PublishedBundle = &PublishedBundle{ArtifactID: "bundle-1", SHA256: strings.Repeat("a", 64)}
+			},
+		},
+	}
+	for _, test := range tests {
+		for _, schemaVersion := range []int{2, 3} {
+			t.Run(fmt.Sprintf("%s/v%d", test.name, schemaVersion), func(t *testing.T) {
+				record := validRecord()
+				record.SchemaVersion = schemaVersion
+				test.edit(&record)
+				err := record.Validate()
+				if schemaVersion == 2 {
+					if err == nil || !strings.Contains(err.Error(), test.field) {
+						t.Fatalf("Validate() error = %v, want unsupported %s", err, test.field)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("Validate() rejected v3 %s: %v", test.field, err)
+				}
+			})
+		}
 	}
 }
 

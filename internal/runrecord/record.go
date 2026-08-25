@@ -31,6 +31,12 @@ func CurrentProducer() Producer {
 	return Producer{Name: "acta", Version: build.Version, Commit: build.Commit, Date: build.Date}
 }
 
+// SupportsV3Fields reports whether a run-record, digest, or event schema
+// version includes the fields and enum values introduced in schema v3.
+func SupportsV3Fields(schemaVersion int) bool {
+	return schemaVersion >= 3
+}
+
 type Record struct {
 	SchemaVersion int      `json:"schema_version,omitempty"`
 	Producer      Producer `json:"producer,omitempty"`
@@ -141,7 +147,7 @@ func (r *Record) Validate() error {
 			return fmt.Errorf("successful run record requires exit_code 0")
 		}
 		validOTLPStatus := oneOf(r.OTLPStatus, "not_configured", "exported", "failed")
-		if r.SchemaVersion >= 3 {
+		if SupportsV3Fields(r.SchemaVersion) {
 			validOTLPStatus = validOTLPStatus || r.OTLPStatus == "not_sampled"
 		}
 		if !validOTLPStatus || r.OTLPStatus == "failed" && strings.TrimSpace(r.OTLPError) == "" || r.OTLPStatus != "failed" && r.OTLPError != "" {
@@ -155,6 +161,14 @@ func (r *Record) Validate() error {
 		}
 		if !oneOf(r.AgentConfigMode, "ambient_ephemeral", "project_only_ephemeral", "authoritative_bundle") {
 			return fmt.Errorf("run record has invalid agent_config_mode %q", r.AgentConfigMode)
+		}
+		if !SupportsV3Fields(r.SchemaVersion) {
+			if r.ReasoningRedactionState != "" {
+				return fmt.Errorf("run record schema_version %d does not support reasoning_redaction_state", r.SchemaVersion)
+			}
+			if r.PublishedBundle != nil {
+				return fmt.Errorf("run record schema_version %d does not support published_bundle", r.SchemaVersion)
+			}
 		}
 		if r.ReasoningRedactionState != "" && !oneOf(r.ReasoningRedactionState, "retained_local", "redacted", "failed", "partial") {
 			return fmt.Errorf("run record has invalid reasoning_redaction_state %q", r.ReasoningRedactionState)

@@ -227,9 +227,10 @@ original bytes are verified unchanged. Both states refuse default remote
 upload. Remote upload redaction is independent and never rewrites local files.
 
 Current writers emit schema v3 for run records, digests, and Acta events. It
-adds the `not_sampled` OTLP status without changing the closed v2 enums;
-readers accept both versions and reject `not_sampled` when an artifact still
-declares v2.
+adds the `not_sampled` OTLP status, explicit redaction/publication metadata,
+and regenerated-event provenance without changing the closed v2 contract;
+readers accept both versions and reject v3-only fields or values when an
+artifact still declares v2.
 
 ## Where it's headed
 

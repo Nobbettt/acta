@@ -623,6 +623,8 @@ func scanEventsFile(ctx context.Context, file *os.File, runID string, visit func
 	count := 0
 	streamSchema := 0
 	var streamProducer runrecord.Producer
+	var streamRegeneratedBy runrecord.Producer
+	streamWasRegenerated := false
 	startedSeen := false
 	terminalSeen := false
 	scanner := bufio.NewScanner(file)
@@ -644,12 +646,19 @@ func scanEventsFile(ctx context.Context, file *os.File, runID string, visit func
 			if err := actaevents.ValidateEvent(event, runID, count); err != nil {
 				return 0, err
 			}
+			eventWasRegenerated := event.RegeneratedBy != nil
 			if streamSchema == 0 {
 				streamSchema, streamProducer = event.SchemaVersion, event.Producer
+				streamWasRegenerated = eventWasRegenerated
+				if streamWasRegenerated {
+					streamRegeneratedBy = *event.RegeneratedBy
+				}
 			} else if event.SchemaVersion != streamSchema {
 				return 0, fmt.Errorf("event sequence %d schema_version %d does not match stream schema_version %d", event.Sequence, event.SchemaVersion, streamSchema)
 			} else if event.SchemaVersion >= 2 && event.Producer != streamProducer {
 				return 0, fmt.Errorf("event sequence %d producer does not match stream producer", event.Sequence)
+			} else if eventWasRegenerated != streamWasRegenerated || eventWasRegenerated && *event.RegeneratedBy != streamRegeneratedBy {
+				return 0, fmt.Errorf("event sequence %d regenerated_by does not match stream regenerated_by", event.Sequence)
 			}
 			if event.Timestamp.IsZero() {
 				return 0, fmt.Errorf("event sequence %d has no timestamp", event.Sequence)
@@ -2016,12 +2025,11 @@ func stampRewrittenDocumentSchemaVersion(document any, rewritten bool) (bool, er
 	if !rewritten {
 		return false, nil
 	}
-	const rewrittenSchemaVersion = 3
 	switch typed := document.(type) {
 	case map[string]any:
-		typed["schema_version"] = rewrittenSchemaVersion
+		typed["schema_version"] = runrecord.SchemaVersion
 	case *actaevents.Event:
-		typed.SchemaVersion = rewrittenSchemaVersion
+		typed.SchemaVersion = actaevents.SchemaVersion
 	default:
 		return false, fmt.Errorf("rewritten Acta document has unsupported root type %T", document)
 	}

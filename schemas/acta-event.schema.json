@@ -8,6 +8,7 @@
   "properties": {
     "schema_version": {"const": 3},
     "producer": {"$ref": "run-record.schema.json#/$defs/producer"},
+    "regenerated_by": {"$ref": "run-record.schema.json#/$defs/producer"},
     "run_id": {"type": "string", "minLength": 1},
     "sequence": {"type": "integer", "minimum": 1},
     "timestamp": {"type": "string", "format": "date-time"},

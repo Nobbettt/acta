@@ -22,6 +22,7 @@ import (
 	jsonschema "github.com/santhosh-tekuri/jsonschema/v6"
 
 	"github.com/nobbettt/acta/internal/actaevents"
+	"github.com/nobbettt/acta/internal/digest"
 	"github.com/nobbettt/acta/internal/runrecord"
 )
 
@@ -200,6 +201,110 @@ func TestUploadRunPostsRunEventsArtifactsAndCompletion(t *testing.T) {
 	}
 }
 
+func TestUploadRunAcceptsRedigestedV2EventsWithProducerProvenance(t *testing.T) {
+	runDir := t.TempDir()
+	rawName := "codex-events.jsonl"
+	stderrName := "codex.stderr.log"
+	writeFile(t, filepath.Join(runDir, rawName), strings.Join([]string{
+		`{"type":"thread.started","thread_id":"thread-v2"}`,
+		`{"type":"turn.started"}`,
+		`{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`,
+		"",
+	}, "\n"))
+	writeFile(t, filepath.Join(runDir, stderrName), "")
+
+	exitCode := 0
+	started := time.Date(2026, 8, 19, 10, 0, 0, 0, time.UTC)
+	originalProducer := runrecord.Producer{Name: "acta", Version: "v2-original", Commit: "original-commit"}
+	record := &runrecord.Record{
+		SchemaVersion:      2,
+		Producer:           originalProducer,
+		ID:                 "run-v2-redigested",
+		Agent:              "codex",
+		AgentVersion:       "0.147.0",
+		CWD:                runDir,
+		RunDir:             runDir,
+		Command:            []string{"codex", "exec"},
+		StartedAt:          started,
+		CompletedAt:        started.Add(time.Second),
+		DurationMillis:     1000,
+		ExitCode:           &exitCode,
+		OK:                 true,
+		TerminationReason:  "completed",
+		RawStdoutPath:      filepath.Join(runDir, rawName),
+		RawStderrPath:      filepath.Join(runDir, stderrName),
+		RawStdoutArtifact:  rawName,
+		RawStderrArtifact:  stderrName,
+		PromptSource:       "test",
+		OTLPStatus:         "not_configured",
+		ProcessContainment: "direct_process",
+		AgentConfigMode:    "ambient_ephemeral",
+	}
+	recordPayload, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(runDir, "run.json"), string(recordPayload)+"\n")
+
+	d, err := digest.FromRunDir(runDir, "")
+	if err != nil {
+		t.Fatalf("re-digest v2 bundle: %v", err)
+	}
+	regenerator := runrecord.CurrentProducer()
+	if d.Producer != regenerator || d.Producer == originalProducer {
+		t.Fatalf("digest producer = %+v, regenerating producer = %+v, original producer = %+v", d.Producer, regenerator, originalProducer)
+	}
+	if err := actaevents.WriteProjectionForRunDir(runDir, d); err != nil {
+		t.Fatalf("write regenerated projection: %v", err)
+	}
+
+	var localEvents []actaevents.Event
+	if _, err := scanEvents(runDir, record.ID, func(event actaevents.Event) error {
+		localEvents = append(localEvents, event)
+		return nil
+	}); err != nil {
+		t.Fatalf("validate regenerated events: %v", err)
+	}
+	assertEventProducerProvenance(t, localEvents, originalProducer, regenerator)
+
+	var uploadedEvents []actaevents.Event
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/api/ingest/runs/"+record.ID+"/events" {
+			var body eventsRequest
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			uploadedEvents = append(uploadedEvents, body.Events...)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	if err := UploadRun(context.Background(), Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+	}, record); err != nil {
+		t.Fatalf("upload re-digested v2 bundle: %v", err)
+	}
+	assertEventProducerProvenance(t, uploadedEvents, originalProducer, regenerator)
+}
+
+func assertEventProducerProvenance(t *testing.T, events []actaevents.Event, original, regenerator runrecord.Producer) {
+	t.Helper()
+	if len(events) == 0 {
+		t.Fatal("event stream is empty")
+	}
+	for _, event := range events {
+		if event.SchemaVersion != actaevents.SchemaVersion {
+			t.Fatalf("event sequence %d schema_version = %d, want %d", event.Sequence, event.SchemaVersion, actaevents.SchemaVersion)
+		}
+		if event.Producer != original {
+			t.Fatalf("event sequence %d producer = %+v, want original %+v", event.Sequence, event.Producer, original)
+		}
+		if event.RegeneratedBy == nil || *event.RegeneratedBy != regenerator {
+			t.Fatalf("event sequence %d regenerated_by = %+v, want %+v", event.Sequence, event.RegeneratedBy, regenerator)
+		}
+	}
+}
+
 func TestUploadRunLegacyRecordUsesMetadataOrExplicitSchemaUpgrade(t *testing.T) {
 	legacyBody := readTestFile(t, filepath.Join("..", "..", "schemas", "examples", "run-record.v2.json"))
 	const secret = "legacy-run-record-reasoning-6204"
@@ -296,34 +401,46 @@ func TestV2RewritePathsEmitByteIdenticalV2OrSchemaV3(t *testing.T) {
 	}, "\n")
 
 	tests := []struct {
-		name    string
-		input   string
-		rewrite func(*os.File) error
+		name            string
+		input           string
+		requiresRewrite bool
+		rewrite         func(*os.File) error
 	}{
 		{
-			name:  "run record reasoning redaction",
-			input: `{"schema_version":2,"id":"run-1","reasoning":"private"}` + "\n",
+			name:  "content-safe run record stays byte-identical",
+			input: `{"schema_version":2,"id":"run-1"}` + "\n",
 			rewrite: func(file *os.File) error {
 				return redactRunRecordSnapshot(context.Background(), file)
 			},
 		},
 		{
-			name:  "legacy digest reasoning redaction",
-			input: `{"schema_version":2,"run_id":"run-1","timeline":[{"kind":"reasoning","text":"private"}]}` + "\n",
+			name:            "run record reasoning redaction",
+			input:           `{"schema_version":2,"id":"run-1","reasoning":"private"}` + "\n",
+			requiresRewrite: true,
+			rewrite: func(file *os.File) error {
+				return redactRunRecordSnapshot(context.Background(), file)
+			},
+		},
+		{
+			name:            "legacy digest reasoning redaction",
+			input:           `{"schema_version":2,"run_id":"run-1","timeline":[{"kind":"reasoning","text":"private"}]}` + "\n",
+			requiresRewrite: true,
 			rewrite: func(file *os.File) error {
 				return redactDigestSnapshot(context.Background(), file)
 			},
 		},
 		{
-			name:  "remote event reasoning redaction",
-			input: reasoningStream,
+			name:            "remote event reasoning redaction",
+			input:           reasoningStream,
+			requiresRewrite: true,
 			rewrite: func(file *os.File) error {
 				return redactActaEventSnapshot(context.Background(), file, DefaultMaxRedactionLineBytes)
 			},
 		},
 		{
-			name:  "remote withheld reference annotation",
-			input: withheldStream,
+			name:            "remote withheld reference annotation",
+			input:           withheldStream,
+			requiresRewrite: true,
 			rewrite: func(file *os.File) error {
 				_, err := annotateWithheldArtifactRefsContext(context.Background(), file, "run-1", []artifactUpload{{
 					Kind: "raw_stderr", Filename: "agent.stderr.log", RedactionState: "unverified", Withheld: true,
@@ -338,15 +455,21 @@ func TestV2RewritePathsEmitByteIdenticalV2OrSchemaV3(t *testing.T) {
 			if err := test.rewrite(file); err != nil {
 				t.Fatal(err)
 			}
-			assertV2RewriteOutput(t, test.input, readOpenFile(t, file))
+			assertV2RewriteOutput(t, test.input, readOpenFile(t, file), test.requiresRewrite)
 		})
 	}
 }
 
-func assertV2RewriteOutput(t *testing.T, original, emitted string) {
+func assertV2RewriteOutput(t *testing.T, original, emitted string, requiresRewrite bool) {
 	t.Helper()
 	if emitted == original {
+		if requiresRewrite {
+			t.Fatal("fixture requiring rewrite was emitted unchanged")
+		}
 		return
+	}
+	if !requiresRewrite {
+		t.Fatalf("content-safe fixture changed unexpectedly:\n%s", emitted)
 	}
 	for lineNumber, line := range strings.Split(strings.TrimSpace(emitted), "\n") {
 		var document map[string]any

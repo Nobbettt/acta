@@ -3,6 +3,7 @@ package actaevents
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -629,6 +630,78 @@ func TestValidateEnvelopeRequiresV2Producer(t *testing.T) {
 	event.Producer = runrecord.Producer{Name: "acta", Version: "v2.0.0"}
 	if err := ValidateEnvelope(event, "r-1", 1); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestValidateEnvelopeVersionGatesRegeneratedBy(t *testing.T) {
+	regenerator := runrecord.Producer{Name: "acta", Version: "v3.0.0"}
+	for _, schemaVersion := range []int{2, 3} {
+		t.Run(fmt.Sprintf("v%d", schemaVersion), func(t *testing.T) {
+			event := Event{
+				SchemaVersion: schemaVersion,
+				Producer:      runrecord.Producer{Name: "acta", Version: "v2.0.0"},
+				RegeneratedBy: &regenerator,
+				RunID:         "r-1",
+				Sequence:      1,
+				Source:        Source,
+			}
+			err := ValidateEnvelope(event, "r-1", 1)
+			if schemaVersion == 2 {
+				if err == nil || !strings.Contains(err.Error(), "regenerated_by") {
+					t.Fatalf("ValidateEnvelope() error = %v, want unsupported regenerated_by", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ValidateEnvelope() rejected v3 regenerated_by: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateEventVersionGatesWithheldArtifactFields(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+		setV2 func(*ArtifactRef)
+	}{
+		{name: "status", field: "status", setV2: func(ref *ArtifactRef) { ref.Status = ArtifactStatusWithheld }},
+		{name: "reason", field: "reason", setV2: func(ref *ArtifactRef) { ref.Reason = "reasoning_redaction_unverified" }},
+		{name: "redaction state", field: "redaction_state", setV2: func(ref *ArtifactRef) { ref.RedactionState = ArtifactRedactionStateUnverified }},
+	}
+	for _, test := range tests {
+		for _, schemaVersion := range []int{2, 3} {
+			t.Run(fmt.Sprintf("%s/v%d", test.name, schemaVersion), func(t *testing.T) {
+				ref := ArtifactRef{Kind: "raw_stderr", Path: "agent.stderr.log"}
+				if schemaVersion == 2 {
+					test.setV2(&ref)
+				} else {
+					ref.Status = ArtifactStatusWithheld
+					ref.Reason = "reasoning_redaction_unverified"
+					ref.RedactionState = ArtifactRedactionStateUnverified
+				}
+				event := Event{
+					SchemaVersion: schemaVersion,
+					Producer:      runrecord.Producer{Name: "acta", Version: "test"},
+					RunID:         "r-1",
+					Sequence:      1,
+					Source:        Source,
+					Type:          TypeRunCompleted,
+					Payload:       json.RawMessage(`{}`),
+					ArtifactRefs:  []ArtifactRef{ref},
+				}
+				err := ValidateEvent(event, "r-1", 1)
+				if schemaVersion == 2 {
+					if err == nil || !strings.Contains(err.Error(), test.field) {
+						t.Fatalf("ValidateEvent() error = %v, want unsupported %s", err, test.field)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("ValidateEvent() rejected v3 withheld %s: %v", test.field, err)
+				}
+			})
+		}
 	}
 }
 

@@ -87,15 +87,16 @@ type ArtifactRef struct {
 }
 
 type Event struct {
-	SchemaVersion int                `json:"schema_version"`
-	Producer      runrecord.Producer `json:"producer,omitempty"`
-	RunID         string             `json:"run_id"`
-	Sequence      int                `json:"sequence"`
-	Timestamp     time.Time          `json:"timestamp"`
-	Source        string             `json:"source"`
-	Type          string             `json:"type"`
-	Payload       json.RawMessage    `json:"payload"`
-	ArtifactRefs  []ArtifactRef      `json:"artifact_refs,omitempty"`
+	SchemaVersion int                 `json:"schema_version"`
+	Producer      runrecord.Producer  `json:"producer,omitempty"`
+	RegeneratedBy *runrecord.Producer `json:"regenerated_by,omitempty"`
+	RunID         string              `json:"run_id"`
+	Sequence      int                 `json:"sequence"`
+	Timestamp     time.Time           `json:"timestamp"`
+	Source        string              `json:"source"`
+	Type          string              `json:"type"`
+	Payload       json.RawMessage     `json:"payload"`
+	ArtifactRefs  []ArtifactRef       `json:"artifact_refs,omitempty"`
 }
 
 // ValidateEnvelope checks the stable identity and ordering fields shared by
@@ -109,6 +110,17 @@ func ValidateEnvelope(event Event, runID string, expectedSequence int) error {
 	}
 	if event.SchemaVersion >= 2 && (strings.TrimSpace(event.Producer.Name) == "" || strings.TrimSpace(event.Producer.Version) == "") {
 		return fmt.Errorf("event sequence %d schema_version %d requires producer name and version", event.Sequence, event.SchemaVersion)
+	}
+	if event.RegeneratedBy != nil {
+		if !runrecord.SupportsV3Fields(event.SchemaVersion) {
+			return fmt.Errorf("event sequence %d schema_version %d does not support regenerated_by", event.Sequence, event.SchemaVersion)
+		}
+		if strings.TrimSpace(event.RegeneratedBy.Name) == "" || strings.TrimSpace(event.RegeneratedBy.Version) == "" {
+			return fmt.Errorf("event sequence %d regenerated_by requires producer name and version", event.Sequence)
+		}
+		if event.RegeneratedBy.Name != "acta" {
+			return fmt.Errorf("event sequence %d regenerated_by producer name must be acta", event.Sequence)
+		}
 	}
 	if event.Source != Source {
 		return fmt.Errorf("event sequence %d has invalid source %q", event.Sequence, event.Source)
@@ -166,7 +178,7 @@ func ValidateEvent(event Event, runID string, expectedSequence int) error {
 			return fmt.Errorf("event sequence %d has invalid run.started payload: %w", event.Sequence, err)
 		}
 		validOTLPStatus := payload.OTLPStatus == "" || oneOf(payload.OTLPStatus, "not_configured", "exported", "failed")
-		if event.SchemaVersion >= 3 {
+		if runrecord.SupportsV3Fields(event.SchemaVersion) {
 			validOTLPStatus = validOTLPStatus || payload.OTLPStatus == "not_sampled"
 		}
 		if !validOTLPStatus {
@@ -176,6 +188,17 @@ func ValidateEvent(event Event, runID string, expectedSequence int) error {
 	for _, ref := range event.ArtifactRefs {
 		if strings.TrimSpace(ref.Kind) == "" || strings.TrimSpace(ref.Path) == "" {
 			return fmt.Errorf("event sequence %d has an invalid artifact reference", event.Sequence)
+		}
+		if !runrecord.SupportsV3Fields(event.SchemaVersion) {
+			if ref.Status != "" {
+				return fmt.Errorf("event sequence %d schema_version %d artifact %q does not support status", event.Sequence, event.SchemaVersion, ref.Path)
+			}
+			if ref.Reason != "" {
+				return fmt.Errorf("event sequence %d schema_version %d artifact %q does not support reason", event.Sequence, event.SchemaVersion, ref.Path)
+			}
+			if ref.RedactionState != "" {
+				return fmt.Errorf("event sequence %d schema_version %d artifact %q does not support redaction_state", event.Sequence, event.SchemaVersion, ref.Path)
+			}
 		}
 		switch ref.Status {
 		case "":
@@ -196,6 +219,7 @@ func ValidateEvent(event Event, runID string, expectedSequence int) error {
 type builder struct {
 	runID         string
 	producer      runrecord.Producer
+	regeneratedBy *runrecord.Producer
 	bundleDir     string
 	schemaVersion int
 	next          int
@@ -221,6 +245,10 @@ func BuildWithPrompt(record *runrecord.Record, d *digest.Digest, prompt string) 
 // BuildForBundle reads artifact presence from bundleDir while keeping the
 // logical final paths from record.RunDir in normalized references.
 func BuildForBundle(bundleDir string, record *runrecord.Record, d *digest.Digest, prompt string) ([]Event, error) {
+	return buildForBundle(bundleDir, record, d, prompt, nil)
+}
+
+func buildForBundle(bundleDir string, record *runrecord.Record, d *digest.Digest, prompt string, regeneratedBy *runrecord.Producer) ([]Event, error) {
 	if record == nil {
 		return nil, fmt.Errorf("run record is nil")
 	}
@@ -255,7 +283,7 @@ func BuildForBundle(bundleDir string, record *runrecord.Record, d *digest.Digest
 	if strings.TrimSpace(producer.Name) == "" {
 		producer = runrecord.CurrentProducer()
 	}
-	b := &builder{runID: record.ID, producer: producer, bundleDir: bundleDir, schemaVersion: SchemaVersion, next: 1}
+	b := &builder{runID: record.ID, producer: producer, regeneratedBy: regeneratedBy, bundleDir: bundleDir, schemaVersion: SchemaVersion, next: 1}
 	if prompt != "" {
 		if _, err := b.append(TypeAgentPrompt, record.StartedAt, agentPromptPayload{
 			Text:   prompt,
@@ -420,12 +448,15 @@ func buildEventsForRunDir(runDir string, d *digest.Digest) ([]Event, error) {
 	if err := json.Unmarshal(payload, &record); err != nil {
 		return nil, fmt.Errorf("parse run record: %w", err)
 	}
-	// Re-digestion is a new projection. Legacy run records remain immutable,
-	// while newly written events carry the current schema and producer.
-	if strings.TrimSpace(d.Producer.Name) != "" {
-		record.Producer = d.Producer
-	} else {
+	// The event producer remains the immutable execution producer recorded in
+	// run.json. Re-digestion is attributed separately to the binary performing
+	// the new projection. Pre-schema records have no original identity to keep.
+	if strings.TrimSpace(record.Producer.Name) == "" {
 		record.Producer = runrecord.CurrentProducer()
+	}
+	regeneratedBy := d.Producer
+	if strings.TrimSpace(regeneratedBy.Name) == "" {
+		regeneratedBy = runrecord.CurrentProducer()
 	}
 	if record.RawStdoutArtifact == "" {
 		record.RawStdoutArtifact = artifactPath(record.RunDir, record.RawStdoutPath)
@@ -451,7 +482,7 @@ func buildEventsForRunDir(runDir string, d *digest.Digest) ([]Event, error) {
 			return nil, fmt.Errorf("captured prompt is missing from existing event stream")
 		}
 	}
-	return BuildForBundle(runDir, &record, d, prompt)
+	return buildForBundle(runDir, &record, d, prompt, &regeneratedBy)
 }
 
 // WriteProjectionForRunDir prebuilds and validates digest.json and the event
@@ -675,6 +706,7 @@ func (b *builder) append(typ string, timestamp time.Time, payload any, refs ...A
 	b.events = append(b.events, Event{
 		SchemaVersion: b.schemaVersion,
 		Producer:      b.producer,
+		RegeneratedBy: b.regeneratedBy,
 		RunID:         b.runID,
 		Sequence:      seq,
 		Timestamp:     normalizeTime(timestamp),

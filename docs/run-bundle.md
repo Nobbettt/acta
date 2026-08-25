@@ -197,6 +197,10 @@ the whole-directory level and therefore does not require the extra marker.
 derived from `digest.json` and written as one JSON object per line with a
 monotonic `sequence`.
 
+Each event's `producer` identifies the Acta binary that recorded the immutable
+run. Events rewritten by a later `acta digest` keep that original identity and
+add `regenerated_by` for the binary that produced the new projection.
+
 The event stream currently includes:
 
 - `agent.prompt` when `acta run --capture-prompt` was explicitly enabled

@@ -8,8 +8,10 @@ and Semantic Versioning. Dates use ISO 8601.
 ### Changed
 
 - Run-record, digest, and Acta-event writers now emit schema v3, which adds
-  `not_sampled` to their closed `otlp_status` enums. Readers continue to accept
-  v2 with its original enum and reject v2 artifacts containing the new value.
+  `not_sampled` to their closed `otlp_status` enums, adds explicit reasoning
+  and withheld-artifact state, and records the regenerating producer separately
+  from the immutable run producer. Readers continue to accept v2 while
+  rejecting these v3-only fields and values in v2 artifacts.
 - Required OTLP export now rejects statically unsampleable root configurations
   at startup and returns an operational telemetry failure if a root is still
   sampled out at runtime, after preserving the complete run bundle.

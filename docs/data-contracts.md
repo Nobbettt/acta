@@ -23,10 +23,12 @@ are vendor evidence and do not use Acta schema versions.
 ## Compatibility rules
 
 - Version 2 is the first published run-record, digest, and Acta-event contract;
-  v3 extends their closed `otlp_status` enums with `not_sampled`. Readers accept
-  both, but a v2 artifact containing `not_sampled` is invalid. The versions
-  listed for the other contracts are their first published versions, and
-  readers reject lower versions outright.
+  v3 extends their closed `otlp_status` enums with `not_sampled`, adds run
+  redaction/publication state and withheld-artifact metadata, and lets events
+  identify a regenerating producer separately. Readers accept both, but reject
+  these v3-only fields and values in a v2 artifact. The versions listed for the
+  other contracts are their first published versions, and readers reject lower
+  versions outright.
 - Adding an optional field without changing existing meaning is compatible
   and may retain the current schema version.
 - Removing or renaming a field, changing a field's type or semantics, changing
@@ -34,9 +36,10 @@ are vendor evidence and do not use Acta schema versions.
   and requires a schema-version increment.
 - Writers emit only the current version. Readers may support documented older
   versions, normalize them in memory, and must reject unknown future versions.
-- Re-running `acta digest` writes the current digest/event schemas and records
-  the Acta producer that performed the projection. It never rewrites raw
-  vendor evidence.
+- Re-running `acta digest` writes the current digest/event schemas. Regenerated
+  events preserve the immutable run-record identity in `producer` and record
+  the projecting binary in `regenerated_by`; the digest and projection manifest
+  use the projecting producer. Re-digestion never rewrites raw vendor evidence.
 - Consumers must validate the event envelope and sequence, not infer a schema
   from filenames or producer versions.
 
