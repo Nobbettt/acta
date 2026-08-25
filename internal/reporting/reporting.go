@@ -1146,18 +1146,94 @@ func opaqueLineHasJSONAmbiguity(trimmed []byte) bool {
 	if trimmed[0] == '}' || trimmed[0] == ']' {
 		return true
 	}
-	if trimmed[0] != '"' {
-		return false
+	if trimmed[0] == '"' {
+		// Standalone strings, complete object members, and truncated members are
+		// all valid continuations of a JSON container split across log lines.
+		return true
 	}
-	// A pretty-printed object member is not a standalone JSON value, but it
-	// becomes one when wrapped in braces. Recognize that continuation shape so
-	// an opaque log cannot hide a multiline reasoning object after diagnostics.
-	member := bytes.TrimSuffix(trimmed, []byte{','})
-	wrapped := make([]byte, 0, len(member)+2)
-	wrapped = append(wrapped, '{')
-	wrapped = append(wrapped, member...)
-	wrapped = append(wrapped, '}')
-	return json.Valid(wrapped)
+	return opaqueLineContainsJSONFragment(trimmed)
+}
+
+func opaqueLineContainsJSONFragment(line []byte) bool {
+	for index := 0; index < len(line); index++ {
+		char := line[index]
+		switch char {
+		case '{', '[', '}', ']':
+			if jsonFragmentBoundaryBefore(line, index) {
+				return true
+			}
+		case '"':
+			end := jsonStringEnd(line, index)
+			if end < 0 {
+				return jsonFragmentBoundaryBefore(line, index) || lineHasReasoningDiscriminator(line)
+			}
+			after := bytes.TrimSpace(line[end+1:])
+			if len(after) > 0 && after[0] == ':' {
+				return true
+			}
+			if jsonFragmentBoundaryBefore(line, index) &&
+				(len(after) == 0 || after[0] == ',' || after[0] == '}' || after[0] == ']') {
+				return true
+			}
+			index = end
+		}
+	}
+	return lineHasReasoningDiscriminator(line) && bytes.ContainsAny(line, "{}[]\",':")
+}
+
+func jsonFragmentBoundaryBefore(line []byte, index int) bool {
+	for index > 0 {
+		index--
+		if line[index] == ' ' || line[index] == '\t' {
+			continue
+		}
+		switch line[index] {
+		case ':', ',', '{', '[':
+			return true
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func jsonStringEnd(line []byte, start int) int {
+	escaped := false
+	for index := start + 1; index < len(line); index++ {
+		switch {
+		case escaped:
+			escaped = false
+		case line[index] == '\\':
+			escaped = true
+		case line[index] == '"':
+			return index
+		}
+	}
+	return -1
+}
+
+func lineHasReasoningDiscriminator(line []byte) bool {
+	lower := bytes.ToLower(line)
+	for _, discriminator := range []string{"reasoning", "thinking", "redacted_thinking"} {
+		for start := 0; start < len(lower); {
+			index := bytes.Index(lower[start:], []byte(discriminator))
+			if index < 0 {
+				break
+			}
+			index += start
+			end := index + len(discriminator)
+			if (index == 0 || !isIdentifierByte(lower[index-1])) &&
+				(end == len(lower) || !isIdentifierByte(lower[end])) {
+				return true
+			}
+			start = end
+		}
+	}
+	return false
+}
+
+func isIdentifierByte(char byte) bool {
+	return char >= 'a' && char <= 'z' || char >= '0' && char <= '9' || char == '_'
 }
 
 func inspectArtifactSnapshot(ctx context.Context, file *os.File, kind, path string, maxLineBytes int) (artifactInspection, error) {
@@ -1588,15 +1664,16 @@ func reasoningFreeActaEventType(typ string) bool {
 func redactToStructuralReferences(value any) (any, bool) {
 	payload, ok := value.(map[string]any)
 	if !ok {
-		return reasoningRedactionMarker, !isReasoningRedactionMarker(value)
+		return reasoningRedactionMask(value)
 	}
 	changed := false
 	for key, item := range payload {
 		if structuralPayloadKey(key) {
 			continue
 		}
-		if !isReasoningRedactionMarker(item) {
-			payload[key] = reasoningRedactionMarker
+		masked, itemChanged := reasoningRedactionMask(item)
+		if itemChanged {
+			payload[key] = masked
 			changed = true
 		}
 	}
@@ -1628,6 +1705,53 @@ func isReasoningRedactionMarker(value any) bool {
 	return ok && marker == reasoningRedactionMarker
 }
 
+func reasoningRedactionMask(value any) (any, bool) {
+	switch typed := value.(type) {
+	case string:
+		return reasoningRedactionMarker, !isReasoningRedactionMarker(typed)
+	case []any:
+		if len(typed) == 0 {
+			return typed, false
+		}
+		return []any{}, true
+	case map[string]any:
+		if len(typed) == 0 {
+			return typed, false
+		}
+		return map[string]any{}, true
+	case json.Number:
+		return json.Number("0"), typed != json.Number("0")
+	case float64:
+		return float64(0), typed != 0
+	case float32:
+		return float32(0), typed != 0
+	case int:
+		return 0, typed != 0
+	case int8:
+		return int8(0), typed != 0
+	case int16:
+		return int16(0), typed != 0
+	case int32:
+		return int32(0), typed != 0
+	case int64:
+		return int64(0), typed != 0
+	case uint:
+		return uint(0), typed != 0
+	case uint8:
+		return uint8(0), typed != 0
+	case uint16:
+		return uint16(0), typed != 0
+	case uint32:
+		return uint32(0), typed != 0
+	case uint64:
+		return uint64(0), typed != 0
+	case bool:
+		return false, typed
+	default:
+		return value, false
+	}
+}
+
 func redactReasoningValue(value any) bool {
 	switch typed := value.(type) {
 	case []any:
@@ -1652,8 +1776,9 @@ func redactReasoningValue(value any) bool {
 				continue
 			}
 			if reasoningContentKey(key, item) {
-				if !isReasoningRedactionMarker(item) {
-					typed[key] = reasoningRedactionMarker
+				masked, itemChanged := reasoningRedactionMask(item)
+				if itemChanged {
+					typed[key] = masked
 					changed = true
 				}
 				continue
@@ -1699,8 +1824,9 @@ func redactReasoningValueContext(ctx context.Context, value any) (bool, error) {
 				continue
 			}
 			if reasoningContentKey(key, item) {
-				if !isReasoningRedactionMarker(item) {
-					typed[key] = reasoningRedactionMarker
+				masked, itemChanged := reasoningRedactionMask(item)
+				if itemChanged {
+					typed[key] = masked
 					changed = true
 				}
 				continue
@@ -1726,8 +1852,9 @@ func redactToStructuralReferencesContext(ctx context.Context, payload map[string
 		if structuralPayloadKey(key) {
 			continue
 		}
-		if !isReasoningRedactionMarker(item) {
-			payload[key] = reasoningRedactionMarker
+		masked, itemChanged := reasoningRedactionMask(item)
+		if itemChanged {
+			payload[key] = masked
 			changed = true
 		}
 	}

@@ -19,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	jsonschema "github.com/santhosh-tekuri/jsonschema/v6"
+
 	"github.com/nobbettt/acta/internal/actaevents"
 	"github.com/nobbettt/acta/internal/runrecord"
 )
@@ -497,6 +499,27 @@ func TestUploadRunConservativelyRedactsValidUnknownStderrJSON(t *testing.T) {
 	}
 }
 
+func TestRedactArtifactSnapshotWithholdsTruncatedOpaqueReasoningMember(t *testing.T) {
+	const original = "diagnostic: {\n\"thinking\":"
+	ambiguousLines := append(strings.Split(original, "\n"), `"private reasoning"`, "type: thinking")
+	for _, line := range ambiguousLines {
+		if !opaqueLineHasJSONAmbiguity([]byte(line)) {
+			t.Errorf("opaque line %q was not classified as ambiguous", line)
+		}
+	}
+	file := writeSnapshotFile(t, original)
+	verified, err := redactArtifactSnapshot(context.Background(), file, "raw_stderr", "agent.stderr.log", DefaultMaxRedactionLineBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verified {
+		t.Fatal("truncated opaque reasoning member was classified as verified")
+	}
+	if got := readOpenFile(t, file); got != original {
+		t.Fatalf("withheld opaque snapshot changed = %q, want %q", got, original)
+	}
+}
+
 func TestUploadRunRedactsRemoteReasoningByDefaultForEveryAgentShape(t *testing.T) {
 	const secret = "private-remote-reasoning-57291"
 	tests := map[string]string{
@@ -688,7 +711,7 @@ func TestUploadRunRedactsUnsupportedClaudeDetailsByDefault(t *testing.T) {
 	}, record); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(remote.String(), secret) || !strings.Contains(remote.String(), `"details":"`+reasoningRedactionMarker+`"`) {
+	if strings.Contains(remote.String(), secret) || !strings.Contains(remote.String(), `"details":{}`) {
 		t.Fatalf("remote upload retained unsupported reasoning details: %s", remote.String())
 	}
 	if !strings.Contains(remote.String(), `"provider_event":"assistant.redacted_thinking"`) ||
@@ -830,11 +853,56 @@ func TestRedactActaReasoningEventLineRedactsUnknownTypeByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(redacted), secret) || !strings.Contains(string(redacted), `"details":"`+reasoningRedactionMarker+`"`) {
+	if strings.Contains(string(redacted), secret) || !strings.Contains(string(redacted), `"details":{}`) {
 		t.Fatalf("unknown event retained free-text payload: %s", redacted)
 	}
 	if !strings.Contains(string(redacted), `"raw_event_lines":[7]`) || !strings.Contains(string(redacted), `"redacted":true`) {
 		t.Fatalf("unknown event lost structural references: %s", redacted)
+	}
+}
+
+func TestRedactActaReasoningEventLinePreservesSchemaFieldTypes(t *testing.T) {
+	original := []byte(`{"schema_version":3,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":1,"timestamp":"2026-08-25T12:00:00Z","source":"acta","type":"agent.reasoning","payload":{"kind":"reasoning","text":"private","files":["a.go"],"spans":{"a.go":[{"start":1,"end":2}]},"action":42,"details":true}}` + "\n")
+	redacted, err := redactActaReasoningEventLine(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var event map[string]any
+	if err := json.Unmarshal(redacted, &event); err != nil {
+		t.Fatal(err)
+	}
+	payload, ok := event["payload"].(map[string]any)
+	if !ok {
+		t.Fatalf("redacted payload = %#v, want object", event["payload"])
+	}
+	files, filesOK := payload["files"].([]any)
+	spans, spansOK := payload["spans"].(map[string]any)
+	if payload["text"] != reasoningRedactionMarker || !filesOK || len(files) != 0 || !spansOK || len(spans) != 0 || payload["action"] != float64(0) || payload["details"] != false || payload["redacted"] != true {
+		t.Fatalf("redacted payload did not preserve field types: %#v", payload)
+	}
+
+	compiler := jsonschema.NewCompiler()
+	compiler.AssertFormat()
+	const schemaBase = "https://github.com/Nobbettt/acta/schemas/"
+	for _, name := range []string{"run-record.schema.json", "acta-event.schema.json"} {
+		schemaPayload, err := os.ReadFile(filepath.Join("..", "..", "schemas", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var document any
+		if err := json.Unmarshal(schemaPayload, &document); err != nil {
+			t.Fatal(err)
+		}
+		if err := compiler.AddResource(schemaBase+name, document); err != nil {
+			t.Fatal(err)
+		}
+	}
+	schema, err := compiler.Compile(schemaBase + "acta-event.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := schema.Validate(event); err != nil {
+		t.Fatalf("redacted agent.reasoning event failed schema validation: %v\nJSON: %s", err, redacted)
 	}
 }
 
