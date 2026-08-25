@@ -20,6 +20,7 @@ import (
 
 	"github.com/nobbettt/acta/internal/reasoning"
 	"github.com/nobbettt/acta/internal/runrecord"
+	"github.com/nobbettt/acta/internal/schemaversion"
 	"github.com/nobbettt/acta/internal/securefile"
 )
 
@@ -394,6 +395,24 @@ type Digest struct {
 
 	projectionBytes      int
 	projectionLimitBytes int
+	presentV3Fields      []string
+}
+
+// UnmarshalJSON retains explicit v3-only field presence even when omitempty
+// would hide a decoded false or zero value during validation.
+func (d *Digest) UnmarshalJSON(data []byte) error {
+	type plainDigest Digest
+	var decoded plainDigest
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	fields, err := schemaversion.PresentV3OnlyFieldsJSON(schemaversion.Digest, data)
+	if err != nil {
+		return err
+	}
+	*d = Digest(decoded)
+	d.presentV3Fields = fields
+	return nil
 }
 
 // Validate checks the versioned fields that readers must interpret before
@@ -405,6 +424,15 @@ func (d *Digest) Validate() error {
 	}
 	if d.SchemaVersion < MinSchemaVersion || d.SchemaVersion > SchemaVersion {
 		return fmt.Errorf("unsupported digest schema_version %d (supported %d..%d)", d.SchemaVersion, MinSchemaVersion, SchemaVersion)
+	}
+	if !runrecord.SupportsV3Fields(d.SchemaVersion) {
+		field, found, err := schemaversion.FirstPresentV3OnlyField(schemaversion.Digest, d, d.presentV3Fields)
+		if err != nil {
+			return fmt.Errorf("inspect digest versioned fields: %w", err)
+		}
+		if found {
+			return fmt.Errorf("digest schema_version %d does not support %s", d.SchemaVersion, field)
+		}
 	}
 	validOTLPStatus := d.OTLPStatus == "" || oneOf(d.OTLPStatus, "not_configured", "exported", "failed")
 	if runrecord.SupportsV3Fields(d.SchemaVersion) {

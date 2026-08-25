@@ -24,6 +24,7 @@ import (
 	"github.com/nobbettt/acta/internal/actaevents"
 	"github.com/nobbettt/acta/internal/digest"
 	"github.com/nobbettt/acta/internal/runrecord"
+	"github.com/nobbettt/acta/internal/schemaversion"
 )
 
 func TestWriterEventBudgetFitsUploadEnvelope(t *testing.T) {
@@ -456,6 +457,35 @@ func TestV2RewritePathsEmitByteIdenticalV2OrSchemaV3(t *testing.T) {
 				t.Fatal(err)
 			}
 			assertV2RewriteOutput(t, test.input, readOpenFile(t, file), test.requiresRewrite)
+		})
+	}
+}
+
+func TestSchemaStampingUsesV3OnlyFieldRegistry(t *testing.T) {
+	tests := []struct {
+		name         string
+		documentType schemaversion.DocumentType
+		document     map[string]any
+	}{
+		{name: "run record", documentType: schemaversion.RunRecord, document: map[string]any{
+			"schema_version": 2, "reasoning_redaction_state": "redacted",
+		}},
+		{name: "digest", documentType: schemaversion.Digest, document: map[string]any{
+			"schema_version": 2, "timeline": []any{map[string]any{"kind": "reasoning", "redacted": true}},
+		}},
+		{name: "event", documentType: schemaversion.Event, document: map[string]any{
+			"schema_version": 2, "payload": map[string]any{"reasoning_redaction_state": "redacted"},
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stamped, err := stampRewrittenDocumentSchemaVersion(test.documentType, test.document, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !stamped || test.document["schema_version"] != runrecord.SchemaVersion {
+				t.Fatalf("stamped/schema_version = %v/%v, want true/%d", stamped, test.document["schema_version"], runrecord.SchemaVersion)
+			}
 		})
 	}
 }

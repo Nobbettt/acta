@@ -3,12 +3,12 @@
 Acta publishes five machine-readable contracts under [`schemas/`](../schemas/):
 
 - `runtime-bundle.schema.json` — launcher input, schema version 1
-- `run-record.schema.json` — `run.json`, schema version 3 (readers also accept
-  the published v2 contract)
-- `digest.schema.json` — `digest.json`, schema version 3 (readers also accept
-  the published v2 contract)
+- `run-record.schema.json` — `run.json`, schema version 3; the frozen v2
+  contract is `run-record.v2.schema.json`
+- `digest.schema.json` — `digest.json`, schema version 3; the frozen v2
+  contract is `digest.v2.schema.json`
 - `acta-event.schema.json` — each `acta-events.jsonl` line, schema version 3
-  (readers also accept the published v2 contract)
+  (the frozen v2 contract is `acta-event.v2.schema.json`)
 - `projection.schema.json` — the transactional re-projection completion
   manifest, schema version 2
 
@@ -43,10 +43,12 @@ are vendor evidence and do not use Acta schema versions.
 - Consumers must validate the event envelope and sequence, not infer a schema
   from filenames or producer versions.
 
-The Go structs are the implementation source of truth. CI compiles every schema
-as Draft 2020-12 with format assertions and local external-reference
-resolution, validates every JSON/JSONL example, validates current Go-produced
-artifacts, and checks that every exported top-level Go JSON field exists in its
+The published schemas are the compatibility source of truth. CI diffs the v2
+and v3 schemas to derive every v3-only property path and requires the shared Go
+validation/version-stamping registry to match exactly. It also compiles every
+schema as Draft 2020-12 with format assertions and local external-reference
+resolution, validates every JSON/JSONL example and current Go-produced
+artifact, and checks that every exported top-level Go JSON field exists in its
 schema. A release that changes a contract must update its schema, example,
 changelog, and compatibility notes in the same pull request.
 

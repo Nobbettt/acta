@@ -18,6 +18,7 @@ import (
 
 	"github.com/nobbettt/acta/internal/digest"
 	"github.com/nobbettt/acta/internal/runrecord"
+	"github.com/nobbettt/acta/internal/schemaversion"
 	"github.com/nobbettt/acta/internal/securefile"
 )
 
@@ -97,6 +98,25 @@ type Event struct {
 	Type          string              `json:"type"`
 	Payload       json.RawMessage     `json:"payload"`
 	ArtifactRefs  []ArtifactRef       `json:"artifact_refs,omitempty"`
+
+	presentV3Fields []string
+}
+
+// UnmarshalJSON retains explicit v3-only field presence independently of Go
+// zero values so replay validation enforces the labeled schema version.
+func (e *Event) UnmarshalJSON(data []byte) error {
+	type plainEvent Event
+	var decoded plainEvent
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	fields, err := schemaversion.PresentV3OnlyFieldsJSON(schemaversion.Event, data)
+	if err != nil {
+		return err
+	}
+	*e = Event(decoded)
+	e.presentV3Fields = fields
+	return nil
 }
 
 // ValidateEnvelope checks the stable identity and ordering fields shared by
@@ -108,13 +128,19 @@ func ValidateEnvelope(event Event, runID string, expectedSequence int) error {
 	if event.SchemaVersion < MinSchemaVersion || event.SchemaVersion > SchemaVersion {
 		return fmt.Errorf("event sequence %d has unsupported schema_version %d (supported %d..%d)", event.Sequence, event.SchemaVersion, MinSchemaVersion, SchemaVersion)
 	}
+	if !runrecord.SupportsV3Fields(event.SchemaVersion) {
+		field, found, err := schemaversion.FirstPresentV3OnlyField(schemaversion.Event, event, event.presentV3Fields)
+		if err != nil {
+			return fmt.Errorf("inspect event sequence %d versioned fields: %w", event.Sequence, err)
+		}
+		if found {
+			return fmt.Errorf("event sequence %d schema_version %d does not support %s", event.Sequence, event.SchemaVersion, field)
+		}
+	}
 	if event.SchemaVersion >= 2 && (strings.TrimSpace(event.Producer.Name) == "" || strings.TrimSpace(event.Producer.Version) == "") {
 		return fmt.Errorf("event sequence %d schema_version %d requires producer name and version", event.Sequence, event.SchemaVersion)
 	}
 	if event.RegeneratedBy != nil {
-		if !runrecord.SupportsV3Fields(event.SchemaVersion) {
-			return fmt.Errorf("event sequence %d schema_version %d does not support regenerated_by", event.Sequence, event.SchemaVersion)
-		}
 		if strings.TrimSpace(event.RegeneratedBy.Name) == "" || strings.TrimSpace(event.RegeneratedBy.Version) == "" {
 			return fmt.Errorf("event sequence %d regenerated_by requires producer name and version", event.Sequence)
 		}
@@ -188,17 +214,6 @@ func ValidateEvent(event Event, runID string, expectedSequence int) error {
 	for _, ref := range event.ArtifactRefs {
 		if strings.TrimSpace(ref.Kind) == "" || strings.TrimSpace(ref.Path) == "" {
 			return fmt.Errorf("event sequence %d has an invalid artifact reference", event.Sequence)
-		}
-		if !runrecord.SupportsV3Fields(event.SchemaVersion) {
-			if ref.Status != "" {
-				return fmt.Errorf("event sequence %d schema_version %d artifact %q does not support status", event.Sequence, event.SchemaVersion, ref.Path)
-			}
-			if ref.Reason != "" {
-				return fmt.Errorf("event sequence %d schema_version %d artifact %q does not support reason", event.Sequence, event.SchemaVersion, ref.Path)
-			}
-			if ref.RedactionState != "" {
-				return fmt.Errorf("event sequence %d schema_version %d artifact %q does not support redaction_state", event.Sequence, event.SchemaVersion, ref.Path)
-			}
 		}
 		switch ref.Status {
 		case "":

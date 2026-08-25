@@ -22,6 +22,7 @@ import (
 	"github.com/nobbettt/acta/internal/actaevents"
 	"github.com/nobbettt/acta/internal/reasoning"
 	"github.com/nobbettt/acta/internal/runrecord"
+	"github.com/nobbettt/acta/internal/schemaversion"
 	"github.com/nobbettt/acta/internal/securefile"
 )
 
@@ -903,7 +904,7 @@ func annotateWithheldArtifactRefsContext(ctx context.Context, eventFile *os.File
 			ref.Reason = withheldArtifactReason
 			ref.RedactionState = artifact.RedactionState
 		}
-		if _, err := stampRewrittenDocumentSchemaVersion(&event, true); err != nil {
+		if _, err := stampRewrittenDocumentSchemaVersion(schemaversion.Event, &event, true); err != nil {
 			return false, fmt.Errorf("upgrade event sequence %d after withheld artifact annotations: %w", event.Sequence, err)
 		}
 		encoded, err := json.Marshal(event)
@@ -1514,7 +1515,7 @@ func stampActaEventLineSchemaVersion(line []byte) ([]byte, error) {
 	if err := decodeJSONUseNumber(payload, &event); err != nil {
 		return nil, fmt.Errorf("parse Acta event for schema upgrade: %w", err)
 	}
-	if _, err := stampRewrittenDocumentSchemaVersion(event, true); err != nil {
+	if _, err := stampRewrittenDocumentSchemaVersion(schemaversion.Event, event, true); err != nil {
 		return nil, err
 	}
 	encoded, err := json.Marshal(event)
@@ -1649,7 +1650,7 @@ func redactActaReasoningEventLine(line []byte) ([]byte, error) {
 	if !changed {
 		return line, nil
 	}
-	if _, err := stampRewrittenDocumentSchemaVersion(event, true); err != nil {
+	if _, err := stampRewrittenDocumentSchemaVersion(schemaversion.Event, event, true); err != nil {
 		return nil, err
 	}
 	encoded, err := json.Marshal(event)
@@ -2021,8 +2022,13 @@ func setReasoningRedactionStateContext(ctx context.Context, value any) (bool, er
 // redaction and withheld-reference fields introduced by these rewrites, so an
 // altered emitted copy must declare v3. Unchanged legacy documents stay byte
 // identical.
-func stampRewrittenDocumentSchemaVersion(document any, rewritten bool) (bool, error) {
-	if !rewritten {
+func stampRewrittenDocumentSchemaVersion(documentType schemaversion.DocumentType, document any, rewritten bool) (bool, error) {
+	v3Fields, err := schemaversion.PresentV3OnlyFields(documentType, document)
+	if err != nil {
+		return false, fmt.Errorf("inspect rewritten Acta document fields: %w", err)
+	}
+	requiresFieldUpgrade := len(v3Fields) > 0 && rewrittenDocumentSchemaVersion(document) < runrecord.SchemaVersion
+	if !rewritten && !requiresFieldUpgrade {
 		return false, nil
 	}
 	switch typed := document.(type) {
@@ -2036,6 +2042,24 @@ func stampRewrittenDocumentSchemaVersion(document any, rewritten bool) (bool, er
 	return true, nil
 }
 
+func rewrittenDocumentSchemaVersion(document any) int {
+	switch typed := document.(type) {
+	case map[string]any:
+		switch version := typed["schema_version"].(type) {
+		case json.Number:
+			value, _ := version.Int64()
+			return int(value)
+		case float64:
+			return int(version)
+		case int:
+			return version
+		}
+	case *actaevents.Event:
+		return typed.SchemaVersion
+	}
+	return 0
+}
+
 func redactRunRecordSnapshot(ctx context.Context, file *os.File) error {
 	return rewriteJSONDocumentSnapshot(ctx, file, runrecord.MaxRecordBytes, func(ctx context.Context, value any) (bool, error) {
 		record, ok := value.(map[string]any)
@@ -2044,7 +2068,7 @@ func redactRunRecordSnapshot(ctx context.Context, file *os.File) error {
 			if err != nil {
 				return false, err
 			}
-			return stampRewrittenDocumentSchemaVersion(value, changed)
+			return stampRewrittenDocumentSchemaVersion(schemaversion.RunRecord, value, changed)
 		}
 		contentChanged, err := redactReasoningValueContext(ctx, record)
 		if err != nil {
@@ -2065,7 +2089,7 @@ func redactRunRecordSnapshot(ctx context.Context, file *os.File) error {
 			record["reasoning_redaction_state"] = "redacted"
 			changed = true
 		}
-		return stampRewrittenDocumentSchemaVersion(record, changed)
+		return stampRewrittenDocumentSchemaVersion(schemaversion.RunRecord, record, changed)
 	})
 }
 
@@ -2084,7 +2108,7 @@ func redactDigestSnapshot(ctx context.Context, file *os.File) error {
 		if err != nil {
 			return false, err
 		}
-		return stampRewrittenDocumentSchemaVersion(value, reasoningChanged || changed)
+		return stampRewrittenDocumentSchemaVersion(schemaversion.Digest, value, reasoningChanged || changed)
 	})
 }
 

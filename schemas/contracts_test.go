@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -29,8 +30,11 @@ func TestPublishedExamplesValidateAgainstDraft202012Schemas(t *testing.T) {
 		jsonl  bool
 	}{
 		{path: "runtime-bundle.v1.json", schema: "runtime-bundle.schema.json"},
+		{path: "run-record.v2.json", schema: "run-record.v2.schema.json"},
 		{path: "run-record.v3.json", schema: "run-record.schema.json"},
+		{path: "digest.v2.json", schema: "digest.v2.schema.json"},
 		{path: "digest.v3.json", schema: "digest.schema.json"},
+		{path: "acta-events.v2.jsonl", schema: "acta-event.v2.schema.json", jsonl: true},
 		{path: "acta-events.v3.jsonl", schema: "acta-event.schema.json", jsonl: true},
 		{path: "projection.v2.json", schema: "projection.schema.json"},
 	}
@@ -80,6 +84,52 @@ func TestPublishedDigestVersionsRemainCompatible(t *testing.T) {
 	incompatible.OTLPStatus = "not_sampled"
 	if err := incompatible.Validate(); err == nil {
 		t.Fatal("v2 digest accepted the v3 not_sampled status")
+	}
+}
+
+func TestDigestVersionGateRejectsV3OnlyTimelineFields(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+		value any
+	}{
+		{name: "text chars", field: "text_chars", value: 0},
+		{name: "text truncated", field: "text_truncated", value: true},
+		{name: "redacted", field: "redacted", value: true},
+	}
+	for _, test := range tests {
+		for _, schemaVersion := range []int{2, 3} {
+			t.Run(test.name+"/v"+fmt.Sprint(schemaVersion), func(t *testing.T) {
+				payload, err := os.ReadFile(filepath.Join("examples", "digest.v2.json"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				var document map[string]any
+				if err := json.Unmarshal(payload, &document); err != nil {
+					t.Fatal(err)
+				}
+				document["schema_version"] = schemaVersion
+				document["timeline"] = []any{map[string]any{"kind": "reasoning", test.field: test.value}}
+				encoded, err := json.Marshal(document)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var parsed digest.Digest
+				if err := json.Unmarshal(encoded, &parsed); err != nil {
+					t.Fatal(err)
+				}
+				err = parsed.Validate()
+				if schemaVersion == 2 {
+					if err == nil || !strings.Contains(err.Error(), test.field) {
+						t.Fatalf("v2 digest validation error = %v, want v3-only field %s", err, test.field)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("v3 digest rejected %s: %v", test.field, err)
+				}
+			})
+		}
 	}
 }
 
@@ -153,6 +203,44 @@ func TestPublishedEventVersionsRemainCompatible(t *testing.T) {
 	}
 	if err := actaevents.ValidateEvent(incompatible, incompatible.RunID, 1); err == nil {
 		t.Fatal("v2 event accepted the v3 not_sampled status")
+	}
+}
+
+func TestEventVersionGateRejectsRunStartedReasoningRedactionState(t *testing.T) {
+	payload, err := os.ReadFile(filepath.Join("examples", "acta-events.v2.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	line, _, _ := bytes.Cut(payload, []byte{'\n'})
+	var document map[string]any
+	if err := json.Unmarshal(line, &document); err != nil {
+		t.Fatal(err)
+	}
+	started := document["payload"].(map[string]any)
+	started["reasoning_redaction_state"] = "redacted"
+
+	for _, schemaVersion := range []int{2, 3} {
+		t.Run(fmt.Sprintf("v%d", schemaVersion), func(t *testing.T) {
+			document["schema_version"] = schemaVersion
+			encoded, err := json.Marshal(document)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var event actaevents.Event
+			if err := json.Unmarshal(encoded, &event); err != nil {
+				t.Fatal(err)
+			}
+			err = actaevents.ValidateEvent(event, event.RunID, event.Sequence)
+			if schemaVersion == 2 {
+				if err == nil || !strings.Contains(err.Error(), "reasoning_redaction_state") {
+					t.Fatalf("v2 event validation error = %v, want v3-only reasoning_redaction_state", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("v3 event rejected reasoning_redaction_state: %v", err)
+			}
+		})
 	}
 }
 
@@ -430,7 +518,11 @@ func compileSchemas(t *testing.T) map[string]*jsonschema.Schema {
 	t.Helper()
 	compiler := jsonschema.NewCompiler()
 	compiler.AssertFormat()
-	names := []string{"runtime-bundle.schema.json", "run-record.schema.json", "digest.schema.json", "acta-event.schema.json", "projection.schema.json"}
+	names := []string{
+		"runtime-bundle.schema.json", "run-record.v2.schema.json", "run-record.schema.json",
+		"digest.v2.schema.json", "digest.schema.json", "acta-event.v2.schema.json",
+		"acta-event.schema.json", "projection.schema.json",
+	}
 	for _, name := range names {
 		payload, err := os.ReadFile(name)
 		if err != nil {

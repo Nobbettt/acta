@@ -1,11 +1,13 @@
 package runrecord
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/nobbettt/acta/internal/schemaversion"
 	"github.com/nobbettt/acta/internal/version"
 )
 
@@ -94,6 +96,26 @@ type Record struct {
 	// launcher may reuse this digest-bound reference instead of trusting a
 	// similarly shaped claim emitted by the coding agent.
 	PublishedBundle *PublishedBundle `json:"published_bundle,omitempty"`
+
+	presentV3Fields []string
+}
+
+// UnmarshalJSON remembers v3-only property presence independently of Go zero
+// values so Validate can reject, for example, an explicitly false future
+// boolean in a v2-labeled document.
+func (r *Record) UnmarshalJSON(data []byte) error {
+	type plainRecord Record
+	var decoded plainRecord
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	fields, err := schemaversion.PresentV3OnlyFieldsJSON(schemaversion.RunRecord, data)
+	if err != nil {
+		return err
+	}
+	*r = Record(decoded)
+	r.presentV3Fields = fields
+	return nil
 }
 
 type PublishedBundle struct {
@@ -114,6 +136,15 @@ func (r *Record) Validate() error {
 	}
 	if r.SchemaVersion < MinSchemaVersion || r.SchemaVersion > SchemaVersion {
 		return fmt.Errorf("unsupported run record schema_version %d (supported %d..%d)", r.SchemaVersion, MinSchemaVersion, SchemaVersion)
+	}
+	if !SupportsV3Fields(r.SchemaVersion) {
+		field, found, err := schemaversion.FirstPresentV3OnlyField(schemaversion.RunRecord, r, r.presentV3Fields)
+		if err != nil {
+			return fmt.Errorf("inspect run record versioned fields: %w", err)
+		}
+		if found {
+			return fmt.Errorf("run record schema_version %d does not support %s", r.SchemaVersion, field)
+		}
 	}
 	if r.SchemaVersion >= 2 && (strings.TrimSpace(r.Producer.Name) == "" || strings.TrimSpace(r.Producer.Version) == "") {
 		return fmt.Errorf("run record schema_version %d requires producer name and version", r.SchemaVersion)
@@ -161,14 +192,6 @@ func (r *Record) Validate() error {
 		}
 		if !oneOf(r.AgentConfigMode, "ambient_ephemeral", "project_only_ephemeral", "authoritative_bundle") {
 			return fmt.Errorf("run record has invalid agent_config_mode %q", r.AgentConfigMode)
-		}
-		if !SupportsV3Fields(r.SchemaVersion) {
-			if r.ReasoningRedactionState != "" {
-				return fmt.Errorf("run record schema_version %d does not support reasoning_redaction_state", r.SchemaVersion)
-			}
-			if r.PublishedBundle != nil {
-				return fmt.Errorf("run record schema_version %d does not support published_bundle", r.SchemaVersion)
-			}
 		}
 		if r.ReasoningRedactionState != "" && !oneOf(r.ReasoningRedactionState, "retained_local", "redacted", "failed", "partial") {
 			return fmt.Errorf("run record has invalid reasoning_redaction_state %q", r.ReasoningRedactionState)
