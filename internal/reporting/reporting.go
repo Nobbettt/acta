@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/nobbettt/acta/internal/actaevents"
+	"github.com/nobbettt/acta/internal/reasoning"
 	"github.com/nobbettt/acta/internal/runrecord"
 	"github.com/nobbettt/acta/internal/securefile"
 )
@@ -1352,6 +1353,10 @@ func inspectActaEventValue(value any) (bool, bool) {
 		_, changed := redactToStructuralReferences(payload)
 		return changed, true
 	}
+	if typ == actaevents.TypeAgentEventUnsupported {
+		_, changed, verified := redactUnsupportedPayload(payload)
+		return changed, verified
+	}
 	if !reasoningFreeActaEventType(typ) {
 		return false, false
 	}
@@ -1611,7 +1616,18 @@ func redactActaReasoningEventLine(line []byte) ([]byte, error) {
 	typ, _ := event["type"].(string)
 	if payload, ok := event["payload"]; ok {
 		switch {
-		case typ == actaevents.TypeAgentReasoning, !reasoningFreeActaEventType(typ):
+		case typ == actaevents.TypeAgentReasoning:
+			structural, structuralChanged := redactToStructuralReferences(payload)
+			event["payload"] = structural
+			changed = structuralChanged || changed
+		case typ == actaevents.TypeAgentEventUnsupported:
+			redacted, detailsChanged, verified := redactUnsupportedPayload(payload)
+			if !verified {
+				redacted, detailsChanged = redactToStructuralReferences(payload)
+			}
+			event["payload"] = redacted
+			changed = detailsChanged || changed
+		case !reasoningFreeActaEventType(typ):
 			structural, structuralChanged := redactToStructuralReferences(payload)
 			event["payload"] = structural
 			changed = structuralChanged || changed
@@ -1635,6 +1651,49 @@ func redactActaReasoningEventLine(line []byte) ([]byte, error) {
 		encoded = append(encoded, '\n')
 	}
 	return encoded, nil
+}
+
+// redactUnsupportedPayload understands the stable normalized wrapper used in
+// digests and Acta events, but treats Details as retained raw provider data.
+// Exact nested provider blocks are masked recursively; other diagnostics remain
+// byte-for-byte data.
+func redactUnsupportedPayload(value any) (any, bool, bool) {
+	redacted, changed, verified, _ := redactUnsupportedPayloadContext(context.Background(), value)
+	return redacted, changed, verified
+}
+
+func redactUnsupportedPayloadContext(ctx context.Context, value any) (any, bool, bool, error) {
+	payload, ok := value.(map[string]any)
+	if !ok {
+		return value, false, false, nil
+	}
+	kind, _ := payload["kind"].(string)
+	if kind != "unsupported" {
+		return value, false, false, nil
+	}
+	providerEvent, _ := payload["provider_event"].(string)
+	var detailsType string
+	if details, exists := payload["details"]; exists {
+		switch typed := details.(type) {
+		case nil, []any:
+		case map[string]any:
+			detailsType, _ = typed["type"].(string)
+		default:
+			changed, err := redactToStructuralReferencesContext(ctx, payload)
+			return payload, changed, true, err
+		}
+	}
+	if reasoning.IsNormalizedEvent(kind, providerEvent, detailsType) {
+		changed, err := redactToStructuralReferencesContext(ctx, payload)
+		return payload, changed, true, err
+	}
+	changed, err := reasoning.RedactProviderBlocksContext(ctx, payload)
+	if changed {
+		if redacted, _ := payload["redacted"].(bool); !redacted {
+			payload["redacted"] = true
+		}
+	}
+	return payload, changed, true, err
 }
 
 // reasoningFreeActaEventType is deliberately explicit. A newly introduced
@@ -1698,66 +1757,23 @@ func structuralPayloadKey(key string) bool {
 	}
 }
 
-const reasoningRedactionMarker = "[REDACTED]"
-
-func isReasoningRedactionMarker(value any) bool {
-	marker, ok := value.(string)
-	return ok && marker == reasoningRedactionMarker
-}
+const reasoningRedactionMarker = reasoning.RedactedMarker
 
 func reasoningRedactionMask(value any) (any, bool) {
-	switch typed := value.(type) {
-	case string:
-		return reasoningRedactionMarker, !isReasoningRedactionMarker(typed)
-	case []any:
-		if len(typed) == 0 {
-			return typed, false
-		}
-		return []any{}, true
-	case map[string]any:
-		if len(typed) == 0 {
-			return typed, false
-		}
-		return map[string]any{}, true
-	case json.Number:
-		return json.Number("0"), typed != json.Number("0")
-	case float64:
-		return float64(0), typed != 0
-	case float32:
-		return float32(0), typed != 0
-	case int:
-		return 0, typed != 0
-	case int8:
-		return int8(0), typed != 0
-	case int16:
-		return int16(0), typed != 0
-	case int32:
-		return int32(0), typed != 0
-	case int64:
-		return int64(0), typed != 0
-	case uint:
-		return uint(0), typed != 0
-	case uint8:
-		return uint8(0), typed != 0
-	case uint16:
-		return uint16(0), typed != 0
-	case uint32:
-		return uint32(0), typed != 0
-	case uint64:
-		return uint64(0), typed != 0
-	case bool:
-		return false, typed
-	default:
-		return value, false
-	}
+	return reasoning.MaskValue(value)
 }
 
 func redactReasoningValue(value any) bool {
+	changed := redactReasoningFields(value)
+	return reasoning.RedactProviderBlocks(value) || changed
+}
+
+func redactReasoningFields(value any) bool {
 	switch typed := value.(type) {
 	case []any:
 		changed := false
 		for _, item := range typed {
-			changed = redactReasoningValue(item) || changed
+			changed = redactReasoningFields(item) || changed
 		}
 		return changed
 	case map[string]any:
@@ -1765,8 +1781,13 @@ func redactReasoningValue(value any) bool {
 		if kind == "" {
 			kind, _ = typed["kind"].(string)
 		}
-		kind = strings.ToLower(strings.TrimSpace(kind))
-		if providerReasoningBlockKind(kind) {
+		if kind == "unsupported" {
+			_, changed, verified := redactUnsupportedPayload(typed)
+			if verified {
+				return changed
+			}
+		}
+		if reasoning.IsBlockDiscriminator(kind) {
 			_, changed := redactToStructuralReferences(typed)
 			return changed
 		}
@@ -1783,7 +1804,7 @@ func redactReasoningValue(value any) bool {
 				}
 				continue
 			}
-			changed = redactReasoningValue(item) || changed
+			changed = redactReasoningFields(item) || changed
 		}
 		return changed
 	default:
@@ -1795,11 +1816,23 @@ func redactReasoningValueContext(ctx context.Context, value any) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
+	changed, err := redactReasoningFieldsContext(ctx, value)
+	if err != nil {
+		return false, err
+	}
+	providerChanged, err := reasoning.RedactProviderBlocksContext(ctx, value)
+	return providerChanged || changed, err
+}
+
+func redactReasoningFieldsContext(ctx context.Context, value any) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	switch typed := value.(type) {
 	case []any:
 		changed := false
 		for _, item := range typed {
-			itemChanged, err := redactReasoningValueContext(ctx, item)
+			itemChanged, err := redactReasoningFieldsContext(ctx, item)
 			if err != nil {
 				return false, err
 			}
@@ -1811,8 +1844,16 @@ func redactReasoningValueContext(ctx context.Context, value any) (bool, error) {
 		if kind == "" {
 			kind, _ = typed["kind"].(string)
 		}
-		kind = strings.ToLower(strings.TrimSpace(kind))
-		if providerReasoningBlockKind(kind) {
+		if kind == "unsupported" {
+			_, changed, verified, err := redactUnsupportedPayloadContext(ctx, typed)
+			if err != nil {
+				return false, err
+			}
+			if verified {
+				return changed, nil
+			}
+		}
+		if reasoning.IsBlockDiscriminator(kind) {
 			return redactToStructuralReferencesContext(ctx, typed)
 		}
 		changed := false
@@ -1831,7 +1872,7 @@ func redactReasoningValueContext(ctx context.Context, value any) (bool, error) {
 				}
 				continue
 			}
-			itemChanged, err := redactReasoningValueContext(ctx, item)
+			itemChanged, err := redactReasoningFieldsContext(ctx, item)
 			if err != nil {
 				return false, err
 			}
@@ -1863,18 +1904,6 @@ func redactToStructuralReferencesContext(ctx context.Context, payload map[string
 		changed = true
 	}
 	return changed, nil
-}
-
-// providerReasoningBlockKind matches the exact provider/digest discriminators
-// Acta understands. Substring matches are deliberately excluded: user-defined
-// values such as "reasoning_result" are data, not provider reasoning blocks.
-func providerReasoningBlockKind(kind string) bool {
-	switch kind {
-	case "reasoning", "thinking", "redacted_thinking":
-		return true
-	default:
-		return false
-	}
 }
 
 // userDataPayloadKey identifies containers whose contents belong to the user

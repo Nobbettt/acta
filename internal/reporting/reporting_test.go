@@ -721,6 +721,61 @@ func TestUploadRunRedactsUnsupportedClaudeDetailsByDefault(t *testing.T) {
 	}
 }
 
+func TestRemoteRedactionScrubsIDLessUnsupportedCodexReasoning(t *testing.T) {
+	const secret = "private-idless-remote-reasoning-4826"
+
+	t.Run("Acta event", func(t *testing.T) {
+		original := []byte(`{"type":"agent.event.unsupported","payload":{"kind":"unsupported","provider_event":"item.completed","details":{"type":"item.completed","item":{"type":"reasoning","text":"` + secret + `","summary":["private"]}},"raw_event_lines":[3]}}` + "\n")
+		redacted, err := redactActaReasoningEventLine(original)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(redacted, []byte(secret)) ||
+			!bytes.Contains(redacted, []byte(`"text":"[REDACTED]"`)) ||
+			!bytes.Contains(redacted, []byte(`"summary":[]`)) ||
+			!bytes.Contains(redacted, []byte(`"raw_event_lines":[3]`)) ||
+			!bytes.Contains(redacted, []byte(`"redacted":true`)) {
+			t.Fatalf("unsupported Acta event was not safely redacted: %s", redacted)
+		}
+	})
+
+	t.Run("digest", func(t *testing.T) {
+		file := writeSnapshotFile(t, `{"schema_version":3,"timeline":[{"kind":"unsupported","provider_event":"item.completed","details":{"type":"item.completed","item":{"type":"reasoning","text":"`+secret+`"}}}]}`+"\n")
+		if err := redactDigestSnapshot(context.Background(), file); err != nil {
+			t.Fatal(err)
+		}
+		redacted := readOpenFile(t, file)
+		if strings.Contains(redacted, secret) || !strings.Contains(redacted, `"text":"[REDACTED]"`) ||
+			!strings.Contains(redacted, `"redacted":true`) {
+			t.Fatalf("unsupported digest event was not safely redacted: %s", redacted)
+		}
+	})
+}
+
+func TestRemoteRedactionPreservesUnsupportedNonReasoningDetails(t *testing.T) {
+	t.Run("Acta event", func(t *testing.T) {
+		original := []byte(`{"type":"agent.event.unsupported","payload":{"kind":"unsupported","provider_event":"rethinking","details":{"type":"rethinking","diagnostic":"keep this payload"},"raw_event_lines":[7]}}` + "\n")
+		redacted, err := redactActaReasoningEventLine(original)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(redacted, original) {
+			t.Fatalf("legitimate unsupported payload changed:\n got %s\nwant %s", redacted, original)
+		}
+	})
+
+	t.Run("digest", func(t *testing.T) {
+		original := `{"schema_version":3,"timeline":[{"kind":"unsupported","provider_event":"rethinking","details":{"type":"rethinking","diagnostic":"keep this payload"}}]}` + "\n"
+		file := writeSnapshotFile(t, original)
+		if err := redactDigestSnapshot(context.Background(), file); err != nil {
+			t.Fatal(err)
+		}
+		if redacted := readOpenFile(t, file); redacted != original {
+			t.Fatalf("legitimate unsupported digest payload changed:\n got %s\nwant %s", redacted, original)
+		}
+	})
+}
+
 func TestUploadRunRedactsEvenWhenRunRecordClaimsRedacted(t *testing.T) {
 	const secret = "tampered-redaction-state-secret-8901"
 	runDir := writeBundle(t)

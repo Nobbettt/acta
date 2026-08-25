@@ -1336,6 +1336,55 @@ func TestRunRedactReasoningRemovesTextFromEntireBundle(t *testing.T) {
 	}
 }
 
+func TestRunRedactReasoningScrubsIDLessUnsupportedReasoningFromEntireBundle(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	const secretReasoning = "private-chain-of-thought-7419"
+	const visibleUnsupported = "keep-unsupported-diagnostic-2184"
+	cwd := t.TempDir()
+	fakeBin := t.TempDir()
+	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
+		`printf '{"type":"item.completed","item":{"type":"reasoning","text":"`+secretReasoning+`"}}\n'`+"\n"+
+		`printf '{"type":"item.completed","item":{"id":"future-1","type":"rethinking","diagnostic":"`+visibleUnsupported+`"}}\n'`+"\n"+
+		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	record, err := runForTest(context.Background(), Options{
+		Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test", RedactReasoning: true,
+	}, io.Discard, io.Discard)
+	if err == nil || record == nil || !strings.Contains(err.Error(), "unsupported event") {
+		t.Fatalf("record=%+v error=%v, want retained bundle with unsupported-event failure", record, err)
+	}
+	if record.ReasoningRedactionState != "redacted" {
+		t.Fatalf("reasoning redaction state = %q", record.ReasoningRedactionState)
+	}
+	err = filepath.Walk(record.RunDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil || info.IsDir() {
+			return walkErr
+		}
+		payload, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if strings.Contains(string(payload), secretReasoning) {
+			return fmt.Errorf("reasoning text leaked into %s", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"digest.json", actaevents.Filename, record.RawStdoutArtifact} {
+		payload, readErr := os.ReadFile(filepath.Join(record.RunDir, name))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if !strings.Contains(string(payload), visibleUnsupported) {
+			t.Errorf("legitimate unsupported details were lost from %s: %s", name, payload)
+		}
+	}
+}
+
 func TestRunRedactionFailurePublishesUnredactedEvidenceAndRefusesDefaultUpload(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake shell agents require /bin/sh")

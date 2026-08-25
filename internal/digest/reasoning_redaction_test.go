@@ -35,6 +35,62 @@ func TestRedactReasoningPreservesUnsupportedCodexRethinkingDetails(t *testing.T)
 	}
 }
 
+func TestRedactReasoningScrubsIDLessUnsupportedCodexReasoning(t *testing.T) {
+	const secret = "private-idless-reasoning-9137"
+	raw := strings.Join([]string{
+		`{"type":"thread.started","thread_id":"thread-1"}`,
+		`{"type":"turn.started"}`,
+		`{"type":"item.completed","item":{"type":"reasoning","text":"` + secret + `","summary":["private"]}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`,
+	}, "\n") + "\n"
+	d, err := parseCodex(strings.NewReader(raw), newWorkspace(""))
+	if err == nil || !strings.Contains(err.Error(), "unsupported event") {
+		t.Fatalf("parse error = %v, want unsupported-event failure", err)
+	}
+
+	event := findTimelineProviderEvent(d.Timeline, "item.completed")
+	if event == nil || event.Kind != KindUnsupported {
+		t.Fatalf("unsupported item.completed event missing: %+v", d.Timeline)
+	}
+
+	RedactReasoning(d)
+
+	if !event.Redacted || bytes.Contains(event.Details, []byte(secret)) {
+		t.Fatalf("unsupported reasoning was not redacted: %+v / %s", event, event.Details)
+	}
+	if !bytes.Contains(event.Details, []byte(`"text":"[REDACTED]"`)) ||
+		!bytes.Contains(event.Details, []byte(`"summary":[]`)) ||
+		!bytes.Contains(event.Details, []byte(`"type":"reasoning"`)) {
+		t.Fatalf("unsupported reasoning did not use structural type-preserving masks: %s", event.Details)
+	}
+}
+
+func TestRedactReasoningMasksUninspectableUnsupportedDetails(t *testing.T) {
+	d := &Digest{Timeline: []Event{{
+		Kind: KindUnsupported, ProviderEvent: "future.event", Details: json.RawMessage(`{"unterminated":`),
+	}}}
+
+	RedactReasoning(d)
+
+	event := d.Timeline[0]
+	if !event.Redacted || string(event.Details) != `"[REDACTED]"` {
+		t.Fatalf("uninspectable unsupported details = %+v / %s", event, event.Details)
+	}
+}
+
+func TestRedactReasoningMasksUnknownNormalizedEventConservatively(t *testing.T) {
+	d := &Digest{Timeline: []Event{{
+		Kind: "future_kind", Text: "possibly private", Details: json.RawMessage(`{"diagnostic":"possibly private"}`),
+	}}}
+
+	RedactReasoning(d)
+
+	event := d.Timeline[0]
+	if !event.Redacted || event.Text != "" || string(event.Details) != `"[REDACTED]"` {
+		t.Fatalf("unknown normalized event was not conservatively redacted: %+v / %s", event, event.Details)
+	}
+}
+
 func TestRedactReasoningRedactsExactProviderBlocks(t *testing.T) {
 	tests := map[string]Event{
 		"codex reasoning": {

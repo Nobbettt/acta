@@ -178,19 +178,36 @@ func RedactReasoning(d *Digest) {
 	for i := range d.Timeline {
 		event := &d.Timeline[i]
 		if isReasoningEvent(*event) {
-			event.Redacted = true
-			event.Text = ""
-			event.localReasoningText = ""
-			event.Input = nil
-			event.Result = nil
-			event.Command = ""
-			event.ErrorMessage = ""
-			event.Output = ""
-			event.Query = ""
-			event.Action = nil
-			event.Details = nil
+			redactEventPayload(event)
+			continue
+		}
+		if event.Kind == KindUnsupported {
+			details, changed := redactUnsupportedDetails(event.Details)
+			if changed {
+				event.Details = details
+				event.Redacted = true
+			}
+			continue
+		}
+		if !isKnownEventKind(event.Kind) {
+			redactEventPayload(event)
+			event.Details = json.RawMessage(`"` + reasoning.RedactedMarker + `"`)
 		}
 	}
+}
+
+func redactEventPayload(event *Event) {
+	event.Redacted = true
+	event.Text = ""
+	event.localReasoningText = ""
+	event.Input = nil
+	event.Result = nil
+	event.Command = ""
+	event.ErrorMessage = ""
+	event.Output = ""
+	event.Query = ""
+	event.Action = nil
+	event.Details = nil
 }
 
 func isReasoningEvent(event Event) bool {
@@ -201,6 +218,55 @@ func isReasoningEvent(event Event) bool {
 		_ = json.Unmarshal(event.Details, &details)
 	}
 	return reasoning.IsNormalizedEvent(event.Kind, event.ProviderEvent, details.Type)
+}
+
+func isKnownEventKind(kind string) bool {
+	switch kind {
+	case KindToolCall, KindToolResult, KindCommand, KindMessage, KindUserInput,
+		KindReasoning, KindFileEdit, KindTodo, KindWebSearch, KindTask,
+		KindPermission, KindRuntime, KindLifecycle, KindRateLimit,
+		KindStructuredOutput, KindError, KindUnsupported:
+		return true
+	default:
+		return false
+	}
+}
+
+// redactUnsupportedDetails retains inspectable diagnostics while recursively
+// masking exact provider reasoning blocks. Invalid JSON cannot be proved safe,
+// so it is replaced with the explicit redaction marker.
+func redactUnsupportedDetails(raw json.RawMessage) (json.RawMessage, bool) {
+	if len(raw) == 0 {
+		return raw, false
+	}
+	var value any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return json.RawMessage(`"` + reasoning.RedactedMarker + `"`), true
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return json.RawMessage(`"` + reasoning.RedactedMarker + `"`), true
+	}
+	switch value.(type) {
+	case nil, []any, map[string]any:
+	default:
+		masked, _ := reasoning.MaskValue(value)
+		redacted, err := json.Marshal(masked)
+		if err != nil {
+			return json.RawMessage(`"` + reasoning.RedactedMarker + `"`), true
+		}
+		return redacted, true
+	}
+	if !reasoning.RedactProviderBlocks(value) {
+		return raw, false
+	}
+	redacted, err := json.Marshal(value)
+	if err != nil {
+		return json.RawMessage(`"` + reasoning.RedactedMarker + `"`), true
+	}
+	return redacted, true
 }
 
 type FileMutation struct {
