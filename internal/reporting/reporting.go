@@ -183,7 +183,7 @@ func UploadRun(ctx context.Context, cfg Config, record *runrecord.Record) error 
 	if !redactRemoteReasoning {
 		remoteRedactionState = "unredacted"
 	}
-	eventFile, eventTempPath, err := snapshotEventStreamLimit(ctx, record.RunDir, artifactLimit, redactRemoteReasoning, maxRedactionLineBytes)
+	eventFile, eventTempPath, err := snapshotEventStreamLimit(ctx, record.RunDir, artifactLimit)
 	if err != nil {
 		return err
 	}
@@ -194,6 +194,14 @@ func UploadRun(ctx context.Context, cfg Config, record *runrecord.Record) error 
 	artifactRefs, err := terminalArtifactRefsFromFile(ctx, eventFile, record)
 	if err != nil {
 		return err
+	}
+	if redactRemoteReasoning {
+		if _, err := redactArtifactSnapshot(ctx, eventFile, "event_stream", actaevents.Filename, maxRedactionLineBytes); err != nil {
+			return fmt.Errorf("redact reasoning from event snapshot: %w", err)
+		}
+		if _, err := scanEventsFile(ctx, eventFile, record.ID, nil); err != nil {
+			return fmt.Errorf("validate redacted replay event snapshot: %w", err)
+		}
 	}
 	artifacts, err := buildArtifactsContext(ctx, record.RunDir, artifactRefs, eventFile, eventTempPath, artifactLimit, redactRemoteReasoning, maxRedactionLineBytes)
 	if err != nil {
@@ -2017,11 +2025,13 @@ func setReasoningRedactionStateContext(ctx context.Context, value any) (bool, er
 	return changed, nil
 }
 
-// stampRewrittenDocumentSchemaVersion is the single version boundary for Acta
-// documents rewritten during remote redaction. Schema v2 does not define the
-// redaction and withheld-reference fields introduced by these rewrites, so an
-// altered emitted copy must declare v3. Unchanged legacy documents stay byte
-// identical.
+// stampRewrittenDocumentSchemaVersion is the single version and provenance
+// boundary for Acta documents rewritten during remote redaction. Schema v2
+// does not define the redaction and withheld-reference fields introduced by
+// these rewrites, so an altered emitted copy must declare v3. Digests identify
+// the rewriting binary as their producer; events preserve their immutable
+// producer and identify the rewriting binary separately. Unchanged legacy
+// documents stay byte identical.
 func stampRewrittenDocumentSchemaVersion(documentType schemaversion.DocumentType, document any, rewritten bool) (bool, error) {
 	v3Fields, err := schemaversion.PresentV3OnlyFields(documentType, document)
 	if err != nil {
@@ -2034,8 +2044,16 @@ func stampRewrittenDocumentSchemaVersion(documentType schemaversion.DocumentType
 	switch typed := document.(type) {
 	case map[string]any:
 		typed["schema_version"] = runrecord.SchemaVersion
+		switch documentType {
+		case schemaversion.Digest:
+			typed["producer"] = runrecord.CurrentProducer()
+		case schemaversion.Event:
+			typed["regenerated_by"] = runrecord.CurrentProducer()
+		}
 	case *actaevents.Event:
 		typed.SchemaVersion = actaevents.SchemaVersion
+		regenerator := runrecord.CurrentProducer()
+		typed.RegeneratedBy = &regenerator
 	default:
 		return false, fmt.Errorf("rewritten Acta document has unsupported root type %T", document)
 	}
@@ -2256,7 +2274,7 @@ func hashFileContext(ctx context.Context, file *os.File) (string, int64, error) 
 	return hex.EncodeToString(hasher.Sum(nil)), size, nil
 }
 
-func snapshotEventStreamLimit(ctx context.Context, runDir string, maxBytes int64, redactReasoning bool, maxRedactionLineBytes int) (*os.File, string, error) {
+func snapshotEventStreamLimit(ctx context.Context, runDir string, maxBytes int64) (*os.File, string, error) {
 	resolvedRunDir, err := filepath.EvalSymlinks(runDir)
 	if err != nil {
 		return nil, "", fmt.Errorf("resolve run directory: %w", err)
@@ -2270,13 +2288,6 @@ func snapshotEventStreamLimit(ctx context.Context, runDir string, maxBytes int64
 	file, tempPath, err := snapshotRegularFile(ctx, resolvedRunDir, path, maxBytes)
 	if err != nil {
 		return nil, "", err
-	}
-	if redactReasoning {
-		if _, err := redactArtifactSnapshot(ctx, file, "event_stream", actaevents.Filename, maxRedactionLineBytes); err != nil {
-			_ = file.Close()
-			_ = os.Remove(tempPath)
-			return nil, "", fmt.Errorf("redact reasoning from event snapshot: %w", err)
-		}
 	}
 	return file, tempPath, nil
 }

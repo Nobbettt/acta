@@ -36,8 +36,9 @@ func TestRedactReasoningRawStreamRejectsOversizedLineWithoutMutation(t *testing.
 func TestRedactReasoningLineRedactsExactProviderBlocks(t *testing.T) {
 	const secret = "private provider reasoning"
 	tests := map[string][]byte{
-		"codex":  []byte(`{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","text":"` + secret + `"}}` + "\n"),
-		"claude": []byte(`{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"` + secret + `"}]}}` + "\n"),
+		"codex":         []byte(`{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","text":"` + secret + `"}}` + "\n"),
+		"claude":        []byte(`{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"` + secret + `"}]}}` + "\n"),
+		"array wrapped": []byte(`[{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","text":"` + secret + `"}}]` + "\n"),
 	}
 	for name, original := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -52,6 +53,27 @@ func TestRedactReasoningLineRedactsExactProviderBlocks(t *testing.T) {
 				t.Fatalf("provider reasoning block lost its discriminator: %s", redacted)
 			}
 		})
+	}
+}
+
+func TestRedactReasoningRawStreamVerifiesArrayWrappedProviderBlock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "provider.jsonl")
+	const secret = "private array-wrapped reasoning"
+	original := `[{"type":"item.completed","item":{"type":"reasoning","text":"` + secret + `"}}]` + "\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := redactReasoningRawStream(path, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if state != "redacted" || bytes.Contains(payload, []byte(secret)) || !bytes.Contains(payload, []byte(`"redacted":true`)) {
+		t.Fatalf("redaction state/payload = %q/%s", state, payload)
 	}
 }
 

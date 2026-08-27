@@ -531,7 +531,7 @@ func TestUploadRunWithholdsAmbiguousOpaqueStderrByDefault(t *testing.T) {
 		"",
 	}, "\n"))
 	addArtifactRef(t, runDir, `{"kind":"raw_stderr","path":"`+stderrName+`"}`)
-	eventFile, eventTempPath, err := snapshotEventStreamLimit(context.Background(), runDir, 0, true, DefaultMaxRedactionLineBytes)
+	eventFile, eventTempPath, err := snapshotEventStreamLimit(context.Background(), runDir, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -690,9 +690,9 @@ func TestUploadRunRedactsRemoteReasoningByDefaultForEveryAgentShape(t *testing.T
 			writeFile(t, filepath.Join(runDir, "run.json"), `{"id":"run-1","reasoning_redaction_state":"retained_local"}`+"\n")
 			writeFile(t, filepath.Join(runDir, "digest.json"), `{"run_id":"run-1"}`+"\n")
 			writeFile(t, filepath.Join(runDir, actaevents.Filename), strings.Join([]string{
-				`{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":1,"timestamp":"2026-07-06T12:00:00Z","source":"acta","type":"run.started","payload":{"agent":"` + agent + `","reasoning_redaction_state":"retained_local"}}`,
-				`{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":2,"timestamp":"2026-07-06T12:00:00.5Z","source":"acta","type":"agent.reasoning","payload":{"kind":"reasoning","provider_event":"private","text":"` + secret + `"}}`,
-				`{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":3,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed","payload":{"reasoning_redaction_state":"retained_local"},"artifact_refs":[{"kind":"run_record","path":"run.json"},{"kind":"raw_stdout","path":"` + rawName + `"},{"kind":"digest","path":"digest.json"},{"kind":"event_stream","path":"acta-events.jsonl"}]}`,
+				`{"schema_version":3,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":1,"timestamp":"2026-07-06T12:00:00Z","source":"acta","type":"run.started","payload":{"agent":"` + agent + `","reasoning_redaction_state":"retained_local"}}`,
+				`{"schema_version":3,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":2,"timestamp":"2026-07-06T12:00:00.5Z","source":"acta","type":"agent.reasoning","payload":{"kind":"reasoning","provider_event":"private","text":"` + secret + `"}}`,
+				`{"schema_version":3,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":3,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed","payload":{"reasoning_redaction_state":"retained_local"},"artifact_refs":[{"kind":"run_record","path":"run.json"},{"kind":"raw_stdout","path":"` + rawName + `"},{"kind":"digest","path":"digest.json"},{"kind":"event_stream","path":"acta-events.jsonl"}]}`,
 				"",
 			}, "\n"))
 			record := testRecord(runDir)
@@ -700,6 +700,7 @@ func TestUploadRunRedactsRemoteReasoningByDefaultForEveryAgentShape(t *testing.T
 			record.ReasoningRedactionState = "retained_local"
 
 			var remote bytes.Buffer
+			var remoteEvents []actaevents.Event
 			redactionStates := map[string]string{}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 				if request.URL.Path == "/api/ingest/runs/run-1/events" || request.URL.Path == "/api/ingest/runs/run-1/artifacts" {
@@ -708,6 +709,13 @@ func TestUploadRunRedactsRemoteReasoningByDefaultForEveryAgentShape(t *testing.T
 						t.Error(err)
 					}
 					remote.Write(payload)
+					if request.URL.Path == "/api/ingest/runs/run-1/events" {
+						var body eventsRequest
+						if err := json.Unmarshal(payload, &body); err != nil {
+							t.Error(err)
+						}
+						remoteEvents = append(remoteEvents, body.Events...)
+					}
 				}
 				if request.URL.Path == "/api/ingest/runs/run-1/artifacts" {
 					redactionStates[request.URL.Query().Get("filename")] = request.URL.Query().Get("redaction_state")
@@ -744,6 +752,7 @@ func TestUploadRunRedactsRemoteReasoningByDefaultForEveryAgentShape(t *testing.T
 			if !strings.Contains(string(local), secret) {
 				t.Fatal("default remote redaction changed the local full-fidelity bundle")
 			}
+			assertEventProducerProvenance(t, remoteEvents, record.Producer, runrecord.CurrentProducer())
 		})
 	}
 }
@@ -751,7 +760,7 @@ func TestUploadRunRedactsRemoteReasoningByDefaultForEveryAgentShape(t *testing.T
 func TestUploadRunRedactsReasoningFromLegacyDigest(t *testing.T) {
 	const secret = "legacy-digest-reasoning-48291"
 	runDir := writeBundle(t)
-	digestBody := `{"schema_version":2,"run_id":"run-1","timeline":[{"kind":"reasoning","provider_event":"item.reasoning","text":"` + secret + `","raw_event_lines":[17]}],"metrics":{"tokens":{"reasoning":42}}}` + "\n"
+	digestBody := `{"schema_version":2,"producer":{"name":"acta","version":"v0.1"},"run_id":"run-1","timeline":[{"kind":"reasoning","provider_event":"item.reasoning","text":"` + secret + `","raw_event_lines":[17]}],"metrics":{"tokens":{"reasoning":42}}}` + "\n"
 	writeFile(t, filepath.Join(runDir, "digest.json"), digestBody)
 	record := testRecord(runDir)
 	record.ReasoningRedactionState = "retained_local"
@@ -784,6 +793,13 @@ func TestUploadRunRedactsReasoningFromLegacyDigest(t *testing.T) {
 		!strings.Contains(remoteDigest, `"reasoning":42`) ||
 		!strings.Contains(remoteDigest, `"redacted":true`) || remoteState != "redacted" {
 		t.Fatalf("remote legacy digest/state lost structural redaction: %s / %q", remoteDigest, remoteState)
+	}
+	var rewritten digest.Digest
+	if err := json.Unmarshal([]byte(remoteDigest), &rewritten); err != nil {
+		t.Fatal(err)
+	}
+	if rewritten.Producer != runrecord.CurrentProducer() {
+		t.Fatalf("remote digest producer = %+v, want rewriting producer %+v", rewritten.Producer, runrecord.CurrentProducer())
 	}
 	if local := readTestFile(t, filepath.Join(runDir, "digest.json")); local != digestBody {
 		t.Fatal("upload redaction modified the local legacy digest")
@@ -838,9 +854,9 @@ func TestUploadRunRedactsUnsupportedClaudeDetailsByDefault(t *testing.T) {
 	writeFile(t, filepath.Join(runDir, "run.json"), `{"id":"run-1","reasoning_redaction_state":"retained_local"}`+"\n")
 	writeFile(t, filepath.Join(runDir, "digest.json"), `{"run_id":"run-1"}`+"\n")
 	writeFile(t, filepath.Join(runDir, actaevents.Filename), strings.Join([]string{
-		`{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":1,"timestamp":"2026-07-06T12:00:00Z","source":"acta","type":"run.started","payload":{"agent":"claude","reasoning_redaction_state":"retained_local"}}`,
-		`{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":2,"timestamp":"2026-07-06T12:00:00.5Z","source":"acta","type":"agent.event.unsupported","payload":{"kind":"unsupported","provider_event":"assistant.redacted_thinking","details":{"type":"redacted_thinking","data":"` + secret + `"},"raw_event_lines":[1]},"artifact_refs":[{"kind":"raw_stdout","path":"` + rawName + `","lines":[1]}]}`,
-		`{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":3,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed","payload":{"status":"ok"},"artifact_refs":[{"kind":"run_record","path":"run.json"},{"kind":"raw_stdout","path":"` + rawName + `"},{"kind":"digest","path":"digest.json"},{"kind":"event_stream","path":"acta-events.jsonl"}]}`,
+		`{"schema_version":3,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":1,"timestamp":"2026-07-06T12:00:00Z","source":"acta","type":"run.started","payload":{"agent":"claude","reasoning_redaction_state":"retained_local"}}`,
+		`{"schema_version":3,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":2,"timestamp":"2026-07-06T12:00:00.5Z","source":"acta","type":"agent.event.unsupported","payload":{"kind":"unsupported","provider_event":"assistant.redacted_thinking","details":{"type":"redacted_thinking","data":"` + secret + `"},"raw_event_lines":[1]},"artifact_refs":[{"kind":"raw_stdout","path":"` + rawName + `","lines":[1]}]}`,
+		`{"schema_version":3,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":3,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed","payload":{"status":"ok"},"artifact_refs":[{"kind":"run_record","path":"run.json"},{"kind":"raw_stdout","path":"` + rawName + `"},{"kind":"digest","path":"digest.json"},{"kind":"event_stream","path":"acta-events.jsonl"}]}`,
 		"",
 	}, "\n"))
 	record := testRecord(runDir)
@@ -1491,6 +1507,39 @@ func TestScanEventsRejectsInvalidReplayContract(t *testing.T) {
 				t.Fatal("invalid replay stream was accepted")
 			}
 		})
+	}
+}
+
+func TestUploadRunRejectsFutureEventSchemaBeforeRemoteRewrite(t *testing.T) {
+	runDir := writeBundle(t)
+	const secret = "future-schema-reasoning"
+	futureStream := strings.Join([]string{
+		`{"schema_version":4,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":1,"timestamp":"2026-07-06T12:00:00Z","source":"acta","type":"run.started","payload":{"agent":"codex"}}`,
+		`{"schema_version":4,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":2,"timestamp":"2026-07-06T12:00:00.5Z","source":"acta","type":"agent.reasoning","payload":{"kind":"reasoning","text":"` + secret + `"}}`,
+		`{"schema_version":4,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":3,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed","payload":{"status":"ok"},"artifact_refs":[{"kind":"run_record","path":"run.json"},{"kind":"digest","path":"digest.json"},{"kind":"event_stream","path":"acta-events.jsonl"}]}`,
+		"",
+	}, "\n")
+	eventsPath := filepath.Join(runDir, actaevents.Filename)
+	writeFile(t, eventsPath, futureStream)
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	err := UploadRun(context.Background(), Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+	}, testRecord(runDir))
+	if err == nil || !strings.Contains(err.Error(), "unsupported schema_version 4") {
+		t.Fatalf("UploadRun() error = %v, want future schema rejection", err)
+	}
+	if requests != 0 {
+		t.Fatalf("future event stream issued %d remote requests, want none", requests)
+	}
+	if local := readTestFile(t, eventsPath); local != futureStream || !strings.Contains(local, secret) {
+		t.Fatalf("future event stream was normalized locally:\n%s", local)
 	}
 }
 
