@@ -1033,6 +1033,17 @@ func TestRemoteRedactionScrubsIDLessUnsupportedCodexReasoning(t *testing.T) {
 			!strings.Contains(redacted, `"redacted":true`) {
 			t.Fatalf("unsupported digest event was not safely redacted: %s", redacted)
 		}
+		var document struct {
+			Timeline []struct {
+				Redacted bool `json:"redacted"`
+			} `json:"timeline"`
+		}
+		if err := json.Unmarshal([]byte(redacted), &document); err != nil {
+			t.Fatal(err)
+		}
+		if len(document.Timeline) != 1 || !document.Timeline[0].Redacted {
+			t.Fatalf("unsupported digest timeline provenance = %#v, want redacted", document.Timeline)
+		}
 	})
 }
 
@@ -1139,6 +1150,33 @@ func TestRedactArtifactSnapshotProcessesJSONAfterManyDiagnosticLines(t *testing.
 	}
 	if !strings.HasPrefix(redacted, "diagnostic line 1\n") || !strings.Contains(redacted, "diagnostic line 32\n") {
 		t.Fatalf("plain diagnostic lines changed: %q", redacted)
+	}
+}
+
+func TestRedactWorkspaceDiffPreservesJSONContextLineMarker(t *testing.T) {
+	const secret = "private-reasoning-in-diff-context-4821"
+	jsonLine := `{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"` + secret + `"}]}}`
+	original := "diff --git a/event.json b/event.json\n" +
+		"--- a/event.json\n" +
+		"+++ b/event.json\n" +
+		"@@ -1 +1 @@\n" +
+		" " + jsonLine + "  \n"
+	file := writeSnapshotFile(t, original)
+
+	verified, err := redactArtifactSnapshot(context.Background(), file, "workspace_diff", "workspace.diff", DefaultMaxRedactionLineBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redacted := readOpenFile(t, file)
+	if !verified || strings.Contains(redacted, secret) {
+		t.Fatalf("workspace diff redaction verified=%v snapshot=%q", verified, redacted)
+	}
+	lines := strings.Split(redacted, "\n")
+	if len(lines) < 6 || !strings.HasPrefix(lines[4], " {") || !strings.HasSuffix(lines[4], "  ") {
+		t.Fatalf("rewritten unified-diff context line lost its exact prefix/suffix: %q", lines[4])
+	}
+	if strings.Join(lines[:4], "\n") != strings.Join(strings.Split(original, "\n")[:4], "\n") {
+		t.Fatalf("workspace diff headers changed:\n%s", redacted)
 	}
 }
 
@@ -1667,6 +1705,35 @@ func TestUploadRunRejectsFutureEventSchemaBeforeRemoteRewrite(t *testing.T) {
 	}
 	if local := readTestFile(t, eventsPath); local != futureStream || !strings.Contains(local, secret) {
 		t.Fatalf("future event stream was normalized locally:\n%s", local)
+	}
+}
+
+func TestUploadRunRejectsFutureDigestSchemaBeforeRemoteRewrite(t *testing.T) {
+	runDir := writeBundle(t)
+	writeFile(t, filepath.Join(runDir, "run.json"), `{"schema_version":3,"id":"run-1"}`+"\n")
+	const secret = "future-digest-private-reasoning-5217"
+	futureDigest := `{"schema_version":4,"run_id":"run-1","timeline":[{"kind":"reasoning","text":"` + secret + `"}],"future_digest_field":{"preserve":true}}` + "\n"
+	digestPath := filepath.Join(runDir, "digest.json")
+	writeFile(t, digestPath, futureDigest)
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	err := UploadRun(context.Background(), Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+	}, testRecord(runDir))
+	if err == nil || !strings.Contains(err.Error(), "unsupported schema_version 4") {
+		t.Fatalf("UploadRun() error = %v, want future digest schema rejection", err)
+	}
+	if requests != 0 {
+		t.Fatalf("future digest issued %d remote requests, want none", requests)
+	}
+	if local := readTestFile(t, digestPath); local != futureDigest || !strings.Contains(local, secret) {
+		t.Fatalf("future digest was transformed or relabeled locally:\n%s", local)
 	}
 }
 

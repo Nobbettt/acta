@@ -2,6 +2,7 @@ package runner
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -51,6 +52,32 @@ func TestRedactReasoningLineRedactsExactProviderBlocks(t *testing.T) {
 			}
 			if !bytes.Contains(redacted, []byte(`"type":"reasoning"`)) && !bytes.Contains(redacted, []byte(`"type":"thinking"`)) {
 				t.Fatalf("provider reasoning block lost its discriminator: %s", redacted)
+			}
+		})
+	}
+}
+
+func TestRedactReasoningLineMasksMalformedStructuralMetadata(t *testing.T) {
+	tests := map[string][]byte{
+		"claimed redacted":        []byte(`{"type":"item.completed","item":{"type":"reasoning","text":"[REDACTED]","id":{"value":"private-id"},"status":["private-status"],"text_chars":"private-count","text_truncated":"private-truncation","redacted":true}}` + "\n"),
+		"malformed redacted flag": []byte(`{"type":"item.completed","item":{"type":"reasoning","text":"","redacted":"private-redacted-flag"}}` + "\n"),
+	}
+	for name, original := range tests {
+		t.Run(name, func(t *testing.T) {
+			redacted, err := redactReasoningLine(original)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(redacted, []byte("private-")) {
+				t.Fatalf("malformed structural metadata retained private data: %s", redacted)
+			}
+			var event map[string]any
+			if err := json.Unmarshal(redacted, &event); err != nil {
+				t.Fatal(err)
+			}
+			item, ok := event["item"].(map[string]any)
+			if !ok || item["redacted"] != true {
+				t.Fatalf("redacted item = %#v, want typed provenance flag", event["item"])
 			}
 		})
 	}

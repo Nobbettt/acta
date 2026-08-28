@@ -19,8 +19,10 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/nobbettt/acta/internal/actaevents"
+	"github.com/nobbettt/acta/internal/digest"
 	"github.com/nobbettt/acta/internal/reasoning"
 	"github.com/nobbettt/acta/internal/runrecord"
 	"github.com/nobbettt/acta/internal/schemaversion"
@@ -903,6 +905,9 @@ func annotateWithheldArtifactRefsContext(ctx context.Context, eventFile *os.File
 		if err := json.Unmarshal(line, &event); err != nil {
 			return false, fmt.Errorf("decode %s for withheld artifact annotations: %w", actaevents.Filename, err)
 		}
+		if err := rejectUnsupportedFutureDocumentVersion(schemaversion.Event, &event); err != nil {
+			return false, err
+		}
 		for i := range event.ArtifactRefs {
 			ref := &event.ArtifactRefs[i]
 			artifact, ok := withheld[ref.Kind+"\x00"+ref.Path]
@@ -1121,7 +1126,7 @@ func rewriteOpaqueTextSnapshot(ctx context.Context, file *os.File, maxLineBytes 
 			// privacy bound. Keep the artifact local rather than failing the run.
 			return false, nil
 		}
-		trimmed := bytes.TrimSpace(line)
+		_, trimmed, _ := jsonLineParts(line)
 		if opaqueLineHasJSONAmbiguity(trimmed) {
 			return false, nil
 		}
@@ -1468,6 +1473,24 @@ func rewriteJSONLSnapshot(ctx context.Context, file *os.File, maxLineBytes int, 
 	return err
 }
 
+func jsonLineParts(line []byte) (prefix, payload, suffix []byte) {
+	payload = bytes.TrimSpace(line)
+	if len(payload) == 0 {
+		return line, nil, nil
+	}
+	leftTrimmed := bytes.TrimLeftFunc(line, unicode.IsSpace)
+	prefixLength := len(line) - len(leftTrimmed)
+	suffixOffset := prefixLength + len(payload)
+	return line[:prefixLength], payload, line[suffixOffset:]
+}
+
+func wrapJSONLine(prefix, payload, suffix []byte) []byte {
+	line := make([]byte, 0, len(prefix)+len(payload)+len(suffix))
+	line = append(line, prefix...)
+	line = append(line, payload...)
+	return append(line, suffix...)
+}
+
 // redactActaEventSnapshot upgrades the entire stream when any event body is
 // rewritten. Event streams require a single schema version, so upgrading only
 // the event that acquired v3 redaction fields would produce an invalid mixed
@@ -1515,8 +1538,7 @@ func redactActaEventSnapshot(ctx context.Context, file *os.File, maxLineBytes in
 }
 
 func stampActaEventLineSchemaVersion(line []byte) ([]byte, error) {
-	hasNewline := len(line) > 0 && line[len(line)-1] == '\n'
-	payload := bytes.TrimSpace(line)
+	prefix, payload, suffix := jsonLineParts(line)
 	if len(payload) == 0 {
 		return line, nil
 	}
@@ -1531,10 +1553,7 @@ func stampActaEventLineSchemaVersion(line []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if hasNewline {
-		encoded = append(encoded, '\n')
-	}
-	return encoded, nil
+	return wrapJSONLine(prefix, encoded, suffix), nil
 }
 
 func copyContext(ctx context.Context, dst io.Writer, src io.Reader) error {
@@ -1597,8 +1616,7 @@ func readBoundedJSONLLine(reader *bufio.Reader, maxLineBytes int) ([]byte, error
 }
 
 func redactProviderReasoningLine(line []byte) ([]byte, error) {
-	hasNewline := len(line) > 0 && line[len(line)-1] == '\n'
-	payload := bytes.TrimSpace(line)
+	prefix, payload, suffix := jsonLineParts(line)
 	if len(payload) == 0 {
 		return line, nil
 	}
@@ -1615,21 +1633,20 @@ func redactProviderReasoningLine(line []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if hasNewline {
-		encoded = append(encoded, '\n')
-	}
-	return encoded, nil
+	return wrapJSONLine(prefix, encoded, suffix), nil
 }
 
 func redactActaReasoningEventLine(line []byte) ([]byte, error) {
-	hasNewline := len(line) > 0 && line[len(line)-1] == '\n'
-	payload := bytes.TrimSpace(line)
+	prefix, payload, suffix := jsonLineParts(line)
 	if len(payload) == 0 {
 		return line, nil
 	}
 	var event map[string]any
 	if err := decodeJSONUseNumber(payload, &event); err != nil {
 		return nil, fmt.Errorf("parse Acta event for remote reasoning redaction: %w", err)
+	}
+	if err := rejectUnsupportedFutureDocumentVersion(schemaversion.Event, event); err != nil {
+		return nil, err
 	}
 	changed := setReasoningRedactionState(event)
 	typ, _ := event["type"].(string)
@@ -1666,10 +1683,7 @@ func redactActaReasoningEventLine(line []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if hasNewline {
-		encoded = append(encoded, '\n')
-	}
-	return encoded, nil
+	return wrapJSONLine(prefix, encoded, suffix), nil
 }
 
 // redactUnsupportedPayload understands the stable normalized wrapper used in
@@ -1707,12 +1721,20 @@ func redactUnsupportedPayloadContext(ctx context.Context, value any) (any, bool,
 		return payload, changed, true, err
 	}
 	changed, err := reasoning.RedactProviderBlocksContext(ctx, payload)
-	if changed {
+	if err != nil {
+		return payload, false, true, err
+	}
+	containsRedacted, err := reasoning.ContainsRedactedProviderBlockContext(ctx, payload)
+	if err != nil {
+		return payload, false, true, err
+	}
+	if changed || containsRedacted {
 		if redacted, _ := payload["redacted"].(bool); !redacted {
 			payload["redacted"] = true
+			changed = true
 		}
 	}
-	return payload, changed, true, err
+	return payload, changed, true, nil
 }
 
 // reasoningFreeActaEventType is deliberately explicit. A newly introduced
@@ -2067,6 +2089,9 @@ func setReasoningRedactionStateContext(ctx context.Context, value any) (bool, er
 // producer and identify the rewriting binary separately. Unchanged legacy
 // documents stay byte identical.
 func stampRewrittenDocumentSchemaVersion(documentType schemaversion.DocumentType, document any, rewritten bool) (bool, error) {
+	if err := rejectUnsupportedFutureDocumentVersion(documentType, document); err != nil {
+		return false, err
+	}
 	v3Fields, err := schemaversion.PresentV3OnlyFields(documentType, document)
 	if err != nil {
 		return false, fmt.Errorf("inspect rewritten Acta document fields: %w", err)
@@ -2094,6 +2119,75 @@ func stampRewrittenDocumentSchemaVersion(documentType schemaversion.DocumentType
 	return true, nil
 }
 
+func rejectUnsupportedFutureDocumentVersion(documentType schemaversion.DocumentType, document any) error {
+	var maximum int
+	switch documentType {
+	case schemaversion.RunRecord:
+		maximum = runrecord.SchemaVersion
+	case schemaversion.Digest:
+		maximum = digest.SchemaVersion
+	case schemaversion.Event:
+		maximum = actaevents.SchemaVersion
+	default:
+		return fmt.Errorf("unsupported Acta document type %q", documentType)
+	}
+
+	var version any
+	switch typed := document.(type) {
+	case map[string]any:
+		var present bool
+		version, present = typed["schema_version"]
+		if !present {
+			return nil
+		}
+	case *actaevents.Event:
+		version = typed.SchemaVersion
+	default:
+		return nil
+	}
+
+	future := false
+	switch typed := version.(type) {
+	case json.Number:
+		parsed, err := typed.Int64()
+		if err != nil {
+			return fmt.Errorf("invalid schema_version %q for %s: %w", typed, documentType, err)
+		}
+		future = parsed > int64(maximum)
+	case float64:
+		if math.IsInf(typed, 0) || math.IsNaN(typed) || math.Trunc(typed) != typed {
+			return fmt.Errorf("invalid schema_version %v for %s", typed, documentType)
+		}
+		future = typed > float64(maximum)
+	case int:
+		future = typed > maximum
+	case int8:
+		future = int64(typed) > int64(maximum)
+	case int16:
+		future = int64(typed) > int64(maximum)
+	case int32:
+		future = int64(typed) > int64(maximum)
+	case int64:
+		future = typed > int64(maximum)
+	case uint:
+		future = uint64(typed) > uint64(maximum)
+	case uint8:
+		future = uint64(typed) > uint64(maximum)
+	case uint16:
+		future = uint64(typed) > uint64(maximum)
+	case uint32:
+		future = uint64(typed) > uint64(maximum)
+	case uint64:
+		future = typed > uint64(maximum)
+	default:
+		return fmt.Errorf("invalid schema_version type %T for %s", version, documentType)
+	}
+	if future {
+		return fmt.Errorf("unsupported schema_version %v for %s (maximum supported is %d)", version, documentType, maximum)
+	}
+	return nil
+}
+
 func rewrittenDocumentSchemaVersion(document any) int {
 	switch typed := document.(type) {
 	case map[string]any:
@@ -2114,6 +2208,9 @@ func rewrittenDocumentSchemaVersion(document any) int {
 
 func redactRunRecordSnapshot(ctx context.Context, file *os.File) error {
 	return rewriteJSONDocumentSnapshot(ctx, file, runrecord.MaxRecordBytes, func(ctx context.Context, value any) (bool, error) {
+		if err := rejectUnsupportedFutureDocumentVersion(schemaversion.RunRecord, value); err != nil {
+			return false, err
+		}
 		record, ok := value.(map[string]any)
 		if !ok {
 			changed, err := redactReasoningValueContext(ctx, value)
@@ -2152,6 +2249,9 @@ func redactRunRecordSnapshot(ctx context.Context, file *os.File) error {
 // allowlist used for Acta events.
 func redactDigestSnapshot(ctx context.Context, file *os.File) error {
 	return rewriteJSONDocumentSnapshot(ctx, file, maxRedactionJSONDocumentBytes, func(ctx context.Context, value any) (bool, error) {
+		if err := rejectUnsupportedFutureDocumentVersion(schemaversion.Digest, value); err != nil {
+			return false, err
+		}
 		changed, err := setReasoningRedactionStateContext(ctx, value)
 		if err != nil {
 			return false, err

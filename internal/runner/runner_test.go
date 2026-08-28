@@ -1089,7 +1089,15 @@ func TestRunRequiredOTLPRejectsImpossibleDeliveryAtStartup(t *testing.T) {
 		{
 			name: "root sampling disabled without inbound parent", endpoint: "http://127.0.0.1:4318/v1/traces",
 			environment: map[string]string{"OTEL_TRACES_SAMPLER": "parentbased_always_off"},
-			want:        "OTEL_TRACES_SAMPLER=parentbased_always_off disables sampling without an inbound parent context",
+			want:        "OTEL_TRACES_SAMPLER=parentbased_always_off disables sampling without a sampled inbound parent context",
+		},
+		{
+			name: "root sampling disabled with unsampled inbound parent", endpoint: "http://127.0.0.1:4318/v1/traces",
+			environment: map[string]string{
+				"OTEL_TRACES_SAMPLER": "parentbased_always_off",
+				"TRACEPARENT":         "00-11111111111111111111111111111111-2222222222222222-00",
+			},
+			want: "OTEL_TRACES_SAMPLER=parentbased_always_off disables sampling without a sampled inbound parent context",
 		},
 		{
 			name: "parent-based ratio disables root sampling without inbound parent", endpoint: "http://127.0.0.1:4318/v1/traces",

@@ -111,8 +111,11 @@ func deliveryUnavailableReason(endpointFlag string, forceRoot bool) string {
 	if sampler == "always_off" {
 		return "OTEL_TRACES_SAMPLER=always_off disables sampling"
 	}
-	if sampler == "parentbased_always_off" && (forceRoot || !inboundParentSpanContext().IsValid()) {
-		return "OTEL_TRACES_SAMPLER=parentbased_always_off disables sampling without an inbound parent context"
+	if sampler == "parentbased_always_off" {
+		parent := inboundParentSpanContext()
+		if forceRoot || !parent.IsValid() || !parent.IsSampled() {
+			return "OTEL_TRACES_SAMPLER=parentbased_always_off disables sampling without a sampled inbound parent context"
+		}
 	}
 	if sampler == "traceidratio" && samplerRatioEffectivelyZero() {
 		return "OTEL_TRACES_SAMPLER=traceidratio with OTEL_TRACES_SAMPLER_ARG=0 disables sampling"

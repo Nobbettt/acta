@@ -301,6 +301,36 @@ func TestDeliveryUnavailableReasonRejectsEffectivelyZeroParentBasedRootRatio(t *
 	}
 }
 
+func TestDeliveryUnavailableReasonRequiresSampledParentForParentBasedAlwaysOff(t *testing.T) {
+	tests := []struct {
+		name        string
+		traceparent string
+		forceRoot   bool
+		wantReason  bool
+	}{
+		{name: "without parent", wantReason: true},
+		{name: "with malformed parent", traceparent: "malformed", wantReason: true},
+		{name: "with unsampled parent", traceparent: "00-11111111111111111111111111111111-2222222222222222-00", wantReason: true},
+		{name: "with sampled parent", traceparent: testTraceparent},
+		{name: "with ignored sampled parent", traceparent: testTraceparent, forceRoot: true, wantReason: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("OTEL_SDK_DISABLED", "")
+			t.Setenv("OTEL_TRACES_EXPORTER", "")
+			t.Setenv("OTEL_TRACES_SAMPLER", "parentbased_always_off")
+			t.Setenv("TRACEPARENT", test.traceparent)
+			reason := DeliveryUnavailableReasonWithForceRoot("http://127.0.0.1:4318/v1/traces", test.forceRoot)
+			if got := reason != ""; got != test.wantReason {
+				t.Fatalf("delivery unavailable reason = %q, present %v; want present %v", reason, got, test.wantReason)
+			}
+			if reason != "" && !strings.Contains(reason, "sampled inbound parent") {
+				t.Fatalf("delivery unavailable reason = %q, want sampled-parent requirement", reason)
+			}
+		})
+	}
+}
+
 func TestSamplerFromEnvironmentHonorsSamplerAndArgument(t *testing.T) {
 	t.Setenv("OTEL_TRACES_SAMPLER", "traceidratio")
 	t.Setenv("OTEL_TRACES_SAMPLER_ARG", "0")

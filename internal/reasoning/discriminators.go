@@ -5,6 +5,7 @@ package reasoning
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"unicode/utf8"
 )
 
@@ -190,8 +191,7 @@ func redactBlock(block map[string]any, textField string) bool {
 		}
 	}
 	for key, value := range block {
-		switch key {
-		case "type", "id", "status", "redacted", "text_chars", "text_truncated":
+		if structuralBlockValue(key, value) {
 			continue
 		}
 		masked, valueChanged := MaskValue(value)
@@ -205,6 +205,114 @@ func redactBlock(block map[string]any, textField string) bool {
 		changed = true
 	}
 	return changed
+}
+
+func structuralBlockValue(key string, value any) bool {
+	switch key {
+	case "type", "id", "status":
+		_, ok := value.(string)
+		return ok
+	case "redacted", "text_truncated":
+		_, ok := value.(bool)
+		return ok
+	case "text_chars":
+		return structuralInteger(value)
+	default:
+		return false
+	}
+}
+
+func structuralInteger(value any) bool {
+	switch typed := value.(type) {
+	case json.Number:
+		_, err := typed.Int64()
+		return err == nil
+	case float64:
+		return !math.IsInf(typed, 0) && !math.IsNaN(typed) && math.Trunc(typed) == typed
+	case float32:
+		value := float64(typed)
+		return !math.IsInf(value, 0) && !math.IsNaN(value) && float32(math.Trunc(value)) == typed
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return true
+	default:
+		return false
+	}
+}
+
+// ContainsRedactedProviderBlock reports whether an exact provider position
+// contains a block carrying redaction provenance. It lets owning normalized
+// wrappers preserve that provenance after an earlier exact pass has already
+// made a later redaction traversal idempotent.
+func ContainsRedactedProviderBlock(value any) bool {
+	contains, _ := containsRedactedProviderBlock(context.Background(), value)
+	return contains
+}
+
+// ContainsRedactedProviderBlockContext is ContainsRedactedProviderBlock with
+// cancellation checks while traversing potentially large upload artifacts.
+func ContainsRedactedProviderBlockContext(ctx context.Context, value any) (bool, error) {
+	return containsRedactedProviderBlock(ctx, value)
+}
+
+func containsRedactedProviderBlock(ctx context.Context, value any) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	switch typed := value.(type) {
+	case []any:
+		for _, item := range typed {
+			contains, err := containsRedactedProviderBlock(ctx, item)
+			if err != nil || contains {
+				return contains, err
+			}
+		}
+	case map[string]any:
+		if redactedCodexBlock(typed) || redactedClaudeBlock(typed) {
+			return true, nil
+		}
+		for _, item := range typed {
+			contains, err := containsRedactedProviderBlock(ctx, item)
+			if err != nil || contains {
+				return contains, err
+			}
+		}
+	}
+	return false, nil
+}
+
+func redactedCodexBlock(event map[string]any) bool {
+	eventType, _ := event["type"].(string)
+	item, ok := event["item"].(map[string]any)
+	if !ok {
+		return false
+	}
+	itemType, _ := item["type"].(string)
+	redacted, _ := item["redacted"].(bool)
+	return IsCodexBlock(eventType, itemType) && IsRedactedBlock(redacted)
+}
+
+func redactedClaudeBlock(event map[string]any) bool {
+	eventType, _ := event["type"].(string)
+	message, ok := event["message"].(map[string]any)
+	if !ok {
+		return false
+	}
+	content, ok := message["content"].([]any)
+	if !ok {
+		return false
+	}
+	for _, value := range content {
+		block, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		blockType, _ := block["type"].(string)
+		redacted, _ := block["redacted"].(bool)
+		if IsClaudeBlock(eventType, blockType) && IsRedactedBlock(redacted) {
+			return true
+		}
+	}
+	return false
 }
 
 // MaskValue returns the type-preserving zero value used at reasoning privacy
