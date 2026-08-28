@@ -16,9 +16,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/nobbettt/acta/internal/actaevents"
 	"github.com/nobbettt/acta/internal/agents"
+	"github.com/nobbettt/acta/internal/digest"
 	"github.com/nobbettt/acta/internal/reporting"
 	"github.com/nobbettt/acta/internal/runrecord"
 )
@@ -1334,6 +1336,73 @@ func TestRunRedactReasoningRemovesTextFromEntireBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestRunRedactedReasoningRedigestsWithStableMetadata(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	reasoningText := strings.Repeat("ø", digest.MaxEventTextBytes/2+17)
+	wantChars := utf8.RuneCountInString(reasoningText)
+	tests := map[string]string{
+		"codex":  `{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","text":"` + reasoningText + `"}}`,
+		"claude": `{"type":"assistant","message":{"id":"message-1","content":[{"type":"thinking","thinking":"` + reasoningText + `"}]}}`,
+	}
+	for agent, providerEvent := range tests {
+		t.Run(agent, func(t *testing.T) {
+			cwd := t.TempDir()
+			fakeBin := t.TempDir()
+			script := "#!/bin/sh\nprintf '%s\\n' '" + providerEvent + "'\n"
+			if agent == "codex" {
+				script += `printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'` + "\n"
+			}
+			writeFakeAgent(t, fakeBin, agent, script)
+			t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			record, err := runForTest(context.Background(), Options{
+				Agent: agent, CWD: cwd, Prompt: "x", PromptSource: "test", RedactReasoning: true,
+			}, io.Discard, io.Discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			persistedPayload, err := os.ReadFile(filepath.Join(record.RunDir, "digest.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var persisted digest.Digest
+			if err := json.Unmarshal(persistedPayload, &persisted); err != nil {
+				t.Fatal(err)
+			}
+			persistedReasoning := findDigestReasoningEvent(t, &persisted)
+			if !persistedReasoning.Redacted || persistedReasoning.TextChars != wantChars || !persistedReasoning.TextTruncated {
+				t.Fatalf("persisted reasoning event = %+v, want redacted chars=%d truncated=true", persistedReasoning, wantChars)
+			}
+
+			redigested, err := digest.FromRunDir(record.RunDir, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			redigestedReasoning := findDigestReasoningEvent(t, redigested)
+			if !redigestedReasoning.Redacted || redigestedReasoning.LocalReasoningText() != "" ||
+				redigestedReasoning.TextChars != persistedReasoning.TextChars ||
+				redigestedReasoning.TextTruncated != persistedReasoning.TextTruncated {
+				t.Fatalf("re-digested reasoning event = %+v / %q, persisted = %+v",
+					redigestedReasoning, redigestedReasoning.LocalReasoningText(), persistedReasoning)
+			}
+		})
+	}
+}
+
+func findDigestReasoningEvent(t *testing.T, d *digest.Digest) *digest.Event {
+	t.Helper()
+	for index := range d.Timeline {
+		if d.Timeline[index].Kind == digest.KindReasoning {
+			return &d.Timeline[index]
+		}
+	}
+	t.Fatalf("reasoning event missing from timeline: %+v", d.Timeline)
+	return nil
 }
 
 func TestRunRedactReasoningScrubsIDLessUnsupportedReasoningFromEntireBundle(t *testing.T) {

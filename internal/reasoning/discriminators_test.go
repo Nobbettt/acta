@@ -23,9 +23,37 @@ func TestRedactProviderBlocksRecursesThroughExactProviderPositions(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"wrapper":[{"item":{"parts":[],"redacted":true,"text":"[REDACTED]","type":"reasoning"},"type":"item.completed"},{"message":{"content":[{"redacted":true,"thinking":"[REDACTED]","type":"thinking"}]},"type":"assistant"}]}`
+	want := `{"wrapper":[{"item":{"parts":[],"redacted":true,"text":"[REDACTED]","text_chars":7,"text_truncated":false,"type":"reasoning"},"type":"item.completed"},{"message":{"content":[{"redacted":true,"text_chars":7,"text_truncated":false,"thinking":"[REDACTED]","type":"thinking"}]},"type":"assistant"}]}`
 	if string(encoded) != want {
 		t.Fatalf("redacted payload = %s\nwant %s", encoded, want)
+	}
+}
+
+func TestRedactProviderBlocksPreservesPriorRedactionMetadata(t *testing.T) {
+	const raw = `{"type":"item.completed","item":{"type":"reasoning","text":"[REDACTED]","text_chars":123456,"text_truncated":true,"redacted":true}}`
+	var payload any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if RedactProviderBlocks(payload) {
+		t.Fatal("already-redacted provider block changed")
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"item":{"redacted":true,"text":"[REDACTED]","text_chars":123456,"text_truncated":true,"type":"reasoning"},"type":"item.completed"}`
+	if string(encoded) != want {
+		t.Fatalf("re-redacted payload = %s\nwant %s", encoded, want)
+	}
+}
+
+func TestIsRedactedBlockUsesSharedFlagAndMarker(t *testing.T) {
+	if !IsRedactedBlock(true, "") || !IsRedactedBlock(false, RedactedMarker) {
+		t.Fatal("redaction flag or marker was not recognized")
+	}
+	if IsRedactedBlock(false, "private") {
+		t.Fatal("unredacted text was classified as redacted")
 	}
 }
 

@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/nobbettt/acta/internal/reasoning"
 )
 
 // CodexEvent is one line of `codex exec --json` output. Exported so the live
@@ -47,6 +49,9 @@ type CodexItem struct {
 	ExitCode          *int              `json:"exit_code,omitempty"`
 	Status            string            `json:"status,omitempty"`
 	Text              string            `json:"text,omitempty"`
+	TextChars         int               `json:"text_chars,omitempty"`
+	TextTruncated     bool              `json:"text_truncated,omitempty"`
+	Redacted          bool              `json:"redacted,omitempty"`
 	Message           string            `json:"message,omitempty"`
 	Changes           []CodexFileChange `json:"changes,omitempty"`
 	Items             []CodexTodoItem   `json:"items,omitempty"`
@@ -475,12 +480,17 @@ func codexItemEvent(d *Digest, item *CodexItem, srcLine int, completedLine int, 
 		e.Text = renderTodos(item.Items)
 	case "reasoning":
 		e.Kind = KindReasoning
-		if strings.TrimSpace(item.Text) == "" {
+		if reasoning.IsRedactedBlock(item.Redacted, item.Text) {
+			e.Redacted = true
+			e.TextChars = item.TextChars
+			e.TextTruncated = item.TextTruncated
+		} else if strings.TrimSpace(item.Text) == "" {
 			// Reasoning redaction deliberately leaves an empty structural item.
 			// Match Claude re-digestion by retaining it as explicitly redacted.
 			e.Redacted = true
+		} else {
+			e.localReasoningText = item.Text
 		}
-		e.localReasoningText = item.Text
 	case "mcp_tool_call":
 		e.Kind = KindToolCall
 		e.Server = item.Server

@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/nobbettt/acta/internal/reasoning"
 )
 
 // ClaudeItem is one line of `claude --print --output-format stream-json`
@@ -80,16 +82,19 @@ type ClaudeMessage struct {
 }
 
 type ClaudeContent struct {
-	Type      string          `json:"type"`
-	Text      string          `json:"text,omitempty"`
-	Thinking  string          `json:"thinking,omitempty"`
-	ID        string          `json:"id,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Input     json.RawMessage `json:"input,omitempty"`
-	ToolUseID string          `json:"tool_use_id,omitempty"`
-	IsError   bool            `json:"is_error,omitempty"`
-	Content   json.RawMessage `json:"content,omitempty"`
-	Raw       json.RawMessage `json:"-"`
+	Type          string          `json:"type"`
+	Text          string          `json:"text,omitempty"`
+	Thinking      string          `json:"thinking,omitempty"`
+	TextChars     int             `json:"text_chars,omitempty"`
+	TextTruncated bool            `json:"text_truncated,omitempty"`
+	Redacted      bool            `json:"redacted,omitempty"`
+	ID            string          `json:"id,omitempty"`
+	Name          string          `json:"name,omitempty"`
+	Input         json.RawMessage `json:"input,omitempty"`
+	ToolUseID     string          `json:"tool_use_id,omitempty"`
+	IsError       bool            `json:"is_error,omitempty"`
+	Content       json.RawMessage `json:"content,omitempty"`
+	Raw           json.RawMessage `json:"-"`
 }
 
 func (c *ClaudeContent) UnmarshalJSON(raw []byte) error {
@@ -300,15 +305,20 @@ func (s *claudeParseState) consumeAssistantContent(content *ClaudeContent, item 
 		e.Text = content.Text
 		s.lastText = content.Text
 	case "thinking":
-		if strings.TrimSpace(content.Thinking) == "" {
+		if reasoning.IsRedactedBlock(content.Redacted, content.Thinking) {
+			e.Redacted = true
+			e.TextChars = content.TextChars
+			e.TextTruncated = content.TextTruncated
+		} else if strings.TrimSpace(content.Thinking) == "" {
 			// Reasoning redaction deliberately leaves an empty structural content
 			// block. Retain its event and raw-line reference on re-digestion.
 			e.Redacted = true
+		} else {
+			e.localReasoningText = content.Thinking
 		}
 		e.Kind = KindReasoning
 		e.ProviderEvent = "assistant.thinking"
 		e.Status = "completed"
-		e.localReasoningText = content.Thinking
 	case "tool_use":
 		e.ProviderEvent = "assistant.tool_use"
 		e.Phase = "started"

@@ -5,6 +5,7 @@ package reasoning
 import (
 	"context"
 	"encoding/json"
+	"unicode/utf8"
 )
 
 const (
@@ -19,7 +20,18 @@ const (
 	// RedactedMarker replaces private string content while preserving its JSON
 	// type. Other JSON values use their corresponding zero value.
 	RedactedMarker = "[REDACTED]"
+
+	// MaxTextBytes is the normalized event-text limit used when recording the
+	// original size of reasoning text before it is masked in a raw stream.
+	MaxTextBytes = 64 << 10
 )
+
+// IsRedactedBlock reports whether a reasoning block was previously redacted.
+// Callers must first establish the provider discriminator and position; the
+// marker alone is not a safe global reasoning classifier.
+func IsRedactedBlock(redacted bool, text string) bool {
+	return redacted || text == RedactedMarker
+}
 
 // IsCodexBlock reports whether itemType is the exact reasoning discriminator
 // at the item position of a supported Codex item event.
@@ -131,7 +143,7 @@ func redactCodexBlock(event map[string]any) bool {
 	if !IsCodexBlock(eventType, itemType) {
 		return false
 	}
-	return redactBlock(item)
+	return redactBlock(item, "text")
 }
 
 func redactClaudeBlocks(event map[string]any) bool {
@@ -152,17 +164,35 @@ func redactClaudeBlocks(event map[string]any) bool {
 		}
 		blockType, _ := block["type"].(string)
 		if IsClaudeBlock(eventType, blockType) {
-			changed = redactBlock(block) || changed
+			textField := "thinking"
+			if blockType == claudeRedactedThinking {
+				textField = "data"
+			}
+			changed = redactBlock(block, textField) || changed
 		}
 	}
 	return changed
 }
 
-func redactBlock(block map[string]any) bool {
+func redactBlock(block map[string]any, textField string) bool {
 	changed := false
+	text, _ := block[textField].(string)
+	redacted, _ := block["redacted"].(bool)
+	if !IsRedactedBlock(redacted, text) && text != "" {
+		textChars := utf8.RuneCountInString(text)
+		textTruncated := len(text) > MaxTextBytes
+		if block["text_chars"] != textChars {
+			block["text_chars"] = textChars
+			changed = true
+		}
+		if block["text_truncated"] != textTruncated {
+			block["text_truncated"] = textTruncated
+			changed = true
+		}
+	}
 	for key, value := range block {
 		switch key {
-		case "type", "id", "status", "redacted":
+		case "type", "id", "status", "redacted", "text_chars", "text_truncated":
 			continue
 		}
 		masked, valueChanged := MaskValue(value)
@@ -171,7 +201,7 @@ func redactBlock(block map[string]any) bool {
 			changed = true
 		}
 	}
-	if redacted, _ := block["redacted"].(bool); !redacted {
+	if !redacted {
 		block["redacted"] = true
 		changed = true
 	}

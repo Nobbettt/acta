@@ -53,7 +53,7 @@ const MaxEventInputChars = 8_000
 
 // MaxEventTextBytes bounds every free-form normalized string. Raw provider
 // streams remain the full-fidelity evidence source.
-const MaxEventTextBytes = 64 << 10
+const MaxEventTextBytes = reasoning.MaxTextBytes
 
 // Projection limits prevent an arbitrarily long provider stream from being
 // retained in memory twice (as Digest and then as encoded Acta events).
@@ -503,9 +503,16 @@ func normalizeEvent(event *Event) {
 	} {
 		capString(value)
 	}
-	event.Text, event.TextChars, event.TextTruncated = capText(event.Text)
-	if event.localReasoningText != "" {
-		event.localReasoningText, event.TextChars, event.TextTruncated = capText(event.localReasoningText)
+	if event.Redacted && event.Kind == KindReasoning {
+		// A re-digested redacted block may carry the original metadata stamped
+		// by the raw-stream redactor. Never replace it with marker metadata.
+		event.Text = ""
+		event.localReasoningText = ""
+	} else {
+		event.Text, event.TextChars, event.TextTruncated = capText(event.Text)
+		if event.localReasoningText != "" {
+			event.localReasoningText, event.TextChars, event.TextTruncated = capText(event.localReasoningText)
+		}
 	}
 	event.Input = capInput(event.Input)
 	event.Result = capInput(event.Result)
