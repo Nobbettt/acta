@@ -27,6 +27,7 @@ import (
 	"github.com/nobbettt/acta/internal/runrecord"
 	"github.com/nobbettt/acta/internal/schemaversion"
 	"github.com/nobbettt/acta/internal/securefile"
+	"github.com/nobbettt/acta/schemas"
 )
 
 type Config struct {
@@ -657,6 +658,9 @@ func scanEventsFile(ctx context.Context, file *os.File, runID string, visit func
 			}
 			if err := actaevents.ValidateEvent(event, runID, count); err != nil {
 				return 0, err
+			}
+			if err := schemas.ValidateEventPayload(event.SchemaVersion, event.Type, event.Payload); err != nil {
+				return 0, fmt.Errorf("event sequence %d has invalid %s payload: %w", event.Sequence, event.Type, err)
 			}
 			eventWasRegenerated := event.RegeneratedBy != nil
 			if streamSchema == 0 {
@@ -1784,6 +1788,11 @@ func redactUnsupportedPayloadContext(ctx context.Context, value any) (any, bool,
 			}
 		case map[string]any:
 			detailsType, _ = typed["type"].(string)
+			var err error
+			detailsChanged, err = redactReasoningValueContext(ctx, typed)
+			if err != nil {
+				return payload, false, false, err
+			}
 			detailsVerified = true
 		default:
 			return payload, false, false, nil

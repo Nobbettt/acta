@@ -388,17 +388,18 @@ func TestUploadRunLegacyRecordUsesMetadataOrExplicitSchemaUpgrade(t *testing.T) 
 func TestV2RewritePathsEmitByteIdenticalV2OrSchemaV3(t *testing.T) {
 	const (
 		producer = `"producer":{"name":"acta","version":"test"}`
-		started  = `{"schema_version":2,` + producer + `,"run_id":"run-1","sequence":1,"timestamp":"2026-07-06T12:00:00Z","source":"acta","type":"run.started","payload":{"agent":"codex"}}`
+		started  = `{"schema_version":2,` + producer + `,"run_id":"run-1","sequence":1,"timestamp":"2026-07-06T12:00:00Z","source":"acta","type":"run.started","payload":{"agent":"codex","cwd":"/workspace","run_dir":"/workspace/.acta/runs/run-1"}}`
+		terminal = `"payload":{"status":"ok","ok":true,"timeout":false,"duration_ms":1000}`
 	)
 	reasoningStream := strings.Join([]string{
 		started,
 		`{"schema_version":2,` + producer + `,"run_id":"run-1","sequence":2,"timestamp":"2026-07-06T12:00:00.5Z","source":"acta","type":"agent.reasoning","payload":{"kind":"reasoning","text":"private"}}`,
-		`{"schema_version":2,` + producer + `,"run_id":"run-1","sequence":3,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed","payload":{"status":"ok"}}`,
+		`{"schema_version":2,` + producer + `,"run_id":"run-1","sequence":3,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed",` + terminal + `}`,
 		"",
 	}, "\n")
 	withheldStream := strings.Join([]string{
 		started,
-		`{"schema_version":2,` + producer + `,"run_id":"run-1","sequence":2,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed","payload":{"status":"ok"},"artifact_refs":[{"kind":"raw_stderr","path":"agent.stderr.log"}]}`,
+		`{"schema_version":2,` + producer + `,"run_id":"run-1","sequence":2,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed",` + terminal + `,"artifact_refs":[{"kind":"raw_stderr","path":"agent.stderr.log"}]}`,
 		"",
 	}, "\n")
 
@@ -691,9 +692,9 @@ func TestUploadRunRedactsRemoteReasoningByDefaultForEveryAgentShape(t *testing.T
 			writeFile(t, filepath.Join(runDir, "run.json"), `{"id":"run-1","reasoning_redaction_state":"retained_local"}`+"\n")
 			writeFile(t, filepath.Join(runDir, "digest.json"), `{"run_id":"run-1"}`+"\n")
 			writeFile(t, filepath.Join(runDir, actaevents.Filename), strings.Join([]string{
-				`{"schema_version":3,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":1,"timestamp":"2026-07-06T12:00:00Z","source":"acta","type":"run.started","payload":{"agent":"` + agent + `","reasoning_redaction_state":"retained_local"}}`,
+				`{"schema_version":3,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":1,"timestamp":"2026-07-06T12:00:00Z","source":"acta","type":"run.started","payload":{"agent":"` + agent + `","cwd":"/workspace","run_dir":"/workspace/.acta/runs/run-1","reasoning_redaction_state":"retained_local"}}`,
 				`{"schema_version":3,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":2,"timestamp":"2026-07-06T12:00:00.5Z","source":"acta","type":"agent.reasoning","payload":{"kind":"reasoning","provider_event":"private","text":"` + secret + `"}}`,
-				`{"schema_version":3,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":3,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed","payload":{"reasoning_redaction_state":"retained_local"},"artifact_refs":[{"kind":"run_record","path":"run.json"},{"kind":"raw_stdout","path":"` + rawName + `"},{"kind":"digest","path":"digest.json"},{"kind":"event_stream","path":"acta-events.jsonl"}]}`,
+				`{"schema_version":3,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":3,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed","payload":{"status":"ok","ok":true,"timeout":false,"duration_ms":1000},"artifact_refs":[{"kind":"run_record","path":"run.json"},{"kind":"raw_stdout","path":"` + rawName + `"},{"kind":"digest","path":"digest.json"},{"kind":"event_stream","path":"acta-events.jsonl"}]}`,
 				"",
 			}, "\n"))
 			record := testRecord(runDir)
@@ -969,9 +970,9 @@ func TestUploadRunRedactsUnsupportedClaudeDetailsByDefault(t *testing.T) {
 	writeFile(t, filepath.Join(runDir, "run.json"), `{"id":"run-1","reasoning_redaction_state":"retained_local"}`+"\n")
 	writeFile(t, filepath.Join(runDir, "digest.json"), `{"run_id":"run-1"}`+"\n")
 	writeFile(t, filepath.Join(runDir, actaevents.Filename), strings.Join([]string{
-		`{"schema_version":3,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":1,"timestamp":"2026-07-06T12:00:00Z","source":"acta","type":"run.started","payload":{"agent":"claude","reasoning_redaction_state":"retained_local"}}`,
+		`{"schema_version":3,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":1,"timestamp":"2026-07-06T12:00:00Z","source":"acta","type":"run.started","payload":{"agent":"claude","cwd":"/workspace","run_dir":"/workspace/.acta/runs/run-1","reasoning_redaction_state":"retained_local"}}`,
 		`{"schema_version":3,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":2,"timestamp":"2026-07-06T12:00:00.5Z","source":"acta","type":"agent.event.unsupported","payload":{"kind":"unsupported","provider_event":"assistant.redacted_thinking","details":{"type":"redacted_thinking","data":"` + secret + `"},"raw_event_lines":[1]},"artifact_refs":[{"kind":"raw_stdout","path":"` + rawName + `","lines":[1]}]}`,
-		`{"schema_version":3,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":3,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed","payload":{"status":"ok"},"artifact_refs":[{"kind":"run_record","path":"run.json"},{"kind":"raw_stdout","path":"` + rawName + `"},{"kind":"digest","path":"digest.json"},{"kind":"event_stream","path":"acta-events.jsonl"}]}`,
+		`{"schema_version":3,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":3,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed","payload":{"status":"ok","ok":true,"timeout":false,"duration_ms":1000},"artifact_refs":[{"kind":"run_record","path":"run.json"},{"kind":"raw_stdout","path":"` + rawName + `"},{"kind":"digest","path":"digest.json"},{"kind":"event_stream","path":"acta-events.jsonl"}]}`,
 		"",
 	}, "\n"))
 	record := testRecord(runDir)
@@ -1002,6 +1003,45 @@ func TestUploadRunRedactsUnsupportedClaudeDetailsByDefault(t *testing.T) {
 		!strings.Contains(remote.String(), `"raw_event_lines":[1]`) ||
 		!strings.Contains(remote.String(), `"redacted":true`) {
 		t.Fatalf("remote upload lost structural unsupported-event references: %s", remote.String())
+	}
+}
+
+func TestUploadRunRedactsUnsupportedFutureMapDetailsByDefault(t *testing.T) {
+	const secret = "future-event-private-thinking-23091"
+	runDir := t.TempDir()
+	writeFile(t, filepath.Join(runDir, "run.json"), `{"id":"run-1"}`+"\n")
+	writeFile(t, filepath.Join(runDir, "digest.json"), `{"run_id":"run-1"}`+"\n")
+	writeFile(t, filepath.Join(runDir, actaevents.Filename), strings.Join([]string{
+		`{"schema_version":3,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":1,"timestamp":"2026-07-06T12:00:00Z","source":"acta","type":"run.started","payload":{"agent":"codex","cwd":"/workspace","run_dir":"/workspace/.acta/runs/run-1"}}`,
+		`{"schema_version":3,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":2,"timestamp":"2026-07-06T12:00:00.5Z","source":"acta","type":"agent.event.unsupported","payload":{"kind":"unsupported","provider_event":"future.event","details":{"type":"future.event","thinking":"` + secret + `"},"raw_event_lines":[1]}}`,
+		`{"schema_version":3,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":3,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed","payload":{"status":"ok","ok":true,"timeout":false,"duration_ms":1000},"artifact_refs":[{"kind":"run_record","path":"run.json"},{"kind":"digest","path":"digest.json"},{"kind":"event_stream","path":"acta-events.jsonl"}]}`,
+		"",
+	}, "\n"))
+
+	var remote bytes.Buffer
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/api/ingest/runs/run-1/events" ||
+			request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == actaevents.Filename {
+			payload, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Error(err)
+			}
+			remote.Write(payload)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	if err := UploadRun(context.Background(), Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+	}, testRecord(runDir)); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(remote.String(), secret) || !strings.Contains(remote.String(), `"thinking":"`+reasoningRedactionMarker+`"`) {
+		t.Fatalf("remote upload did not redact unsupported future map details: %s", remote.String())
+	}
+	if !strings.Contains(remote.String(), `"type":"future.event"`) || !strings.Contains(remote.String(), `"redacted":true`) {
+		t.Fatalf("remote upload lost unsupported future event structure: %s", remote.String())
 	}
 }
 
@@ -1648,8 +1688,8 @@ func TestUploadRunRejectsUnsafeArtifactPath(t *testing.T) {
 	runDir := t.TempDir()
 	record := testRecord(runDir)
 	writeFile(t, filepath.Join(runDir, "acta-events.jsonl"), strings.Join([]string{
-		`{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":1,"timestamp":"2026-07-06T12:00:00Z","source":"acta","type":"run.started","payload":{"agent":"codex"}}`,
-		`{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":2,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed","payload":{},"artifact_refs":[{"kind":"run_record","path":"../run.json"}]}`,
+		`{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":1,"timestamp":"2026-07-06T12:00:00Z","source":"acta","type":"run.started","payload":{"agent":"codex","cwd":"/workspace","run_dir":"/workspace/.acta/runs/run-1"}}`,
+		`{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":2,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed","payload":{"status":"ok","ok":true,"timeout":false,"duration_ms":1000},"artifact_refs":[{"kind":"run_record","path":"../run.json"}]}`,
 		"",
 	}, "\n"))
 
@@ -1691,8 +1731,8 @@ func TestScanEventsBoundsLineSize(t *testing.T) {
 }
 
 func TestScanEventsRejectsInvalidReplayContract(t *testing.T) {
-	started := `{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":1,"timestamp":"2026-07-06T12:00:00Z","source":"acta","type":"run.started","payload":{"agent":"codex"}}`
-	completed := `{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":2,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed","payload":{}}`
+	started := `{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":1,"timestamp":"2026-07-06T12:00:00Z","source":"acta","type":"run.started","payload":{"agent":"codex","cwd":"/workspace","run_dir":"/workspace/.acta/runs/run-1"}}`
+	completed := `{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":2,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed","payload":{"status":"ok","ok":true,"timeout":false,"duration_ms":1000}}`
 	cases := map[string][]string{
 		"wrong schema":     {strings.Replace(started, `"schema_version":2`, `"schema_version":3`, 1), completed},
 		"wrong source":     {strings.Replace(started, `"source":"acta"`, `"source":"other"`, 1), completed},
@@ -1716,8 +1756,8 @@ func TestUploadRunRejectsUnknownEventFieldsBeforeUpload(t *testing.T) {
 	tests := map[string]func(string) string{
 		"event envelope": func(events string) string {
 			return strings.Replace(events,
-				`"payload":{"agent":"codex"}}`,
-				`"payload":{"agent":"codex"},"thinking":"private"}`,
+				`"payload":{"agent":"codex","cwd":"/workspace","run_dir":"/workspace/.acta/runs/run-1"}}`,
+				`"payload":{"agent":"codex","cwd":"/workspace","run_dir":"/workspace/.acta/runs/run-1"},"thinking":"private"}`,
 				1,
 			)
 		},
@@ -1767,6 +1807,75 @@ func TestUploadRunRejectsUnknownEventFieldsBeforeUpload(t *testing.T) {
 			}
 			if local := readTestFile(t, eventsPath); !strings.Contains(local, `"thinking":"private"`) {
 				t.Fatal("upload validation rewrote the local invalid event stream")
+			}
+		})
+	}
+}
+
+func TestUploadRunValidatesPublishedEventPayloadSchemasBeforeUpload(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutate    func(string) string
+		wantError bool
+	}{
+		{
+			name:   "valid payloads",
+			mutate: func(events string) string { return events },
+		},
+		{
+			name: "string payload",
+			mutate: func(events string) string {
+				return strings.Replace(events,
+					`"payload":{"status":"ok","ok":true,"timeout":false,"duration_ms":1000}`,
+					`"payload":"not-an-object"`,
+					1,
+				)
+			},
+			wantError: true,
+		},
+		{
+			name: "unknown payload property",
+			mutate: func(events string) string {
+				return strings.Replace(events,
+					`"payload":{"status":"ok","ok":true,"timeout":false,"duration_ms":1000}`,
+					`"payload":{"status":"ok","ok":true,"timeout":false,"duration_ms":1000,"future_property":true}`,
+					1,
+				)
+			},
+			wantError: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runDir := writeBundle(t)
+			eventsPath := filepath.Join(runDir, actaevents.Filename)
+			writeFile(t, eventsPath, test.mutate(readTestFile(t, eventsPath)))
+
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests++
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+
+			err := UploadRun(context.Background(), Config{
+				BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+			}, testRecord(runDir))
+			if !test.wantError {
+				if err != nil {
+					t.Fatalf("UploadRun() rejected valid payloads: %v", err)
+				}
+				if requests == 0 {
+					t.Fatal("valid payloads issued no remote requests")
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "payload does not match the published schema") {
+				t.Fatalf("UploadRun() error = %v, want payload-schema rejection", err)
+			}
+			if requests != 0 {
+				t.Fatalf("invalid payload issued %d remote requests, want none", requests)
 			}
 		})
 	}
@@ -1837,8 +1946,8 @@ func TestUploadRunRejectsFutureDigestSchemaBeforeRemoteRewrite(t *testing.T) {
 func TestScanEventsRejectsMixedSchemaStream(t *testing.T) {
 	runDir := t.TempDir()
 	writeFile(t, filepath.Join(runDir, actaevents.Filename), strings.Join([]string{
-		`{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":1,"timestamp":"2026-07-06T12:00:00Z","source":"acta","type":"run.started","payload":{"agent":"codex"}}`,
-		`{"schema_version":2,"producer":{"name":"acta","version":"v2"},"run_id":"run-1","sequence":2,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed","payload":{}}`,
+		`{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":1,"timestamp":"2026-07-06T12:00:00Z","source":"acta","type":"run.started","payload":{"agent":"codex","cwd":"/workspace","run_dir":"/workspace/.acta/runs/run-1"}}`,
+		`{"schema_version":2,"producer":{"name":"acta","version":"v2"},"run_id":"run-1","sequence":2,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed","payload":{"status":"ok","ok":true,"timeout":false,"duration_ms":1000}}`,
 	}, "\n")+"\n")
 	if _, err := scanEvents(runDir, "run-1", nil); err == nil || !strings.Contains(err.Error(), "does not match stream") {
 		t.Fatalf("scanEvents() error = %v", err)
@@ -2016,8 +2125,8 @@ func writeBundle(t *testing.T) string {
 	writeFile(t, filepath.Join(runDir, "run.json"), `{"id":"run-1"}`+"\n")
 	writeFile(t, filepath.Join(runDir, "digest.json"), `{"run_id":"run-1"}`+"\n")
 	writeFile(t, filepath.Join(runDir, "acta-events.jsonl"), strings.Join([]string{
-		`{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":1,"timestamp":"2026-07-06T12:00:00Z","source":"acta","type":"run.started","payload":{"agent":"codex"}}`,
-		`{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":2,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed","payload":{"status":"ok"},"artifact_refs":[{"kind":"run_record","path":"run.json"},{"kind":"digest","path":"digest.json"},{"kind":"event_stream","path":"acta-events.jsonl"}]}`,
+		`{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":1,"timestamp":"2026-07-06T12:00:00Z","source":"acta","type":"run.started","payload":{"agent":"codex","cwd":"/workspace","run_dir":"/workspace/.acta/runs/run-1"}}`,
+		`{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":2,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed","payload":{"status":"ok","ok":true,"timeout":false,"duration_ms":1000},"artifact_refs":[{"kind":"run_record","path":"run.json"},{"kind":"digest","path":"digest.json"},{"kind":"event_stream","path":"acta-events.jsonl"}]}`,
 		"",
 	}, "\n"))
 	return runDir
