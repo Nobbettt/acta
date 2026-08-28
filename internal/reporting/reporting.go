@@ -216,7 +216,7 @@ func UploadRun(ctx context.Context, cfg Config, record *runrecord.Record) error 
 		return err
 	}
 	if annotated {
-		if err := refreshEventArtifactContext(ctx, artifacts, artifactLimit); err != nil {
+		if err := refreshEventArtifactContext(ctx, artifacts, eventFile, artifactLimit); err != nil {
 			return err
 		}
 	}
@@ -652,7 +652,7 @@ func scanEventsFile(ctx context.Context, file *os.File, runID string, visit func
 			}
 			count++
 			var event actaevents.Event
-			if err := json.Unmarshal(line, &event); err != nil {
+			if err := decodeUploadEvent(line, &event); err != nil {
 				return 0, fmt.Errorf("decode %s: %w", actaevents.Filename, err)
 			}
 			if err := actaevents.ValidateEvent(event, runID, count); err != nil {
@@ -717,6 +717,46 @@ func scanEventsFile(ctx context.Context, file *os.File, runID string, visit func
 	return count, nil
 }
 
+type uploadEventEnvelope struct {
+	SchemaVersion json.RawMessage   `json:"schema_version"`
+	Producer      json.RawMessage   `json:"producer"`
+	RegeneratedBy json.RawMessage   `json:"regenerated_by"`
+	RunID         json.RawMessage   `json:"run_id"`
+	Sequence      json.RawMessage   `json:"sequence"`
+	Timestamp     json.RawMessage   `json:"timestamp"`
+	Source        json.RawMessage   `json:"source"`
+	Type          json.RawMessage   `json:"type"`
+	Payload       json.RawMessage   `json:"payload"`
+	ArtifactRefs  []json.RawMessage `json:"artifact_refs"`
+}
+
+type uploadArtifactRef struct {
+	Kind           json.RawMessage `json:"kind"`
+	Path           json.RawMessage `json:"path"`
+	Lines          json.RawMessage `json:"lines"`
+	Status         json.RawMessage `json:"status"`
+	Reason         json.RawMessage `json:"reason"`
+	RedactionState json.RawMessage `json:"redaction_state"`
+}
+
+func decodeUploadEvent(line []byte, event *actaevents.Event) error {
+	var envelope uploadEventEnvelope
+	decoder := json.NewDecoder(bytes.NewReader(line))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&envelope); err != nil {
+		return err
+	}
+	for index, rawRef := range envelope.ArtifactRefs {
+		decoder = json.NewDecoder(bytes.NewReader(rawRef))
+		decoder.DisallowUnknownFields()
+		var ref uploadArtifactRef
+		if err := decoder.Decode(&ref); err != nil {
+			return fmt.Errorf("artifact_refs[%d]: %w", index, err)
+		}
+	}
+	return json.Unmarshal(line, event)
+}
+
 func dedupeArtifactRefs(refs []actaevents.ArtifactRef) []actaevents.ArtifactRef {
 	seen := map[string]bool{}
 	out := make([]actaevents.ArtifactRef, 0, len(refs))
@@ -737,15 +777,22 @@ func buildArtifactsContext(ctx context.Context, runDir string, refs []actaevents
 		return nil, fmt.Errorf("resolve run directory: %w", err)
 	}
 	artifacts := make([]artifactUpload, 0, len(refs))
+	var eventSnapshotBytes int64
 	if maxBytes > 0 {
-		var plannedBytes int64
+		if eventFile != nil {
+			info, statErr := eventFile.Stat()
+			if statErr != nil {
+				return nil, fmt.Errorf("stat event snapshot: %w", statErr)
+			}
+			eventSnapshotBytes = info.Size()
+		}
+		plannedBytes := eventSnapshotBytes
+		if plannedBytes > maxBytes {
+			return nil, fmt.Errorf("artifact snapshot is %d bytes; maximum is %d", plannedBytes, maxBytes)
+		}
 		for _, ref := range refs {
 			if isCanonicalEventArtifact(ref.Path) && eventFile != nil {
-				info, statErr := eventFile.Stat()
-				if statErr != nil {
-					return nil, fmt.Errorf("stat event snapshot: %w", statErr)
-				}
-				plannedBytes += info.Size()
+				continue
 			} else {
 				plannedPath, pathErr := artifactPath(runDir, ref.Path)
 				if pathErr != nil {
@@ -762,7 +809,7 @@ func buildArtifactsContext(ctx context.Context, runDir string, refs []actaevents
 			}
 		}
 	}
-	var totalBytes int64
+	totalBytes := eventSnapshotBytes
 	for _, ref := range refs {
 		path, err := artifactPath(runDir, ref.Path)
 		if err != nil {
@@ -815,7 +862,9 @@ func buildArtifactsContext(ctx context.Context, runDir string, refs []actaevents
 			closeArtifacts(artifacts)
 			return nil, fmt.Errorf("hash artifact %s: %w", ref.Path, err)
 		}
-		totalBytes += sizeBytes
+		if !isCanonicalEventArtifact(ref.Path) || eventFile == nil {
+			totalBytes += sizeBytes
+		}
 		if maxBytes > 0 && totalBytes > maxBytes {
 			if tempPath != eventTempPath {
 				_ = file.Close()
@@ -957,22 +1006,34 @@ func annotateWithheldArtifactRefsContext(ctx context.Context, eventFile *os.File
 	return true, nil
 }
 
-func refreshEventArtifactContext(ctx context.Context, artifacts []artifactUpload, maxBytes int64) error {
-	var totalBytes int64
+func refreshEventArtifactContext(ctx context.Context, artifacts []artifactUpload, eventFile *os.File, maxBytes int64) error {
+	info, err := eventFile.Stat()
+	if err != nil {
+		return fmt.Errorf("stat annotated event snapshot: %w", err)
+	}
+	totalBytes := info.Size()
+	var eventRefreshed bool
+	var eventSHA256 string
+	var eventSizeBytes int64
+	var eventSchemaVersion int32
 	for i := range artifacts {
 		artifact := &artifacts[i]
 		if isCanonicalEventArtifact(artifact.Filename) {
-			sha256Hex, sizeBytes, err := hashFileContext(ctx, artifact.File)
-			if err != nil {
-				return fmt.Errorf("hash annotated event snapshot: %w", err)
+			if !eventRefreshed {
+				eventSHA256, eventSizeBytes, err = hashFileContext(ctx, eventFile)
+				if err != nil {
+					return fmt.Errorf("hash annotated event snapshot: %w", err)
+				}
+				eventSchemaVersion, err = eventArtifactSchemaVersionContext(ctx, eventFile)
+				if err != nil {
+					return fmt.Errorf("read schema version from annotated event snapshot: %w", err)
+				}
+				eventRefreshed = true
 			}
-			schemaVersion, err := eventArtifactSchemaVersionContext(ctx, artifact.File)
-			if err != nil {
-				return fmt.Errorf("read schema version from annotated event snapshot: %w", err)
-			}
-			artifact.SHA256 = sha256Hex
-			artifact.SizeBytes = sizeBytes
-			artifact.SchemaVersion = &schemaVersion
+			artifact.SHA256 = eventSHA256
+			artifact.SizeBytes = eventSizeBytes
+			artifact.SchemaVersion = &eventSchemaVersion
+			continue
 		}
 		totalBytes += artifact.SizeBytes
 	}

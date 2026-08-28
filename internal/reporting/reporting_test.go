@@ -1675,6 +1675,52 @@ func TestScanEventsRejectsInvalidReplayContract(t *testing.T) {
 	}
 }
 
+func TestUploadRunRejectsUnknownEventFieldsBeforeUpload(t *testing.T) {
+	tests := map[string]func(string) string{
+		"event envelope": func(events string) string {
+			return strings.Replace(events,
+				`"payload":{"agent":"codex"}}`,
+				`"payload":{"agent":"codex"},"thinking":"private"}`,
+				1,
+			)
+		},
+		"artifact reference": func(events string) string {
+			return strings.Replace(events,
+				`{"kind":"run_record","path":"run.json"}`,
+				`{"kind":"run_record","path":"run.json","thinking":"private"}`,
+				1,
+			)
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			runDir := writeBundle(t)
+			eventsPath := filepath.Join(runDir, actaevents.Filename)
+			writeFile(t, eventsPath, mutate(readTestFile(t, eventsPath)))
+
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests++
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+
+			err := UploadRun(context.Background(), Config{
+				BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+			}, testRecord(runDir))
+			if err == nil || !strings.Contains(err.Error(), `unknown field "thinking"`) {
+				t.Fatalf("UploadRun() error = %v, want unknown-field rejection", err)
+			}
+			if requests != 0 {
+				t.Fatalf("invalid event stream issued %d remote requests, want none", requests)
+			}
+			if local := readTestFile(t, eventsPath); !strings.Contains(local, `"thinking":"private"`) {
+				t.Fatal("upload validation rewrote the local invalid event stream")
+			}
+		})
+	}
+}
+
 func TestUploadRunRejectsFutureEventSchemaBeforeRemoteRewrite(t *testing.T) {
 	runDir := writeBundle(t)
 	const secret = "future-schema-reasoning"
@@ -1755,6 +1801,54 @@ func TestUploadRunEnforcesSnapshotBudget(t *testing.T) {
 	}, testRecord(runDir))
 	if err == nil || !strings.Contains(err.Error(), "maximum") {
 		t.Fatalf("UploadRun() error = %v", err)
+	}
+}
+
+func TestUploadRunCountsUnreferencedEventSnapshotAtBudgetBoundary(t *testing.T) {
+	runDir := writeBundle(t)
+	eventsPath := filepath.Join(runDir, actaevents.Filename)
+	events := strings.Replace(
+		readTestFile(t, eventsPath),
+		`,{"kind":"event_stream","path":"acta-events.jsonl"}`,
+		"",
+		1,
+	)
+	writeFile(t, eventsPath, events)
+
+	var snapshotBytes int64
+	for _, name := range []string{actaevents.Filename, "run.json", "digest.json"} {
+		info, err := os.Stat(filepath.Join(runDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapshotBytes += info.Size()
+	}
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	config := Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+		MaxUploadBytes: snapshotBytes - 1,
+	}
+
+	err := UploadRun(context.Background(), config, testRecord(runDir))
+	if err == nil || !strings.Contains(err.Error(), "maximum") {
+		t.Fatalf("UploadRun() error = %v, want aggregate budget rejection", err)
+	}
+	if requests != 0 {
+		t.Fatalf("over-budget upload issued %d remote requests, want none", requests)
+	}
+
+	config.MaxUploadBytes = snapshotBytes
+	if err := UploadRun(context.Background(), config, testRecord(runDir)); err != nil {
+		t.Fatalf("UploadRun() at exact aggregate budget = %v", err)
+	}
+	if requests == 0 {
+		t.Fatal("exact-budget upload issued no remote requests")
 	}
 }
 
