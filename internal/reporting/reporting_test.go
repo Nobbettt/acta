@@ -1023,6 +1023,20 @@ func TestRemoteRedactionScrubsIDLessUnsupportedCodexReasoning(t *testing.T) {
 		}
 	})
 
+	t.Run("standalone Claude block in details array", func(t *testing.T) {
+		original := []byte(`{"type":"agent.event.unsupported","payload":{"kind":"unsupported","provider_event":"assistant.redacted_thinking","details":[{"type":"redacted_thinking","data":"` + secret + `"}],"raw_event_lines":[4]}}` + "\n")
+		redacted, err := redactActaReasoningEventLine(original)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(redacted, []byte(secret)) ||
+			!bytes.Contains(redacted, []byte(`"details":[{"data":"[REDACTED]","redacted":true,"type":"redacted_thinking"}]`)) ||
+			!bytes.Contains(redacted, []byte(`"raw_event_lines":[4]`)) ||
+			!bytes.Contains(redacted, []byte(`"redacted":true`)) {
+			t.Fatalf("array-shaped unsupported details were not safely redacted: %s", redacted)
+		}
+	})
+
 	t.Run("digest", func(t *testing.T) {
 		file := writeSnapshotFile(t, `{"schema_version":3,"timeline":[{"kind":"unsupported","provider_event":"item.completed","details":{"type":"item.completed","item":{"type":"reasoning","text":"`+secret+`"}}}]}`+"\n")
 		if err := redactDigestSnapshot(context.Background(), file); err != nil {
@@ -1069,6 +1083,29 @@ func TestRemoteRedactionPreservesUnsupportedNonReasoningDetails(t *testing.T) {
 			t.Fatalf("legitimate unsupported digest payload changed:\n got %s\nwant %s", redacted, original)
 		}
 	})
+}
+
+func TestUnsupportedUninspectableDetailsAreUnverified(t *testing.T) {
+	tests := map[string]any{
+		"scalar":       "opaque private details",
+		"array scalar": []any{map[string]any{"type": "redacted_thinking", "data": "private"}, "opaque private details"},
+	}
+	for name, details := range tests {
+		t.Run(name, func(t *testing.T) {
+			event := map[string]any{
+				"type": actaevents.TypeAgentEventUnsupported,
+				"payload": map[string]any{
+					"kind":           "unsupported",
+					"provider_event": "future.provider.event",
+					"details":        details,
+				},
+			}
+			_, verified := inspectActaEventValue(event)
+			if verified {
+				t.Fatal("uninspectable unsupported details were treated as verified")
+			}
+		})
+	}
 }
 
 func TestUploadRunRedactsEvenWhenRunRecordClaimsRedacted(t *testing.T) {
@@ -1681,6 +1718,20 @@ func TestUploadRunRejectsUnknownEventFieldsBeforeUpload(t *testing.T) {
 			return strings.Replace(events,
 				`"payload":{"agent":"codex"}}`,
 				`"payload":{"agent":"codex"},"thinking":"private"}`,
+				1,
+			)
+		},
+		"producer": func(events string) string {
+			return strings.Replace(events,
+				`"producer":{"name":"acta","version":"test"}`,
+				`"producer":{"name":"acta","version":"test","thinking":"private"}`,
+				1,
+			)
+		},
+		"regenerated_by": func(events string) string {
+			return strings.Replace(events,
+				`"run_id":"run-1"`,
+				`"regenerated_by":{"name":"acta","version":"test","thinking":"private"},"run_id":"run-1"`,
 				1,
 			)
 		},

@@ -718,16 +718,16 @@ func scanEventsFile(ctx context.Context, file *os.File, runID string, visit func
 }
 
 type uploadEventEnvelope struct {
-	SchemaVersion json.RawMessage   `json:"schema_version"`
-	Producer      json.RawMessage   `json:"producer"`
-	RegeneratedBy json.RawMessage   `json:"regenerated_by"`
-	RunID         json.RawMessage   `json:"run_id"`
-	Sequence      json.RawMessage   `json:"sequence"`
-	Timestamp     json.RawMessage   `json:"timestamp"`
-	Source        json.RawMessage   `json:"source"`
-	Type          json.RawMessage   `json:"type"`
-	Payload       json.RawMessage   `json:"payload"`
-	ArtifactRefs  []json.RawMessage `json:"artifact_refs"`
+	SchemaVersion json.RawMessage     `json:"schema_version"`
+	Producer      runrecord.Producer  `json:"producer"`
+	RegeneratedBy *runrecord.Producer `json:"regenerated_by"`
+	RunID         json.RawMessage     `json:"run_id"`
+	Sequence      json.RawMessage     `json:"sequence"`
+	Timestamp     json.RawMessage     `json:"timestamp"`
+	Source        json.RawMessage     `json:"source"`
+	Type          json.RawMessage     `json:"type"`
+	Payload       json.RawMessage     `json:"payload"`
+	ArtifactRefs  []json.RawMessage   `json:"artifact_refs"`
 }
 
 type uploadArtifactRef struct {
@@ -1749,8 +1749,9 @@ func redactActaReasoningEventLine(line []byte) ([]byte, error) {
 
 // redactUnsupportedPayload understands the stable normalized wrapper used in
 // digests and Acta events, but treats Details as retained raw provider data.
-// Exact nested provider blocks are masked recursively; other diagnostics remain
-// byte-for-byte data.
+// Exact nested provider blocks and standalone blocks in Details arrays are
+// masked recursively. Other inspectable diagnostics remain byte-for-byte data;
+// unfamiliar shapes fail verification so their artifact can be withheld.
 func redactUnsupportedPayload(value any) (any, bool, bool) {
 	redacted, changed, verified, _ := redactUnsupportedPayloadContext(context.Background(), value)
 	return redacted, changed, verified
@@ -1767,35 +1768,76 @@ func redactUnsupportedPayloadContext(ctx context.Context, value any) (any, bool,
 	}
 	providerEvent, _ := payload["provider_event"].(string)
 	var detailsType string
-	if details, exists := payload["details"]; exists {
+	detailsChanged := false
+	detailsVerified := false
+	if details, exists := payload["details"]; !exists {
+		detailsVerified = true
+	} else {
 		switch typed := details.(type) {
-		case nil, []any:
+		case nil:
+			detailsVerified = true
+		case []any:
+			var err error
+			detailsChanged, detailsVerified, err = redactUnsupportedDetailsArrayContext(ctx, typed)
+			if err != nil {
+				return payload, false, false, err
+			}
 		case map[string]any:
 			detailsType, _ = typed["type"].(string)
+			detailsVerified = true
 		default:
-			changed, err := redactToStructuralReferencesContext(ctx, payload)
-			return payload, changed, true, err
+			return payload, false, false, nil
 		}
 	}
 	if reasoning.IsNormalizedEvent(kind, providerEvent, detailsType) {
 		changed, err := redactToStructuralReferencesContext(ctx, payload)
 		return payload, changed, true, err
 	}
-	changed, err := reasoning.RedactProviderBlocksContext(ctx, payload)
+	providerChanged, err := reasoning.RedactProviderBlocksContext(ctx, payload)
 	if err != nil {
-		return payload, false, true, err
+		return payload, false, false, err
 	}
 	containsRedacted, err := reasoning.ContainsRedactedProviderBlockContext(ctx, payload)
 	if err != nil {
-		return payload, false, true, err
+		return payload, false, false, err
 	}
+	changed := detailsChanged || providerChanged
 	if changed || containsRedacted {
 		if redacted, _ := payload["redacted"].(bool); !redacted {
 			payload["redacted"] = true
 			changed = true
 		}
 	}
-	return payload, changed, true, nil
+	return payload, changed, detailsVerified, nil
+}
+
+func redactUnsupportedDetailsArrayContext(ctx context.Context, details []any) (bool, bool, error) {
+	changed := false
+	verified := true
+	for _, detail := range details {
+		if err := ctx.Err(); err != nil {
+			return false, false, err
+		}
+		switch typed := detail.(type) {
+		case nil:
+		case map[string]any:
+			itemChanged, err := redactReasoningValueContext(ctx, typed)
+			if err != nil {
+				return false, false, err
+			}
+			changed = itemChanged || changed
+		case []any:
+			itemChanged, itemVerified, err := redactUnsupportedDetailsArrayContext(ctx, typed)
+			if err != nil {
+				return false, false, err
+			}
+			changed = itemChanged || changed
+			verified = itemVerified && verified
+		default:
+			verified = false
+		}
+	}
+	return changed, verified, nil
 }
 
 // reasoningFreeActaEventType is deliberately explicit. A newly introduced
