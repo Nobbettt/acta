@@ -61,9 +61,23 @@ func EndpointConfigurationError(endpointFlag string) error {
 		return nil
 	}
 	parsed, err := url.Parse(endpoint)
-	if err != nil || parsed.Host == "" ||
-		(!strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https")) {
-		return fmt.Errorf("%s must be an absolute http(s) URL with a host", source)
+	if err != nil {
+		return fmt.Errorf("%s must be an absolute http(s) URL with a host and valid port", source)
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	hostname := parsed.Hostname()
+	port := parsed.Port()
+	if port == "" {
+		switch scheme {
+		case "http":
+			port = "80"
+		case "https":
+			port = "443"
+		}
+	}
+	portNumber, portErr := strconv.ParseUint(port, 10, 16)
+	if hostname == "" || portErr != nil || portNumber == 0 || (scheme != "http" && scheme != "https") {
+		return fmt.Errorf("%s must be an absolute http(s) URL with a host and valid port", source)
 	}
 	return nil
 }

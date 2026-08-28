@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net"
 	"net/http"
@@ -1745,7 +1746,7 @@ func redactToStructuralReferences(value any) (any, bool) {
 	}
 	changed := false
 	for key, item := range payload {
-		if structuralPayloadKey(key) {
+		if structuralPayloadValue(key, item) {
 			continue
 		}
 		masked, itemChanged := reasoningRedactionMask(item)
@@ -1761,18 +1762,51 @@ func redactToStructuralReferences(value any) (any, bool) {
 	return payload, changed
 }
 
-func structuralPayloadKey(key string) bool {
+func structuralPayloadValue(key string, value any) bool {
 	switch key {
 	case "type", "kind", "provider_event", "id", "parent_id", "thread_id", "session_id", "task_id",
-		"phase", "status", "visibility", "started_at", "observed_at", "completed_at",
-		"tool", "server", "exit_code", "is_error", "input_chars", "input_truncated",
-		"result_chars", "result_truncated", "output_chars", "output_truncated",
-		"text_chars", "text_truncated",
-		"raw_event_lines", "redacted":
+		"phase", "status", "visibility", "started_at", "observed_at", "completed_at", "tool", "server":
+		_, ok := value.(string)
+		return ok
+	case "exit_code", "input_chars", "result_chars", "output_chars", "text_chars":
+		return structuralInteger(value)
+	case "is_error", "input_truncated", "result_truncated", "output_truncated", "text_truncated", "redacted":
+		_, ok := value.(bool)
+		return ok
+	case "raw_event_lines":
+		lines, ok := value.([]any)
+		if !ok {
+			return false
+		}
+		for _, line := range lines {
+			if !structuralInteger(line) {
+				return false
+			}
+		}
 		return true
 	default:
 		return false
 	}
+}
+
+func structuralInteger(value any) bool {
+	switch typed := value.(type) {
+	case json.Number:
+		_, err := typed.Int64()
+		return err == nil
+	case float64:
+		return !math.IsInf(typed, 0) && !math.IsNaN(typed) && math.Trunc(typed) == typed
+	case float32:
+		return !float32IsInfOrNaN(typed) && float32(math.Trunc(float64(typed))) == typed
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return true
+	default:
+		return false
+	}
+}
+
+func float32IsInfOrNaN(value float32) bool {
+	return math.IsInf(float64(value), 0) || math.IsNaN(float64(value))
 }
 
 const reasoningRedactionMarker = reasoning.RedactedMarker
@@ -1782,8 +1816,8 @@ func reasoningRedactionMask(value any) (any, bool) {
 }
 
 func redactReasoningValue(value any) bool {
-	changed := redactReasoningFields(value)
-	return reasoning.RedactProviderBlocks(value) || changed
+	changed := reasoning.RedactProviderBlocks(value)
+	return redactReasoningFields(value) || changed
 }
 
 func redactReasoningFields(value any) bool {
@@ -1834,12 +1868,12 @@ func redactReasoningValueContext(ctx context.Context, value any) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	changed, err := redactReasoningFieldsContext(ctx, value)
+	changed, err := reasoning.RedactProviderBlocksContext(ctx, value)
 	if err != nil {
 		return false, err
 	}
-	providerChanged, err := reasoning.RedactProviderBlocksContext(ctx, value)
-	return providerChanged || changed, err
+	genericChanged, err := redactReasoningFieldsContext(ctx, value)
+	return genericChanged || changed, err
 }
 
 func redactReasoningFieldsContext(ctx context.Context, value any) (bool, error) {
@@ -1908,7 +1942,7 @@ func redactToStructuralReferencesContext(ctx context.Context, payload map[string
 		if err := ctx.Err(); err != nil {
 			return false, err
 		}
-		if structuralPayloadKey(key) {
+		if structuralPayloadValue(key, item) {
 			continue
 		}
 		masked, itemChanged := reasoningRedactionMask(item)

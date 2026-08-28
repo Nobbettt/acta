@@ -219,6 +219,7 @@ func TestEndpointConfigurationRequiresAbsoluteHTTPURL(t *testing.T) {
 		{name: "invalid escape", endpoint: "%invalid", wantErr: true},
 		{name: "missing scheme", endpoint: "collector.test/v1/traces", wantErr: true},
 		{name: "missing host", endpoint: "https:///v1/traces", wantErr: true},
+		{name: "empty hostname", endpoint: "http://:4318/v1/traces", wantErr: true},
 		{name: "wrong scheme", endpoint: "grpc://collector.test/v1/traces", wantErr: true},
 		{name: "http", endpoint: "http://collector.test/v1/traces"},
 		{name: "https", endpoint: "https://collector.test/v1/traces"},

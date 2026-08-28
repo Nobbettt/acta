@@ -18,6 +18,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	jsonschema "github.com/santhosh-tekuri/jsonschema/v6"
 
@@ -757,6 +758,120 @@ func TestUploadRunRedactsRemoteReasoningByDefaultForEveryAgentShape(t *testing.T
 	}
 }
 
+func TestUploadRunRemoteRawReasoningRedigestsWithOriginalMetadata(t *testing.T) {
+	reasoningText := strings.Repeat("ø", digest.MaxEventTextBytes/2+17)
+	wantChars := utf8.RuneCountInString(reasoningText)
+	runDir := writeBundle(t)
+	const (
+		rawName    = "codex-events.jsonl"
+		stderrName = "codex.stderr.log"
+	)
+	writeFile(t, filepath.Join(runDir, rawName), strings.Join([]string{
+		`{"type":"thread.started","thread_id":"thread-1"}`,
+		`{"type":"turn.started"}`,
+		`{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","text":"` + reasoningText + `"}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`,
+		"",
+	}, "\n"))
+	writeFile(t, filepath.Join(runDir, stderrName), "")
+	addArtifactRef(t, runDir, `{"kind":"raw_stdout","path":"`+rawName+`"}`)
+
+	record := testRecord(runDir)
+	record.AgentVersion = "test"
+	record.CWD = runDir
+	record.Command = []string{"codex", "exec"}
+	record.RawStdoutPath = filepath.Join(runDir, rawName)
+	record.RawStderrPath = filepath.Join(runDir, stderrName)
+	record.RawStdoutArtifact = rawName
+	record.RawStderrArtifact = stderrName
+	record.OTLPStatus = "not_configured"
+	record.ProcessContainment = "direct_process"
+	record.AgentConfigMode = "ambient_ephemeral"
+	record.ReasoningRedactionState = "retained_local"
+	writeRecord := func(dir string) {
+		t.Helper()
+		record.RunDir = dir
+		record.RawStdoutPath = filepath.Join(dir, rawName)
+		record.RawStderrPath = filepath.Join(dir, stderrName)
+		payload, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(dir, "run.json"), string(payload)+"\n")
+	}
+	writeRecord(runDir)
+
+	var remoteRaw []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == rawName {
+			payload, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Error(err)
+			}
+			remoteRaw = payload
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	uploadRecord := testRecord(runDir)
+	uploadRecord.ReasoningRedactionState = "retained_local"
+	if err := UploadRun(context.Background(), Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+	}, uploadRecord); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(remoteRaw, []byte(reasoningText)) {
+		t.Fatal("remote raw snapshot retained private reasoning")
+	}
+	var providerEvent struct {
+		Item *struct {
+			TextChars     int  `json:"text_chars"`
+			TextTruncated bool `json:"text_truncated"`
+			Redacted      bool `json:"redacted"`
+		} `json:"item"`
+	}
+	for _, line := range bytes.Split(remoteRaw, []byte("\n")) {
+		var candidate struct {
+			Item *struct {
+				TextChars     int  `json:"text_chars"`
+				TextTruncated bool `json:"text_truncated"`
+				Redacted      bool `json:"redacted"`
+			} `json:"item"`
+		}
+		if len(line) == 0 {
+			continue
+		}
+		if err := json.Unmarshal(line, &candidate); err != nil {
+			t.Fatal(err)
+		}
+		if candidate.Item != nil {
+			providerEvent.Item = candidate.Item
+			break
+		}
+	}
+	if providerEvent.Item == nil || !providerEvent.Item.Redacted || providerEvent.Item.TextChars != wantChars || !providerEvent.Item.TextTruncated {
+		t.Fatalf("remote reasoning metadata = %+v, want redacted chars=%d truncated=true", providerEvent.Item, wantChars)
+	}
+
+	remoteDir := t.TempDir()
+	writeFile(t, filepath.Join(remoteDir, rawName), string(remoteRaw))
+	writeFile(t, filepath.Join(remoteDir, stderrName), "")
+	writeRecord(remoteDir)
+	redigested, err := digest.FromRunDir(remoteDir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range redigested.Timeline {
+		if event.Kind == digest.KindReasoning {
+			if !event.Redacted || event.LocalReasoningText() != "" || event.TextChars != wantChars || !event.TextTruncated {
+				t.Fatalf("re-digested reasoning event = %+v / %q, want redacted chars=%d truncated=true", event, event.LocalReasoningText(), wantChars)
+			}
+			return
+		}
+	}
+	t.Fatalf("re-digested reasoning event missing from timeline: %+v", redigested.Timeline)
+}
+
 func TestUploadRunRedactsReasoningFromLegacyDigest(t *testing.T) {
 	const secret = "legacy-digest-reasoning-48291"
 	runDir := writeBundle(t)
@@ -1146,6 +1261,18 @@ func TestRedactProviderReasoningLinePreservesLargeInteger(t *testing.T) {
 	if !strings.Contains(string(redacted), `"thinking":"`+reasoningRedactionMarker+`"`) ||
 		!strings.Contains(string(redacted), `"redacted":true`) {
 		t.Fatalf("provider thinking block was not fully masked in place: %s", redacted)
+	}
+}
+
+func TestRedactProviderReasoningMasksMalformedStructuralMetadata(t *testing.T) {
+	const secret = "private-content-in-text-chars"
+	original := []byte(`{"type":"item.completed","item":{"type":"reasoning","text":"[REDACTED]","text_chars":"` + secret + `","text_truncated":false,"redacted":true}}` + "\n")
+	redacted, err := redactProviderReasoningLine(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(redacted, []byte(secret)) || !bytes.Contains(redacted, []byte(`"text_chars":"`+reasoningRedactionMarker+`"`)) {
+		t.Fatalf("malformed structural metadata was not masked: %s", redacted)
 	}
 }
 
