@@ -305,7 +305,7 @@ func (s *claudeParseState) consumeAssistantContent(content *ClaudeContent, item 
 		e.Text = content.Text
 		s.lastText = content.Text
 	case "thinking":
-		if reasoning.IsRedactedBlock(content.Redacted, content.Thinking) {
+		if reasoning.IsRedactedBlock(content.Redacted) {
 			e.Redacted = true
 			e.TextChars = content.TextChars
 			e.TextTruncated = content.TextTruncated

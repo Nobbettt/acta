@@ -48,12 +48,31 @@ func TestRedactProviderBlocksPreservesPriorRedactionMetadata(t *testing.T) {
 	}
 }
 
-func TestIsRedactedBlockUsesSharedFlagAndMarker(t *testing.T) {
-	if !IsRedactedBlock(true, "") || !IsRedactedBlock(false, RedactedMarker) {
-		t.Fatal("redaction flag or marker was not recognized")
+func TestRedactProviderBlocksTreatsUnflaggedMarkerAsContent(t *testing.T) {
+	const raw = `{"type":"item.completed","item":{"type":"reasoning","text":"[REDACTED]"}}`
+	var payload any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		t.Fatal(err)
 	}
-	if IsRedactedBlock(false, "private") {
-		t.Fatal("unredacted text was classified as redacted")
+	if !RedactProviderBlocks(payload) {
+		t.Fatal("unflagged marker content was not redacted with provenance metadata")
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"item":{"redacted":true,"text":"[REDACTED]","text_chars":10,"text_truncated":false,"type":"reasoning"},"type":"item.completed"}`
+	if string(encoded) != want {
+		t.Fatalf("redacted marker payload = %s\nwant %s", encoded, want)
+	}
+}
+
+func TestIsRedactedBlockRequiresProvenanceFlag(t *testing.T) {
+	if !IsRedactedBlock(true) {
+		t.Fatal("redaction flag was not recognized")
+	}
+	if IsRedactedBlock(false) {
+		t.Fatal("unflagged block was classified as previously redacted")
 	}
 }
 

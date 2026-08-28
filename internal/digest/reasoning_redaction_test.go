@@ -5,7 +5,64 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"unicode/utf8"
+
+	"github.com/nobbettt/acta/internal/reasoning"
 )
+
+func TestUnflaggedReasoningMarkerIsNormalizedAsContentThenRedacted(t *testing.T) {
+	tests := []struct {
+		name  string
+		parse func() (*Digest, error)
+	}{
+		{
+			name: "codex",
+			parse: func() (*Digest, error) {
+				raw := strings.Join([]string{
+					`{"type":"thread.started","thread_id":"thread-1"}`,
+					`{"type":"turn.started"}`,
+					`{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","text":"[REDACTED]"}}`,
+					`{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`,
+				}, "\n") + "\n"
+				return parseCodex(strings.NewReader(raw), newWorkspace(""))
+			},
+		},
+		{
+			name: "claude",
+			parse: func() (*Digest, error) {
+				raw := strings.Join([]string{
+					`{"type":"system","subtype":"init","session_id":"session-1"}`,
+					`{"type":"assistant","session_id":"session-1","message":{"id":"message-1","content":[{"type":"thinking","thinking":"[REDACTED]"}]}}`,
+					`{"type":"result","subtype":"success","session_id":"session-1","is_error":false}`,
+				}, "\n") + "\n"
+				return parseClaude(strings.NewReader(raw), newWorkspace(""))
+			},
+		},
+	}
+	wantChars := utf8.RuneCountInString(reasoning.RedactedMarker)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			d, err := test.parse()
+			if err != nil {
+				t.Fatal(err)
+			}
+			event := findTimelineKind(d.Timeline, KindReasoning)
+			if event == nil {
+				t.Fatalf("reasoning event missing: %+v", d.Timeline)
+			}
+			if event.Redacted || event.LocalReasoningText() != reasoning.RedactedMarker ||
+				event.TextChars != wantChars || event.TextTruncated {
+				t.Fatalf("unflagged marker was not normalized as content: %+v / %q", event, event.LocalReasoningText())
+			}
+
+			RedactReasoning(d)
+			if !event.Redacted || event.LocalReasoningText() != "" ||
+				event.TextChars != wantChars || event.TextTruncated {
+				t.Fatalf("marker content was not redacted with original metadata: %+v / %q", event, event.LocalReasoningText())
+			}
+		})
+	}
+}
 
 func TestRedactReasoningPreservesUnsupportedCodexRethinkingDetails(t *testing.T) {
 	raw := strings.Join([]string{

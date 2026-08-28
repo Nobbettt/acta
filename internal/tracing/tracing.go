@@ -9,6 +9,7 @@ package tracing
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -48,7 +49,23 @@ func Enabled(endpointFlag string) bool {
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("OTEL_TRACES_EXPORTER")), "none") {
 		return false
 	}
-	return endpointConfigured(endpointFlag)
+	return endpointConfigured(endpointFlag) && EndpointConfigurationError(endpointFlag) == nil
+}
+
+// EndpointConfigurationError reports whether the effective OTLP endpoint is
+// unsafe to pass to the exporter. The explicit flag takes precedence over the
+// traces-specific and generic environment variables, matching the exporter.
+func EndpointConfigurationError(endpointFlag string) error {
+	endpoint, source := configuredEndpoint(endpointFlag)
+	if endpoint == "" {
+		return nil
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Host == "" ||
+		(!strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https")) {
+		return fmt.Errorf("%s must be an absolute http(s) URL with a host", source)
+	}
+	return nil
 }
 
 // DeliveryUnavailableReason reports startup configuration which makes a
@@ -72,6 +89,9 @@ func deliveryUnavailableReason(endpointFlag string, forceRoot bool) string {
 	}
 	if !endpointConfigured(endpointFlag) {
 		return "no OTLP endpoint is configured; set --otlp-endpoint, OTEL_EXPORTER_OTLP_ENDPOINT, or OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
+	}
+	if err := EndpointConfigurationError(endpointFlag); err != nil {
+		return err.Error()
 	}
 	sampler := strings.ToLower(strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER")))
 	if sampler == "always_off" {
@@ -103,9 +123,21 @@ func sdkDisabled() bool {
 }
 
 func endpointConfigured(endpointFlag string) bool {
-	return strings.TrimSpace(endpointFlag) != "" ||
-		strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")) != "" ||
-		strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")) != ""
+	endpoint, _ := configuredEndpoint(endpointFlag)
+	return endpoint != ""
+}
+
+func configuredEndpoint(endpointFlag string) (endpoint, source string) {
+	if endpoint := strings.TrimSpace(endpointFlag); endpoint != "" {
+		return endpoint, "--otlp-endpoint"
+	}
+	if endpoint := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")); endpoint != "" {
+		return endpoint, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
+	}
+	if endpoint := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")); endpoint != "" {
+		return endpoint, "OTEL_EXPORTER_OTLP_ENDPOINT"
+	}
+	return "", ""
 }
 
 func inboundParentSpanContext() trace.SpanContext {
@@ -136,9 +168,12 @@ type mapper interface {
 }
 
 func Setup(ctx context.Context, cfg Config) (*Run, error) {
+	if err := EndpointConfigurationError(cfg.Endpoint); err != nil {
+		return nil, fmt.Errorf("create OTLP exporter: %w", err)
+	}
 	var expOpts []otlptracehttp.Option
-	if cfg.Endpoint != "" {
-		expOpts = append(expOpts, otlptracehttp.WithEndpointURL(cfg.Endpoint))
+	if endpoint := strings.TrimSpace(cfg.Endpoint); endpoint != "" {
+		expOpts = append(expOpts, otlptracehttp.WithEndpointURL(endpoint))
 	}
 	exporter, err := otlptracehttp.New(ctx, expOpts...)
 	if err != nil {

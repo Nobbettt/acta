@@ -204,6 +204,68 @@ func TestEnabledHonorsStandardDisableControls(t *testing.T) {
 	}
 }
 
+func TestEndpointConfigurationRequiresAbsoluteHTTPURL(t *testing.T) {
+	for _, name := range []string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+		"OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER",
+	} {
+		t.Setenv(name, "")
+	}
+	tests := []struct {
+		name     string
+		endpoint string
+		wantErr  bool
+	}{
+		{name: "invalid escape", endpoint: "%invalid", wantErr: true},
+		{name: "missing scheme", endpoint: "collector.test/v1/traces", wantErr: true},
+		{name: "missing host", endpoint: "https:///v1/traces", wantErr: true},
+		{name: "wrong scheme", endpoint: "grpc://collector.test/v1/traces", wantErr: true},
+		{name: "http", endpoint: "http://collector.test/v1/traces"},
+		{name: "https", endpoint: "https://collector.test/v1/traces"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := EndpointConfigurationError(test.endpoint)
+			if got := err != nil; got != test.wantErr {
+				t.Fatalf("endpoint configuration error = %v, present %v; want present %v", err, got, test.wantErr)
+			}
+			if got := Enabled(test.endpoint); got == test.wantErr {
+				t.Fatalf("Enabled(%q) = %v, want %v", test.endpoint, got, !test.wantErr)
+			}
+		})
+	}
+}
+
+func TestEndpointConfigurationUsesExporterPrecedenceForEnvironment(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "%invalid-generic")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://traces.test/v1/traces")
+	if err := EndpointConfigurationError(""); err != nil {
+		t.Fatalf("valid traces-specific endpoint did not override generic endpoint: %v", err)
+	}
+
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "%invalid-traces")
+	if err := EndpointConfigurationError(""); err == nil ||
+		!strings.Contains(err.Error(), "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") {
+		t.Fatalf("environment endpoint error = %v, want traces-specific source", err)
+	}
+	if err := EndpointConfigurationError("https://explicit.test/v1/traces"); err != nil {
+		t.Fatalf("valid explicit endpoint did not override environment: %v", err)
+	}
+}
+
+func TestSetupRejectsInvalidExplicitEndpointBeforeAmbientFallback(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://ambient.test/v1/traces")
+	_, err := Setup(context.Background(), Config{
+		Endpoint:  "%invalid",
+		Agent:     "codex",
+		RunID:     "invalid-endpoint",
+		StartedAt: testStart,
+	})
+	if err == nil || !strings.Contains(err.Error(), "--otlp-endpoint must be an absolute http(s) URL with a host") {
+		t.Fatalf("Setup error = %v, want invalid explicit endpoint error", err)
+	}
+}
+
 func TestDeliveryUnavailableReasonRejectsEffectivelyZeroParentBasedRootRatio(t *testing.T) {
 	tests := []struct {
 		name        string

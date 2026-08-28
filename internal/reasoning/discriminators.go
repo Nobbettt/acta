@@ -27,10 +27,9 @@ const (
 )
 
 // IsRedactedBlock reports whether a reasoning block was previously redacted.
-// Callers must first establish the provider discriminator and position; the
-// marker alone is not a safe global reasoning classifier.
-func IsRedactedBlock(redacted bool, text string) bool {
-	return redacted || text == RedactedMarker
+// The explicit flag is provenance; marker text alone may be genuine content.
+func IsRedactedBlock(redacted bool) bool {
+	return redacted
 }
 
 // IsCodexBlock reports whether itemType is the exact reasoning discriminator
@@ -178,7 +177,7 @@ func redactBlock(block map[string]any, textField string) bool {
 	changed := false
 	text, _ := block[textField].(string)
 	redacted, _ := block["redacted"].(bool)
-	if !IsRedactedBlock(redacted, text) && text != "" {
+	if !IsRedactedBlock(redacted) && text != "" {
 		textChars := utf8.RuneCountInString(text)
 		textTruncated := len(text) > MaxTextBytes
 		if block["text_chars"] != textChars {

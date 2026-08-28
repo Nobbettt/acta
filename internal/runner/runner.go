@@ -153,10 +153,13 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 	if err != nil {
 		return nil, err
 	}
+	otlpEndpointErr := tracing.EndpointConfigurationError(opts.OTLPEndpoint)
 	if otlpFailurePolicy == OTLPExportFailurePolicyRequired {
 		if reason := tracing.DeliveryUnavailableReasonWithForceRoot(opts.OTLPEndpoint, opts.OTLPForceRoot); reason != "" {
 			return nil, fmt.Errorf("--otlp-export-failure-policy required cannot deliver traces: %s", reason)
 		}
+	} else if otlpEndpointErr != nil {
+		fmt.Fprintf(stderr, "acta: OTLP export disabled: %v\n", otlpEndpointErr)
 	}
 
 	adapter, err := agents.Get(opts.Agent)

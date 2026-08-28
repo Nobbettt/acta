@@ -1071,6 +1071,17 @@ func TestRunRequiredOTLPRejectsImpossibleDeliveryAtStartup(t *testing.T) {
 			want: "no OTLP endpoint is configured",
 		},
 		{
+			name: "invalid endpoint", endpoint: "%invalid",
+			want: "--otlp-endpoint must be an absolute http(s) URL with a host",
+		},
+		{
+			name: "invalid environment endpoint",
+			environment: map[string]string{
+				"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "%invalid",
+			},
+			want: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT must be an absolute http(s) URL with a host",
+		},
+		{
 			name: "sampling disabled", endpoint: "http://127.0.0.1:4318/v1/traces",
 			environment: map[string]string{"OTEL_TRACES_SAMPLER": "always_off"},
 			want:        "OTEL_TRACES_SAMPLER=always_off disables sampling",
@@ -1167,6 +1178,42 @@ func TestRunBestEffortOTLPExportFailureIsDefault(t *testing.T) {
 	}, io.Discard, io.Discard)
 	if err != nil || record == nil || !record.OK || record.OTLPStatus != "failed" {
 		t.Fatalf("default best-effort run = record %#v, err %v", record, err)
+	}
+}
+
+func TestRunBestEffortSkipsInvalidOTLPEndpointWithoutAmbientFallback(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	requests := make(chan struct{}, 1)
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests <- struct{}{}
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer collector.Close()
+
+	cwd := t.TempDir()
+	fakeBin := t.TempDir()
+	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
+		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", collector.URL)
+	stderr := bytes.NewBuffer(nil)
+	record, err := runForTest(context.Background(), Options{
+		Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test", OTLPEndpoint: "%invalid",
+	}, io.Discard, stderr)
+	if err != nil || record == nil || !record.OK || record.OTLPStatus != "not_configured" || record.TraceID != "" {
+		t.Fatalf("best-effort invalid endpoint result = record %#v, err %v", record, err)
+	}
+	if got := stderr.String(); !strings.Contains(got, "acta: OTLP export disabled") ||
+		!strings.Contains(got, "--otlp-endpoint must be an absolute http(s) URL with a host") {
+		t.Fatalf("best-effort warning = %q, want invalid endpoint skip", got)
+	}
+	select {
+	case <-requests:
+		t.Fatal("invalid explicit endpoint fell back to the ambient collector")
+	default:
 	}
 }
 
