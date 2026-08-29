@@ -20,6 +20,7 @@ import (
 	"github.com/nobbettt/acta/internal/runrecord"
 	"github.com/nobbettt/acta/internal/schemaversion"
 	"github.com/nobbettt/acta/internal/securefile"
+	"github.com/nobbettt/acta/schemas"
 )
 
 const (
@@ -227,6 +228,13 @@ func ValidateEvent(event Event, runID string, expectedSequence int) error {
 		default:
 			return fmt.Errorf("event sequence %d artifact %q has invalid status %q", event.Sequence, ref.Path, ref.Status)
 		}
+	}
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("marshal event sequence %d for schema validation: %w", event.Sequence, err)
+	}
+	if err := schemas.ValidateEvent(event.SchemaVersion, encoded); err != nil {
+		return fmt.Errorf("event sequence %d does not match the published schema: %w", event.Sequence, err)
 	}
 	return nil
 }

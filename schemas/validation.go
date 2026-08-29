@@ -61,27 +61,9 @@ var loadEventSchemas = sync.OnceValues(func() (map[int]*jsonschema.Schema, error
 // fields let the published event schema own the type-to-payload mapping while
 // callers continue to validate the real envelope and stream ordering separately.
 func ValidateEventPayload(schemaVersion int, eventType string, payload []byte) error {
-	schemaByVersion, err := loadEventSchemas()
+	decoded, err := decodeDocument(payload, "payload")
 	if err != nil {
 		return err
-	}
-	schema, ok := schemaByVersion[schemaVersion]
-	if !ok {
-		return fmt.Errorf("unsupported event schema_version %d", schemaVersion)
-	}
-
-	decoder := json.NewDecoder(bytes.NewReader(payload))
-	decoder.UseNumber()
-	var decoded any
-	if err := decoder.Decode(&decoded); err != nil {
-		return fmt.Errorf("decode payload: %w", err)
-	}
-	var extra any
-	if err := decoder.Decode(&extra); err != io.EOF {
-		if err == nil {
-			return fmt.Errorf("decode payload: multiple JSON values")
-		}
-		return fmt.Errorf("decode payload: %w", err)
 	}
 
 	event := map[string]any{
@@ -94,8 +76,53 @@ func ValidateEventPayload(schemaVersion int, eventType string, payload []byte) e
 		"type":           eventType,
 		"payload":        decoded,
 	}
-	if err := schema.Validate(event); err != nil {
+	if err := validateEventDocument(schemaVersion, event); err != nil {
 		return fmt.Errorf("schema-v%d %s payload does not match the published schema: %w", schemaVersion, eventType, err)
 	}
 	return nil
+}
+
+// ValidateEvent validates a complete event envelope against the published
+// schema selected by schemaVersion.
+func ValidateEvent(schemaVersion int, encoded []byte) error {
+	event, err := decodeDocument(encoded, "event")
+	if err != nil {
+		return err
+	}
+	if err := validateEventDocument(schemaVersion, event); err != nil {
+		return fmt.Errorf("schema-v%d event does not match the published schema: %w", schemaVersion, err)
+	}
+	return nil
+}
+
+func validateEventDocument(schemaVersion int, event any) error {
+	schemaByVersion, err := loadEventSchemas()
+	if err != nil {
+		return err
+	}
+	schema, ok := schemaByVersion[schemaVersion]
+	if !ok {
+		return fmt.Errorf("unsupported event schema_version %d", schemaVersion)
+	}
+	if err := schema.Validate(event); err != nil {
+		return err
+	}
+	return nil
+}
+
+func decodeDocument(encoded []byte, name string) (any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
+	var decoded any
+	if err := decoder.Decode(&decoded); err != nil {
+		return nil, fmt.Errorf("decode %s: %w", name, err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("decode %s: multiple JSON values", name)
+		}
+		return nil, fmt.Errorf("decode %s: %w", name, err)
+	}
+	return decoded, nil
 }

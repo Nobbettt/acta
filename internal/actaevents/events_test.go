@@ -687,7 +687,7 @@ func TestValidateEventVersionGatesWithheldArtifactFields(t *testing.T) {
 					Sequence:      1,
 					Source:        Source,
 					Type:          TypeRunCompleted,
-					Payload:       json.RawMessage(`{}`),
+					Payload:       json.RawMessage(`{"status":"ok","ok":true,"timeout":false,"duration_ms":0}`),
 					ArtifactRefs:  []ArtifactRef{ref},
 				}
 				err := ValidateEvent(event, "r-1", 1)
@@ -702,6 +702,25 @@ func TestValidateEventVersionGatesWithheldArtifactFields(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestValidateEventRejectsNonPositiveArtifactLines(t *testing.T) {
+	event := Event{
+		SchemaVersion: SchemaVersion,
+		Producer:      runrecord.Producer{Name: "acta", Version: "test"},
+		RunID:         "r-1",
+		Sequence:      1,
+		Timestamp:     time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC),
+		Source:        Source,
+		Type:          TypeRunCompleted,
+		Payload:       json.RawMessage(`{"status":"ok","ok":true,"timeout":false,"duration_ms":0}`),
+		ArtifactRefs: []ArtifactRef{{
+			Kind: "raw_stdout", Path: "codex-events.jsonl", Lines: []int{0, -1},
+		}},
+	}
+	if err := ValidateEvent(event, "r-1", 1); err == nil {
+		t.Fatal("artifact reference lines [0,-1] were accepted")
 	}
 }
 

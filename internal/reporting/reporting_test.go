@@ -759,6 +759,52 @@ func TestUploadRunRedactsRemoteReasoningByDefaultForEveryAgentShape(t *testing.T
 	}
 }
 
+func TestUploadRunRemoteSnapshotPreservesProviderShapedToolResult(t *testing.T) {
+	const (
+		rawName     = "codex-events.jsonl"
+		fixtureText = "visible-provider-shaped-tool-fixture-9241"
+		secret      = "private-top-level-reasoning-7148"
+	)
+	runDir := writeBundle(t)
+	original := strings.Join([]string{
+		`{"type":"item.completed","item":{"id":"mcp-1","type":"mcp_tool_call","result":{"type":"item.completed","item":{"type":"reasoning","text":"` + fixtureText + `"}}}}`,
+		`{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","text":"` + secret + `"}}`,
+		"",
+	}, "\n")
+	writeFile(t, filepath.Join(runDir, rawName), original)
+	addArtifactRef(t, runDir, `{"kind":"raw_stdout","path":"`+rawName+`"}`)
+
+	var remoteRaw string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == rawName {
+			payload, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Error(err)
+			}
+			remoteRaw = string(payload)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	record := testRecord(runDir)
+	record.ReasoningRedactionState = "retained_local"
+	if err := UploadRun(context.Background(), Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+	}, record); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(remoteRaw, fixtureText) {
+		t.Fatalf("remote snapshot redacted provider-shaped tool data: %s", remoteRaw)
+	}
+	if strings.Contains(remoteRaw, secret) || !strings.Contains(remoteRaw, `"redacted":true`) {
+		t.Fatalf("remote snapshot retained genuine top-level provider reasoning: %s", remoteRaw)
+	}
+	if local := readTestFile(t, filepath.Join(runDir, rawName)); local != original {
+		t.Fatal("default remote redaction changed the local raw stream")
+	}
+}
+
 func TestUploadRunRemoteRawReasoningRedigestsWithOriginalMetadata(t *testing.T) {
 	reasoningText := strings.Repeat("ø", digest.MaxEventTextBytes/2+17)
 	wantChars := utf8.RuneCountInString(reasoningText)
@@ -1812,7 +1858,7 @@ func TestUploadRunRejectsUnknownEventFieldsBeforeUpload(t *testing.T) {
 	}
 }
 
-func TestUploadRunValidatesPublishedEventPayloadSchemasBeforeUpload(t *testing.T) {
+func TestUploadRunValidatesPublishedEventSchemasBeforeUpload(t *testing.T) {
 	tests := []struct {
 		name      string
 		mutate    func(string) string
@@ -1839,6 +1885,17 @@ func TestUploadRunValidatesPublishedEventPayloadSchemasBeforeUpload(t *testing.T
 				return strings.Replace(events,
 					`"payload":{"status":"ok","ok":true,"timeout":false,"duration_ms":1000}`,
 					`"payload":{"status":"ok","ok":true,"timeout":false,"duration_ms":1000,"future_property":true}`,
+					1,
+				)
+			},
+			wantError: true,
+		},
+		{
+			name: "non-positive artifact lines",
+			mutate: func(events string) string {
+				return strings.Replace(events,
+					`{"kind":"run_record","path":"run.json"}`,
+					`{"kind":"run_record","path":"run.json","lines":[0,-1]}`,
 					1,
 				)
 			},
@@ -1871,8 +1928,8 @@ func TestUploadRunValidatesPublishedEventPayloadSchemasBeforeUpload(t *testing.T
 				}
 				return
 			}
-			if err == nil || !strings.Contains(err.Error(), "payload does not match the published schema") {
-				t.Fatalf("UploadRun() error = %v, want payload-schema rejection", err)
+			if err == nil || !strings.Contains(err.Error(), "does not match the published schema") {
+				t.Fatalf("UploadRun() error = %v, want event-schema rejection", err)
 			}
 			if requests != 0 {
 				t.Fatalf("invalid payload issued %d remote requests, want none", requests)

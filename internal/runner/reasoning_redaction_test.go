@@ -104,8 +104,8 @@ func TestRedactReasoningRawStreamVerifiesArrayWrappedProviderBlock(t *testing.T)
 	}
 }
 
-func TestRedactReasoningLinePreservesNestedToolResultLookalike(t *testing.T) {
-	original := []byte(`{"type":"item.completed","item":{"id":"mcp-1","type":"mcp_tool_call","result":{"type":"reasoning_result","text":"visible output"}}}` + "\n")
+func TestRedactReasoningLinePreservesProviderShapedToolResult(t *testing.T) {
+	original := []byte(`{"type":"item.completed","item":{"id":"mcp-1","type":"mcp_tool_call","result":{"type":"item.completed","item":{"type":"reasoning","text":"visible fixture"}}}}` + "\n")
 	redacted, err := redactReasoningLine(original)
 	if err != nil {
 		t.Fatal(err)

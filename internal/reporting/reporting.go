@@ -27,7 +27,6 @@ import (
 	"github.com/nobbettt/acta/internal/runrecord"
 	"github.com/nobbettt/acta/internal/schemaversion"
 	"github.com/nobbettt/acta/internal/securefile"
-	"github.com/nobbettt/acta/schemas"
 )
 
 type Config struct {
@@ -658,9 +657,6 @@ func scanEventsFile(ctx context.Context, file *os.File, runID string, visit func
 			}
 			if err := actaevents.ValidateEvent(event, runID, count); err != nil {
 				return 0, err
-			}
-			if err := schemas.ValidateEventPayload(event.SchemaVersion, event.Type, event.Payload); err != nil {
-				return 0, fmt.Errorf("event sequence %d has invalid %s payload: %w", event.Sequence, event.Type, err)
 			}
 			eventWasRegenerated := event.RegeneratedBy != nil
 			if streamSchema == 0 {
@@ -2096,21 +2092,7 @@ func redactToStructuralReferencesContext(ctx context.Context, payload map[string
 // or a tool. Reasoning-shaped field names inside these values are data unless
 // the surrounding provider event itself is an exact reasoning block.
 func userDataPayloadKey(parent map[string]any, key string) bool {
-	switch strings.ToLower(strings.TrimSpace(key)) {
-	case "input", "arguments", "result", "output", "structured_output", "tool_use_result":
-		return true
-	case "details":
-		kind, _ := parent["kind"].(string)
-		return strings.EqualFold(strings.TrimSpace(kind), "structured_output")
-	case "content":
-		kind, _ := parent["type"].(string)
-		role, _ := parent["role"].(string)
-		kind = strings.ToLower(strings.TrimSpace(kind))
-		role = strings.ToLower(strings.TrimSpace(role))
-		return kind == "tool_result" || kind == "user" || role == "user"
-	default:
-		return false
-	}
+	return reasoning.IsUserDataPayloadKey(parent, key)
 }
 
 func reasoningContentKey(key string, value any) bool {

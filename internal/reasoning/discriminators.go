@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"math"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -120,7 +121,10 @@ func redactProviderBlocks(ctx context.Context, value any) (bool, error) {
 	case map[string]any:
 		changed := redactCodexBlock(typed)
 		changed = redactClaudeBlocks(typed) || changed
-		for _, item := range typed {
+		for key, item := range typed {
+			if IsUserDataPayloadKey(typed, key) {
+				continue
+			}
 			itemChanged, err := redactProviderBlocks(ctx, item)
 			if err != nil {
 				return false, err
@@ -270,7 +274,10 @@ func containsRedactedProviderBlock(ctx context.Context, value any) (bool, error)
 		if redactedCodexBlock(typed) || redactedClaudeBlock(typed) {
 			return true, nil
 		}
-		for _, item := range typed {
+		for key, item := range typed {
+			if IsUserDataPayloadKey(typed, key) {
+				continue
+			}
 			contains, err := containsRedactedProviderBlock(ctx, item)
 			if err != nil || contains {
 				return contains, err
@@ -278,6 +285,27 @@ func containsRedactedProviderBlock(ctx context.Context, value any) (bool, error)
 		}
 	}
 	return false, nil
+}
+
+// IsUserDataPayloadKey reports whether key names a container whose contents
+// belong to the user or a tool. Provider-shaped objects inside these values
+// are content, not provider envelopes.
+func IsUserDataPayloadKey(parent map[string]any, key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "input", "arguments", "result", "output", "structured_output", "tool_use_result":
+		return true
+	case "details":
+		kind, _ := parent["kind"].(string)
+		return strings.EqualFold(strings.TrimSpace(kind), "structured_output")
+	case "content":
+		kind, _ := parent["type"].(string)
+		role, _ := parent["role"].(string)
+		kind = strings.ToLower(strings.TrimSpace(kind))
+		role = strings.ToLower(strings.TrimSpace(role))
+		return kind == "tool_result" || kind == "user" || role == "user"
+	default:
+		return false
+	}
 }
 
 func redactedCodexBlock(event map[string]any) bool {
