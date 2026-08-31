@@ -1548,6 +1548,54 @@ func TestRunRedactReasoningRemovesTextFromEntireBundle(t *testing.T) {
 	}
 }
 
+type exportedRootOutcome struct {
+	ok              bool
+	foundOK         bool
+	status          tracepb.Status_StatusCode
+	bundlePublished bool
+}
+
+func newRootTraceCollector(t *testing.T, runJSON string) (*httptest.Server, <-chan exportedRootOutcome) {
+	t.Helper()
+	outcomes := make(chan exportedRootOutcome, 1)
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		payload, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Error(err)
+		} else {
+			var exported collectortracepb.ExportTraceServiceRequest
+			if err := proto.Unmarshal(payload, &exported); err != nil {
+				t.Error(err)
+			} else {
+				for _, resource := range exported.ResourceSpans {
+					for _, scope := range resource.ScopeSpans {
+						for _, span := range scope.Spans {
+							if span.Name != "invoke_agent codex" {
+								continue
+							}
+							outcome := exportedRootOutcome{status: span.Status.GetCode()}
+							if runJSON != "" {
+								_, err := os.Stat(runJSON)
+								outcome.bundlePublished = err == nil
+							}
+							for _, attr := range span.Attributes {
+								if attr.Key == "acta.run.ok" {
+									outcome.ok = attr.Value.GetBoolValue()
+									outcome.foundOK = true
+								}
+							}
+							outcomes <- outcome
+						}
+					}
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		w.WriteHeader(http.StatusOK)
+	}))
+	return collector, outcomes
+}
+
 func TestRunFinishesRootTraceAfterReasoningRedaction(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake shell agents require /bin/sh")
@@ -1578,43 +1626,7 @@ func TestRunFinishesRootTraceAfterReasoningRedaction(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			type rootOutcome struct {
-				ok      bool
-				foundOK bool
-				status  tracepb.Status_StatusCode
-			}
-			outcomes := make(chan rootOutcome, 1)
-			collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-				payload, err := io.ReadAll(request.Body)
-				if err != nil {
-					t.Error(err)
-				} else {
-					var exported collectortracepb.ExportTraceServiceRequest
-					if err := proto.Unmarshal(payload, &exported); err != nil {
-						t.Error(err)
-					} else {
-						for _, resource := range exported.ResourceSpans {
-							for _, scope := range resource.ScopeSpans {
-								for _, span := range scope.Spans {
-									if span.Name != "invoke_agent codex" {
-										continue
-									}
-									outcome := rootOutcome{status: span.Status.GetCode()}
-									for _, attr := range span.Attributes {
-										if attr.Key == "acta.run.ok" {
-											outcome.ok = attr.Value.GetBoolValue()
-											outcome.foundOK = true
-										}
-									}
-									outcomes <- outcome
-								}
-							}
-						}
-					}
-				}
-				w.Header().Set("Content-Type", "application/x-protobuf")
-				w.WriteHeader(http.StatusOK)
-			}))
+			collector, outcomes := newRootTraceCollector(t, "")
 			defer collector.Close()
 
 			cwd := t.TempDir()
@@ -1639,6 +1651,113 @@ func TestRunFinishesRootTraceAfterReasoningRedaction(t *testing.T) {
 			case outcome := <-outcomes:
 				if !outcome.foundOK || outcome.ok != record.OK || outcome.status != test.wantStatus {
 					t.Fatalf("root outcome = %+v, record OK=%v; want status=%v", outcome, record.OK, test.wantStatus)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("root span was not exported")
+			}
+		})
+	}
+}
+
+func TestRunFinishesRootTraceAfterLocalBundleFinalization(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	for _, name := range []string{
+		"OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG",
+		"OTEL_EXPORTER_OTLP_COMPRESSION", "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION", "TRACEPARENT", "TRACESTATE",
+	} {
+		t.Setenv(name, "")
+	}
+	tests := []struct {
+		name      string
+		runID     string
+		inject    string
+		wantOK    bool
+		wantError string
+	}{
+		{name: "successful run", runID: "trace-finalization-success", wantOK: true},
+		{name: "final Git capture failure", runID: "trace-finalization-git", inject: "git", wantError: "not a repository at completion"},
+		{name: "digest write failure", runID: "trace-finalization-digest", inject: "digest", wantError: "injected digest write failure"},
+		{name: "event write failure", runID: "trace-finalization-events", inject: "events", wantError: "injected event write failure"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cwd := t.TempDir()
+			if test.inject == "git" {
+				gitCmd(t, cwd, "init", "-q")
+				gitCmd(t, cwd, "commit", "-q", "--allow-empty", "-m", "initial")
+			}
+
+			originalDigestWriter := writeFinalDigest
+			originalEventWriter := writeFinalEvents
+			switch test.inject {
+			case "digest":
+				calls := 0
+				writeFinalDigest = func(runDir string, d *digest.Digest) error {
+					calls++
+					if calls == 1 {
+						return errors.New("injected digest write failure")
+					}
+					return originalDigestWriter(runDir, d)
+				}
+			case "events":
+				calls := 0
+				writeFinalEvents = func(runDir string, record *runrecord.Record, d *digest.Digest, prompt string) error {
+					calls++
+					if calls == 1 {
+						return errors.New("injected event write failure")
+					}
+					return originalEventWriter(runDir, record, d, prompt)
+				}
+			}
+			t.Cleanup(func() {
+				writeFinalDigest = originalDigestWriter
+				writeFinalEvents = originalEventWriter
+			})
+
+			runJSON := filepath.Join(cwd, ".acta", "runs", test.runID, "run.json")
+			collector, outcomes := newRootTraceCollector(t, runJSON)
+			defer collector.Close()
+
+			fakeBin := t.TempDir()
+			script := "#!/bin/sh\ncat >/dev/null\n"
+			if test.inject == "git" {
+				script += "rm -rf \"$PWD/.git\"\n"
+			}
+			script += `printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'` + "\n"
+			writeFakeAgent(t, fakeBin, "codex", script)
+			t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			record, err := runForTest(context.Background(), Options{
+				Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test",
+				RunID: test.runID, OTLPEndpoint: collector.URL,
+			}, io.Discard, io.Discard)
+			if test.wantOK && err != nil {
+				t.Fatal(err)
+			}
+			if !test.wantOK && (err == nil || !strings.Contains(err.Error(), test.wantError)) {
+				t.Fatalf("Run() error = %v, want failure containing %q", err, test.wantError)
+			}
+			if record == nil || record.OK != test.wantOK {
+				t.Fatalf("record outcome = %#v, want OK=%v", record, test.wantOK)
+			}
+			persisted, readErr := ReadRecord(record.RunDir)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if persisted.OK != record.OK {
+				t.Fatalf("run.json OK=%v, returned record OK=%v", persisted.OK, record.OK)
+			}
+
+			wantStatus := tracepb.Status_STATUS_CODE_ERROR
+			if test.wantOK {
+				wantStatus = tracepb.Status_STATUS_CODE_OK
+			}
+			select {
+			case outcome := <-outcomes:
+				if !outcome.bundlePublished || !outcome.foundOK || outcome.ok != persisted.OK || outcome.status != wantStatus {
+					t.Fatalf("root outcome = %+v, run.json OK=%v; want status=%v after publication", outcome, persisted.OK, wantStatus)
 				}
 			case <-time.After(time.Second):
 				t.Fatal("root span was not exported")
