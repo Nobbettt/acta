@@ -140,6 +140,21 @@ func TestRedactReasoningLineScrubsGenericReasoningFields(t *testing.T) {
 	}
 }
 
+func TestRedactReasoningLineScrubsReasoningKindDespiteFutureType(t *testing.T) {
+	const secret = "private conflicting-discriminator reasoning"
+	original := []byte(`{"type":"future.event","kind":"reasoning","text":"` + secret + `"}` + "\n")
+	redacted, err := redactReasoningLine(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(redacted, []byte(secret)) ||
+		!bytes.Contains(redacted, []byte(`"type":"future.event"`)) ||
+		!bytes.Contains(redacted, []byte(`"kind":"reasoning"`)) ||
+		!bytes.Contains(redacted, []byte(`"redacted":true`)) {
+		t.Fatalf("conflicting discriminator reasoning was not safely redacted: %s", redacted)
+	}
+}
+
 func TestRedactReasoningLineRejectsDuplicateReasoningKey(t *testing.T) {
 	original := []byte(`{"reasoning":"private","reasoning":0}` + "\n")
 	redacted, err := redactReasoningLine(original)

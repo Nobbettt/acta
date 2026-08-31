@@ -759,6 +759,46 @@ func TestUploadRunRedactsRemoteReasoningByDefaultForEveryAgentShape(t *testing.T
 	}
 }
 
+func TestUploadRunRedactsReasoningKindDespiteFutureType(t *testing.T) {
+	const (
+		rawName = "codex-events.jsonl"
+		secret  = "private-conflicting-discriminator-3291"
+	)
+	runDir := writeBundle(t)
+	original := `{"type":"future.event","kind":"reasoning","text":"` + secret + `"}` + "\n"
+	writeFile(t, filepath.Join(runDir, rawName), original)
+	addArtifactRef(t, runDir, `{"kind":"raw_stdout","path":"`+rawName+`"}`)
+
+	var remoteRaw, remoteState string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == rawName {
+			payload, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Error(err)
+			}
+			remoteRaw = string(payload)
+			remoteState = request.URL.Query().Get("redaction_state")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	if err := UploadRun(context.Background(), Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+	}, testRecord(runDir)); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(remoteRaw, secret) ||
+		!strings.Contains(remoteRaw, `"type":"future.event"`) ||
+		!strings.Contains(remoteRaw, `"kind":"reasoning"`) ||
+		!strings.Contains(remoteRaw, `"redacted":true`) || remoteState != "redacted" {
+		t.Fatalf("remote conflicting discriminator body/state = %q / %q", remoteRaw, remoteState)
+	}
+	if local := readTestFile(t, filepath.Join(runDir, rawName)); local != original {
+		t.Fatalf("remote redaction changed local raw stream:\n got %s\nwant %s", local, original)
+	}
+}
+
 func TestUploadRunRemoteSnapshotPreservesProviderShapedToolResult(t *testing.T) {
 	const (
 		rawName     = "codex-events.jsonl"
@@ -1979,32 +2019,37 @@ func TestUploadRunRejectsFutureEventSchemaBeforeRemoteRewrite(t *testing.T) {
 	}
 }
 
-func TestUploadRunRejectsFutureDigestSchemaBeforeRemoteRewrite(t *testing.T) {
-	runDir := writeBundle(t)
-	writeFile(t, filepath.Join(runDir, "run.json"), `{"schema_version":3,"id":"run-1"}`+"\n")
-	const secret = "future-digest-private-reasoning-5217"
-	futureDigest := `{"schema_version":4,"run_id":"run-1","timeline":[{"kind":"reasoning","text":"` + secret + `"}],"future_digest_field":{"preserve":true}}` + "\n"
-	digestPath := filepath.Join(runDir, "digest.json")
-	writeFile(t, digestPath, futureDigest)
+func TestUploadRunRejectsFutureDigestSchemaRegardlessOfPrivacyOptIn(t *testing.T) {
+	for _, allowUnredacted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("allow_unredacted_%t", allowUnredacted), func(t *testing.T) {
+			runDir := writeBundle(t)
+			writeFile(t, filepath.Join(runDir, "run.json"), `{"schema_version":3,"id":"run-1"}`+"\n")
+			const secret = "future-digest-private-reasoning-5217"
+			futureDigest := `{"schema_version":4,"run_id":"run-1","timeline":[{"kind":"reasoning","text":"` + secret + `"}],"future_digest_field":{"preserve":true}}` + "\n"
+			digestPath := filepath.Join(runDir, "digest.json")
+			writeFile(t, digestPath, futureDigest)
 
-	requests := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		requests++
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests++
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
 
-	err := UploadRun(context.Background(), Config{
-		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
-	}, testRecord(runDir))
-	if err == nil || !strings.Contains(err.Error(), "unsupported schema_version 4") {
-		t.Fatalf("UploadRun() error = %v, want future digest schema rejection", err)
-	}
-	if requests != 0 {
-		t.Fatalf("future digest issued %d remote requests, want none", requests)
-	}
-	if local := readTestFile(t, digestPath); local != futureDigest || !strings.Contains(local, secret) {
-		t.Fatalf("future digest was transformed or relabeled locally:\n%s", local)
+			err := UploadRun(context.Background(), Config{
+				BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+				AllowUnredactedRemoteReasoning: allowUnredacted,
+			}, testRecord(runDir))
+			if err == nil || !strings.Contains(err.Error(), "unsupported schema_version 4") {
+				t.Fatalf("UploadRun() error = %v, want future digest schema rejection", err)
+			}
+			if requests != 0 {
+				t.Fatalf("future digest issued %d remote requests, want none", requests)
+			}
+			if local := readTestFile(t, digestPath); local != futureDigest || !strings.Contains(local, secret) {
+				t.Fatalf("future digest was transformed or relabeled locally:\n%s", local)
+			}
+		})
 	}
 }
 

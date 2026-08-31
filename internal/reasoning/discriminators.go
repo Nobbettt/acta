@@ -236,16 +236,14 @@ func redactReasoningFieldsContext(ctx context.Context, value any) (changed, veri
 		}
 		return changed, verified, nil
 	case map[string]any:
-		kind, _ := typed["type"].(string)
-		if kind == "" {
-			kind, _ = typed["kind"].(string)
+		typeDiscriminator, _ := typed["type"].(string)
+		kindDiscriminator, _ := typed["kind"].(string)
+		if IsBlockDiscriminator(typeDiscriminator) || IsBlockDiscriminator(kindDiscriminator) {
+			return redactToStructuralReferencesContext(ctx, typed)
 		}
-		if kind == "unsupported" {
+		if typeDiscriminator == "unsupported" || kindDiscriminator == "unsupported" {
 			_, changed, verified, err := RedactUnsupportedPayloadContext(ctx, typed)
 			return changed, verified, err
-		}
-		if IsBlockDiscriminator(kind) {
-			return redactToStructuralReferencesContext(ctx, typed)
 		}
 		verified = true
 		for key, item := range typed {

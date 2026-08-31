@@ -1328,7 +1328,7 @@ func inspectArtifactSnapshot(ctx context.Context, file *os.File, kind, path stri
 	case artifactOpaque:
 		return inspectOpaqueTextSnapshot(ctx, file, maxLineBytes)
 	case artifactJSONDocument:
-		return inspectJSONDocumentSnapshot(ctx, file, maxRedactionJSONDocumentBytes)
+		return inspectJSONDocumentSnapshot(ctx, file, path, maxRedactionJSONDocumentBytes)
 	case artifactJSONLines:
 		return inspectJSONLinesSnapshot(ctx, file, maxLineBytes, inspectProviderValue)
 	case artifactActaEventStream:
@@ -1453,7 +1453,7 @@ func inspectActaEventValue(value any) (bool, bool) {
 	return reasoning.RedactValue(payload)
 }
 
-func inspectJSONDocumentSnapshot(ctx context.Context, file *os.File, maxBytes int64) (artifactInspection, error) {
+func inspectJSONDocumentSnapshot(ctx context.Context, file *os.File, path string, maxBytes int64) (artifactInspection, error) {
 	payload, exceeded, err := readFileContextLimit(ctx, file, maxBytes)
 	if err != nil {
 		return artifactInspection{}, err
@@ -1470,6 +1470,16 @@ func inspectJSONDocumentSnapshot(ctx context.Context, file *os.File, maxBytes in
 	}
 	if err := ctx.Err(); err != nil {
 		return artifactInspection{}, err
+	}
+	switch {
+	case isRunRecordArtifact(path):
+		if err := rejectUnsupportedFutureDocumentVersion(schemaversion.RunRecord, value); err != nil {
+			return artifactInspection{}, err
+		}
+	case isDigestArtifact(path):
+		if err := rejectUnsupportedFutureDocumentVersion(schemaversion.Digest, value); err != nil {
+			return artifactInspection{}, err
+		}
 	}
 	containsReasoning, verified := reasoning.RedactValue(value)
 	return artifactInspection{ContainsReasoning: containsReasoning, Verified: verified}, nil
