@@ -1,7 +1,6 @@
 package tracing
 
 import (
-	"encoding/json"
 	"maps"
 	"slices"
 	"strings"
@@ -12,6 +11,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/nobbettt/acta/internal/digest"
+	"github.com/nobbettt/acta/internal/reasoning"
 )
 
 // codexMapper maps codex exec --json events to spans: item.started opens an
@@ -24,7 +24,7 @@ type codexMapper struct {
 
 func (m *codexMapper) onLine(r *Run, line []byte, at time.Time) {
 	var event digest.CodexEvent
-	if json.Unmarshal(line, &event) != nil {
+	if reasoning.UnmarshalProviderLine(line, &event) != nil {
 		return
 	}
 	switch event.Type {

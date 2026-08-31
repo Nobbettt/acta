@@ -152,20 +152,8 @@ func redactReasoningLine(line []byte) ([]byte, error) {
 	if len(payload) == 0 {
 		return line, nil
 	}
-	if err := reasoning.ValidateUniqueObjectKeys(payload); err != nil {
-		return nil, fmt.Errorf("parse raw provider event for reasoning redaction: %w", err)
-	}
 	var value any
-	decoder := json.NewDecoder(bytes.NewReader(payload))
-	decoder.UseNumber()
-	if err := decoder.Decode(&value); err != nil {
-		return nil, fmt.Errorf("parse raw provider event for reasoning redaction: %w", err)
-	}
-	var extra any
-	if err := decoder.Decode(&extra); err != io.EOF {
-		if err == nil {
-			err = fmt.Errorf("multiple JSON values")
-		}
+	if err := reasoning.UnmarshalProviderLine(payload, &value); err != nil {
 		return nil, fmt.Errorf("parse raw provider event for reasoning redaction: %w", err)
 	}
 	changed, verified := reasoning.RedactValue(value, reasoning.ProviderTraversal())

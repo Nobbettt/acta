@@ -1,8 +1,10 @@
 package digest
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -156,6 +158,56 @@ func TestClaudeRedactedThinkingRetainsStructuralReasoningEvent(t *testing.T) {
 		strings.TrimSpace(redactedReasoning.Text) != "" ||
 		len(redactedReasoning.RawEventLines) != 1 || redactedReasoning.RawEventLines[0] != 2 {
 		t.Fatalf("redacted structural reasoning event = %+v / %q", redactedReasoning, redactedReasoning.LocalReasoningText())
+	}
+}
+
+func TestClaudeRedactedThinkingBlockDigestsCleanlyAndStably(t *testing.T) {
+	const secret = "opaque-redacted-thinking-data"
+	dir := t.TempDir()
+	rawName := "claude-output.jsonl"
+	raw := strings.Join([]string{
+		`{"type":"system","subtype":"init","session_id":"session-1"}`,
+		`{"type":"assistant","session_id":"session-1","message":{"id":"message-1","content":[{"type":"redacted_thinking","data":"` + secret + `"}]}}`,
+		`{"type":"result","subtype":"success","session_id":"session-1","is_error":false}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(dir, rawName), []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	record := validTestRecord(dir, rawName)
+	record.Agent = "claude"
+	record.Command = []string{"claude", "--print"}
+	writeRecord(t, dir, record)
+
+	first, err := FromRunDir(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Status != StatusOK || first.Termination.Outcome != OutcomeCompleted || len(first.Metrics.UnsupportedEvents) != 0 {
+		t.Fatalf("redacted_thinking degraded run: status %q, termination %+v, unsupported %+v", first.Status, first.Termination, first.Metrics.UnsupportedEvents)
+	}
+	firstReasoning := findTimelineKind(first.Timeline, KindReasoning)
+	if firstReasoning == nil || !firstReasoning.Redacted || firstReasoning.ProviderEvent != "assistant.redacted_thinking" ||
+		firstReasoning.Text != "" || firstReasoning.LocalReasoningText() != "" || firstReasoning.Details != nil {
+		t.Fatalf("redacted_thinking event retained payload or lost structure: %+v", firstReasoning)
+	}
+	if err := Write(dir, first); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := os.ReadFile(filepath.Join(dir, "digest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(persisted, []byte(secret)) {
+		t.Fatalf("digest.json retained redacted_thinking data: %s", persisted)
+	}
+
+	second, err := FromRunDir(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondReasoning := findTimelineKind(second.Timeline, KindReasoning)
+	if secondReasoning == nil || !reflect.DeepEqual(*secondReasoning, *firstReasoning) {
+		t.Fatalf("re-digested reasoning event = %+v, want %+v", secondReasoning, firstReasoning)
 	}
 }
 

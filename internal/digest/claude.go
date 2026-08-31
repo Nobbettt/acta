@@ -167,7 +167,7 @@ func parseClaude(r io.Reader, ws *workspace) (*Digest, error) {
 	}
 	if err := forEachLine(r, func(n int, line []byte) {
 		var item ClaudeItem
-		if err := json.Unmarshal(line, &item); err != nil {
+		if err := reasoning.UnmarshalProviderLine(line, &item); err != nil {
 			state.d.countParseError(line)
 			return
 		}
@@ -319,6 +319,11 @@ func (s *claudeParseState) consumeAssistantContent(content *ClaudeContent, item 
 		e.Kind = KindReasoning
 		e.ProviderEvent = "assistant.thinking"
 		e.Status = "completed"
+	case "redacted_thinking":
+		e.Kind = KindReasoning
+		e.ProviderEvent = "assistant.redacted_thinking"
+		e.Status = "completed"
+		e.Redacted = true
 	case "tool_use":
 		e.ProviderEvent = "assistant.tool_use"
 		e.Phase = "started"

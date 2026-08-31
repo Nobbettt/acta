@@ -1716,7 +1716,7 @@ func redactProviderReasoningLineVerified(line []byte) ([]byte, bool, error) {
 		return line, true, nil
 	}
 	var value any
-	if err := decodeJSONUseNumber(payload, &value); err != nil {
+	if err := reasoning.UnmarshalProviderLine(payload, &value); err != nil {
 		return nil, false, fmt.Errorf("parse provider event for remote reasoning redaction: %w", err)
 	}
 	traversal := reasoning.ProviderTraversal()
@@ -2225,7 +2225,7 @@ func readFileContextLimit(ctx context.Context, file *os.File, maxBytes int64) ([
 }
 
 func decodeJSONUseNumber(payload []byte, value any) error {
-	return decodeJSONUseNumberContext(context.Background(), payload, value)
+	return reasoning.UnmarshalProviderLine(payload, value)
 }
 
 type contextReader struct {

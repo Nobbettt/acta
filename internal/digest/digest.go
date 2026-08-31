@@ -905,14 +905,14 @@ func (sd *StreamDigester) Line(raw []byte, at time.Time) {
 	switch {
 	case sd.codex != nil:
 		var event CodexEvent
-		if err := json.Unmarshal(raw, &event); err != nil {
+		if err := reasoning.UnmarshalProviderLine(raw, &event); err != nil {
 			sd.codex.d.countParseError(raw)
 			return
 		}
 		sd.codex.consume(&event, sd.lineNo, at)
 	case sd.claude != nil:
 		var item ClaudeItem
-		if err := json.Unmarshal(raw, &item); err != nil {
+		if err := reasoning.UnmarshalProviderLine(raw, &item); err != nil {
 			sd.claude.d.countParseError(raw)
 			return
 		}

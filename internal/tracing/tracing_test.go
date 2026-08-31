@@ -126,6 +126,31 @@ func TestReasoningTextNeverEntersTelemetry(t *testing.T) {
 	}
 }
 
+func TestDuplicateProviderKeysNeverEnterTelemetry(t *testing.T) {
+	const secret = "secret"
+	recorder, run := newTestRunOutput(t, "codex", true)
+	run.OnLine([]byte(`{"type":"item.completed","item":{"id":"r","type":"reasoning","type":"agent_message","text":"`+secret+`"}}`), testStart.Add(time.Millisecond))
+	finish(t, run, true, testStart.Add(time.Second))
+
+	for _, span := range recorder.Ended() {
+		for _, value := range span.Attributes() {
+			if strings.Contains(fmt.Sprint(value.Value.AsInterface()), secret) {
+				t.Fatalf("span attribute %s leaked duplicate-key text", value.Key)
+			}
+		}
+		for _, event := range span.Events() {
+			if event.Name == "acta.message" {
+				t.Fatal("duplicate-key provider line was classified as an agent message")
+			}
+			for _, value := range event.Attributes {
+				if strings.Contains(fmt.Sprint(value.Value.AsInterface()), secret) {
+					t.Fatalf("event attribute %s leaked duplicate-key text", value.Key)
+				}
+			}
+		}
+	}
+}
+
 // feedFixture replays a fixture line by line with synthetic arrival times
 // 10ms apart, then finishes the run.
 func feedFixture(t *testing.T, r *Run, fixture string, lines int) time.Time {

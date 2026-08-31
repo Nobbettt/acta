@@ -122,7 +122,7 @@ func parseCodex(r io.Reader, ws *workspace) (*Digest, error) {
 	st := newCodexState(ws)
 	if err := forEachLine(r, func(n int, line []byte) {
 		var event CodexEvent
-		if err := json.Unmarshal(line, &event); err != nil {
+		if err := reasoning.UnmarshalProviderLine(line, &event); err != nil {
 			st.d.countParseError(line)
 			return
 		}

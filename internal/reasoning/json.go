@@ -16,6 +16,18 @@ func ValidateUniqueObjectKeys(payload []byte) error {
 	return ValidateUniqueObjectKeysContext(context.Background(), payload)
 }
 
+// UnmarshalProviderLine is the single decode boundary for raw provider lines.
+// It rejects duplicate object keys at any depth before decoding can apply
+// encoding/json's last-key-wins behavior.
+func UnmarshalProviderLine(payload []byte, value any) error {
+	if err := ValidateUniqueObjectKeys(payload); err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
+	return decoder.Decode(value)
+}
+
 // ValidateUniqueObjectKeysContext is ValidateUniqueObjectKeys with
 // cancellation checks while scanning potentially large artifacts.
 func ValidateUniqueObjectKeysContext(ctx context.Context, payload []byte) error {

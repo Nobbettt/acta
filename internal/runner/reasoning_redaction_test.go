@@ -177,6 +177,14 @@ func TestRedactReasoningLineRejectsDuplicateReasoningKey(t *testing.T) {
 	}
 }
 
+func TestRedactReasoningLineRejectsDuplicateProviderDiscriminator(t *testing.T) {
+	original := []byte(`{"type":"item.completed","item":{"id":"r","type":"reasoning","type":"agent_message","text":"secret"}}` + "\n")
+	redacted, err := redactReasoningLine(original)
+	if err == nil || !strings.Contains(err.Error(), `duplicate JSON object key "type"`) {
+		t.Fatalf("duplicate-key redaction = %q, error = %v", redacted, err)
+	}
+}
+
 func TestRedactReasoningRawStreamMarksPostRenameCommitFailurePartial(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "provider.jsonl")
 	const secret = "private commit-failure reasoning"
