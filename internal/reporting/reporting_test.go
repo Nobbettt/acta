@@ -291,6 +291,83 @@ func TestManifestedProjectionUsesDeleteSharedOpenSeam(t *testing.T) {
 	}
 }
 
+func TestProjectionSnapshotsShareCumulativeBudget(t *testing.T) {
+	const sourceSize int64 = 96
+	payload := strings.Repeat("x", int(sourceSize))
+	tests := []struct {
+		name        string
+		manifested  bool
+		sourceNames []string
+	}{
+		{name: "manifested", manifested: true, sourceNames: []string{actaevents.Filename, "run.json", "digest.json"}},
+		{name: "legacy", sourceNames: []string{actaevents.Filename, "digest.json"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runDir := t.TempDir()
+			for _, name := range test.sourceNames {
+				writeFile(t, filepath.Join(runDir, name), payload)
+			}
+			if test.manifested {
+				hash := fmt.Sprintf("%x", sha256.Sum256([]byte(payload)))
+				manifestPayload, err := json.Marshal(projectionManifest{
+					SchemaVersion: actaevents.ProjectionSchemaVersion,
+					Producer:      runrecord.Producer{Name: "acta", Version: "test"},
+					Generation:    "1",
+					RunSHA256:     hash,
+					DigestSHA256:  hash,
+					EventsSHA256:  hash,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeFile(t, filepath.Join(runDir, "projection.json"), string(manifestPayload)+"\n")
+			}
+
+			t.Run("over budget", func(t *testing.T) {
+				tempDir := useSnapshotTempDir(t)
+				maxBytes := sourceSize + 1
+				snapshots, manifested, retry, err := snapshotProjectionArtifactsContext(context.Background(), runDir, maxBytes, 1, nil)
+				closeArtifactSnapshots(snapshots)
+				if err == nil || !strings.Contains(err.Error(), "remaining upload snapshot maximum") {
+					t.Fatalf("snapshot error = %v, want existing over-budget classification", err)
+				}
+				if manifested != test.manifested || retry {
+					t.Fatalf("snapshot = manifested %v, retry %v; want manifested %v, retry false", manifested, retry, test.manifested)
+				}
+				assertDirectoryEmpty(t, tempDir)
+			})
+
+			t.Run("within budget", func(t *testing.T) {
+				tempDir := useSnapshotTempDir(t)
+				maxBytes := sourceSize * int64(len(test.sourceNames))
+				snapshots, manifested, retry, err := snapshotProjectionArtifactsContext(context.Background(), runDir, maxBytes, 1, nil)
+				if err != nil || manifested != test.manifested || retry {
+					closeArtifactSnapshots(snapshots)
+					t.Fatalf("snapshot = manifested %v, retry %v, error %v; want manifested %v, retry false", manifested, retry, err, test.manifested)
+				}
+				if len(snapshots) != len(test.sourceNames) {
+					closeArtifactSnapshots(snapshots)
+					t.Fatalf("snapshot count = %d, want %d", len(snapshots), len(test.sourceNames))
+				}
+				for _, name := range test.sourceNames {
+					info, statErr := snapshots[name].File.Stat()
+					if statErr != nil {
+						closeArtifactSnapshots(snapshots)
+						t.Fatalf("stat snapshot %s: %v", name, statErr)
+					}
+					if info.Size() != sourceSize {
+						closeArtifactSnapshots(snapshots)
+						t.Fatalf("snapshot %s size = %d, want %d", name, info.Size(), sourceSize)
+					}
+				}
+				closeArtifactSnapshots(snapshots)
+				assertDirectoryEmpty(t, tempDir)
+			})
+		})
+	}
+}
+
 func TestUploadRunRejectsRepeatedlyChangingProjectionBeforeUpload(t *testing.T) {
 	runDir := writeBundle(t)
 	events := readTestFile(t, filepath.Join(runDir, actaevents.Filename))
@@ -3096,6 +3173,29 @@ func readTestFile(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(payload)
+}
+
+func useSnapshotTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, name := range []string{"TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(name, dir)
+	}
+	if got := os.TempDir(); filepath.Clean(got) != filepath.Clean(dir) {
+		t.Fatalf("os.TempDir() = %q, want isolated snapshot directory %q", got, dir)
+	}
+	return dir
+}
+
+func assertDirectoryEmpty(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("snapshot cleanup left temporary files behind: %v", entries)
+	}
 }
 
 func writeSnapshotFile(t *testing.T, content string) *os.File {

@@ -906,20 +906,12 @@ func snapshotProjectionArtifactsContext(ctx context.Context, runDir string, maxB
 		return nil, true, true, nil
 	}
 
-	snapshots := make(map[string]artifactSnapshot, len(sources))
-	for _, name := range []string{actaevents.Filename, "run.json", "digest.json"} {
-		if sources[name] == nil {
-			continue
+	snapshots, snapshotErr := snapshotProjectionSourcesContext(ctx, sources, maxBytes, expectedHashes)
+	if snapshotErr != nil {
+		if strings.Contains(snapshotErr.Error(), "does not match projection manifest") {
+			return nil, true, true, nil
 		}
-		file, tempPath, snapshotErr := snapshotOpenFileContext(ctx, sources[name], maxBytes, expectedHashes[name])
-		if snapshotErr != nil {
-			closeArtifactSnapshots(snapshots)
-			if strings.Contains(snapshotErr.Error(), "does not match projection manifest") {
-				return nil, true, true, nil
-			}
-			return nil, true, false, snapshotErr
-		}
-		snapshots[name] = artifactSnapshot{File: file, TempPath: tempPath}
+		return nil, true, false, snapshotErr
 	}
 	return snapshots, true, false, nil
 }
@@ -969,17 +961,9 @@ func snapshotLegacyProjectionArtifactsContext(ctx context.Context, resolvedRunDi
 		sources[name] = source
 	}
 
-	snapshots = make(map[string]artifactSnapshot, len(sources))
-	for _, name := range []string{actaevents.Filename, "digest.json"} {
-		if sources[name] == nil {
-			continue
-		}
-		file, tempPath, snapshotErr := snapshotOpenFileContext(ctx, sources[name], maxBytes, "")
-		if snapshotErr != nil {
-			closeArtifactSnapshots(snapshots)
-			return nil, false, snapshotErr
-		}
-		snapshots[name] = artifactSnapshot{File: file, TempPath: tempPath}
+	snapshots, err = snapshotProjectionSourcesContext(ctx, sources, maxBytes, nil)
+	if err != nil {
+		return nil, false, err
 	}
 	if _, err := os.Stat(manifestPath); err == nil {
 		closeArtifactSnapshots(snapshots)
@@ -989,6 +973,26 @@ func snapshotLegacyProjectionArtifactsContext(ctx context.Context, resolvedRunDi
 		return nil, false, fmt.Errorf("re-stat projection manifest: %w", err)
 	}
 	return snapshots, false, nil
+}
+
+func snapshotProjectionSourcesContext(ctx context.Context, sources map[string]*os.File, maxBytes int64, expectedHashes map[string]string) (map[string]artifactSnapshot, error) {
+	var remaining *int64
+	if maxBytes > 0 {
+		remaining = &maxBytes
+	}
+	snapshots := make(map[string]artifactSnapshot, len(sources))
+	for _, name := range []string{actaevents.Filename, "run.json", "digest.json"} {
+		if sources[name] == nil {
+			continue
+		}
+		file, tempPath, err := snapshotOpenFileBudgetContext(ctx, sources[name], remaining, expectedHashes[name])
+		if err != nil {
+			closeArtifactSnapshots(snapshots)
+			return nil, err
+		}
+		snapshots[name] = artifactSnapshot{File: file, TempPath: tempPath}
+	}
+	return snapshots, nil
 }
 
 func legacyProjectionLockFreeAllowed(runDir string, lockErr error) (bool, error) {
@@ -2704,6 +2708,14 @@ func snapshotRegularFile(ctx context.Context, root, path string, maxBytes int64)
 // temporary file. An expected hash supplied by projection.json authoritatively
 // binds the copied bytes to that projection generation.
 func snapshotOpenFileContext(ctx context.Context, source *os.File, maxBytes int64, expectedHash string) (*os.File, string, error) {
+	var remaining *int64
+	if maxBytes > 0 {
+		remaining = &maxBytes
+	}
+	return snapshotOpenFileBudgetContext(ctx, source, remaining, expectedHash)
+}
+
+func snapshotOpenFileBudgetContext(ctx context.Context, source *os.File, remaining *int64, expectedHash string) (*os.File, string, error) {
 	if _, err := source.Seek(0, io.SeekStart); err != nil {
 		return nil, "", err
 	}
@@ -2726,9 +2738,9 @@ func snapshotOpenFileContext(ctx context.Context, source *os.File, maxBytes int6
 		}
 		n, readErr := source.Read(buffer)
 		if n > 0 {
-			if maxBytes > 0 && copied+int64(n) > maxBytes {
+			if remaining != nil && copied+int64(n) > *remaining {
 				cleanup()
-				return nil, "", fmt.Errorf("file exceeded remaining upload snapshot maximum of %d bytes", maxBytes)
+				return nil, "", fmt.Errorf("file exceeded remaining upload snapshot maximum of %d bytes", *remaining)
 			}
 			if _, err := temp.Write(buffer[:n]); err != nil {
 				cleanup()
@@ -2762,6 +2774,9 @@ func snapshotOpenFileContext(ctx context.Context, source *os.File, maxBytes int6
 	if _, err := temp.Seek(0, io.SeekStart); err != nil {
 		cleanup()
 		return nil, "", err
+	}
+	if remaining != nil {
+		*remaining -= copied
 	}
 	return temp, tempPath, nil
 }
