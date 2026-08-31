@@ -323,6 +323,112 @@ func TestUploadRunSteadyProjectionUsesSinglePass(t *testing.T) {
 	}
 }
 
+func TestUploadRunLegacyProjectionUsesSingleLockedSnapshot(t *testing.T) {
+	runDir := writeBundle(t)
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	err := UploadRun(context.Background(), Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+		AllowUnredactedRemoteReasoning: true,
+		projectionSnapshotHook: func(int) {
+			attempts++
+		},
+	}, testRecord(runDir))
+	if err != nil {
+		t.Fatalf("UploadRun() error = %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("legacy projection snapshot passes = %d, want 1", attempts)
+	}
+}
+
+func TestUploadRunWaitsForFirstProjectionCommit(t *testing.T) {
+	runDir := writeBundle(t)
+	oldEvents := readTestFile(t, filepath.Join(runDir, actaevents.Filename))
+	newDigest := `{"run_id":"run-1","generation":"new"}` + "\n"
+	newEvents := strings.Replace(oldEvents, `"duration_ms":1000`, `"duration_ms":2000`, 1)
+
+	lock, err := actaevents.AcquireProjectionLock(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockHeld := true
+	t.Cleanup(func() {
+		if lockHeld {
+			_ = lock.Close()
+		}
+	})
+	writeProjectionGeneration(t, runDir, "200", newDigest, newEvents)
+	if err := os.Remove(filepath.Join(runDir, "projection.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	var uploadedDigest string
+	var uploadedDuration int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/api/ingest/runs/run-1/events" {
+			var body eventsRequest
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			for _, event := range body.Events {
+				if event.Type == actaevents.TypeRunCompleted {
+					var payload struct {
+						DurationMillis int64 `json:"duration_ms"`
+					}
+					if err := json.Unmarshal(event.Payload, &payload); err != nil {
+						t.Error(err)
+					}
+					uploadedDuration = payload.DurationMillis
+				}
+			}
+		}
+		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == "digest.json" {
+			payload, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Error(err)
+			}
+			uploadedDigest = string(payload)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	uploadDone := make(chan error, 1)
+	go func() {
+		uploadDone <- UploadRun(context.Background(), Config{
+			BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+			AllowUnredactedRemoteReasoning: true,
+		}, testRecord(runDir))
+	}()
+	select {
+	case err := <-uploadDone:
+		t.Fatalf("UploadRun() returned while projection commit lock was held: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	writeProjectionGeneration(t, runDir, "200", newDigest, newEvents)
+	if err := lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	lockHeld = false
+	select {
+	case err := <-uploadDone:
+		if err != nil {
+			t.Fatalf("UploadRun() error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("UploadRun() did not resume after projection commit completed")
+	}
+	if uploadedDigest != newDigest || uploadedDuration != 2000 {
+		t.Fatalf("uploaded generation digest/duration = %q/%d, want new generation %q/2000", uploadedDigest, uploadedDuration, newDigest)
+	}
+}
+
 func TestUploadRunAcceptsRedigestedV2EventsWithProducerProvenance(t *testing.T) {
 	runDir := t.TempDir()
 	rawName := "codex-events.jsonl"
@@ -1259,6 +1365,65 @@ func TestUploadRunRedactsReasoningFromLegacyDigest(t *testing.T) {
 	}
 	if local := readTestFile(t, filepath.Join(runDir, "digest.json")); local != digestBody {
 		t.Fatal("upload redaction modified the local legacy digest")
+	}
+}
+
+func TestUploadRunRedactsManifestPinnedLegacyDigest(t *testing.T) {
+	const secret = "manifest-pinned-digest-reasoning-48291"
+	tests := []struct {
+		name       string
+		digestBody string
+		wantExact  bool
+	}{
+		{
+			name:       "reasoning is redacted",
+			digestBody: `{"schema_version":2,"producer":{"name":"acta","version":"v0.1"},"run_id":"run-1","timeline":[{"kind":"reasoning","text":"` + secret + `"}]}` + "\n",
+		},
+		{
+			name:       "content-safe digest is unchanged",
+			digestBody: `{"schema_version":2,"producer":{"name":"acta","version":"v0.1"},"run_id":"run-1","timeline":[]}` + "\n",
+			wantExact:  true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runDir := writeBundle(t)
+			eventsBody := readTestFile(t, filepath.Join(runDir, actaevents.Filename))
+			writeProjectionGeneration(t, runDir, "100", test.digestBody, eventsBody)
+
+			var remoteDigest string
+			var remoteState string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				if request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == "digest.json" {
+					body, err := io.ReadAll(request.Body)
+					if err != nil {
+						t.Error(err)
+					}
+					remoteDigest = string(body)
+					remoteState = request.URL.Query().Get("redaction_state")
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+
+			if err := UploadRun(context.Background(), Config{
+				BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+			}, testRecord(runDir)); err != nil {
+				t.Fatal(err)
+			}
+			if remoteState != "redacted" {
+				t.Fatalf("manifest-pinned digest redaction_state = %q, want redacted", remoteState)
+			}
+			if test.wantExact {
+				if remoteDigest != test.digestBody {
+					t.Fatalf("content-safe manifest-pinned digest changed:\n%s", remoteDigest)
+				}
+				return
+			}
+			if strings.Contains(remoteDigest, secret) || !strings.Contains(remoteDigest, `"text":"`+reasoningRedactionMarker+`"`) || !strings.Contains(remoteDigest, `"redacted":true`) {
+				t.Fatalf("manifest-pinned digest was uploaded without structural redaction: %s", remoteDigest)
+			}
+		})
 	}
 }
 

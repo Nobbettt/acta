@@ -774,7 +774,7 @@ func dedupeArtifactRefs(refs []actaevents.ArtifactRef) []actaevents.ArtifactRef 
 
 func prepareUploadSnapshotContext(ctx context.Context, record *runrecord.Record, maxBytes int64, redactReasoning bool, maxRedactionLineBytes int, hook func(int)) (*os.File, string, []artifactUpload, error) {
 	for attempt := 1; attempt <= maxProjectionSnapshotAttempts; attempt++ {
-		snapshots, manifestPresent, retry, err := snapshotProjectionArtifactsContext(ctx, record.RunDir, maxBytes, attempt, hook)
+		snapshots, _, retry, err := snapshotProjectionArtifactsContext(ctx, record.RunDir, maxBytes, attempt, hook)
 		if err != nil {
 			return nil, "", nil, err
 		}
@@ -802,17 +802,6 @@ func prepareUploadSnapshotContext(ctx context.Context, record *runrecord.Record,
 			closeArtifactSnapshots(snapshots)
 			return nil, "", nil, err
 		}
-		if !manifestPresent {
-			if _, err := os.Stat(filepath.Join(record.RunDir, "projection.json")); err == nil {
-				closeArtifacts(artifacts)
-				closeArtifactSnapshots(snapshots)
-				continue
-			} else if !errors.Is(err, os.ErrNotExist) {
-				closeArtifacts(artifacts)
-				closeArtifactSnapshots(snapshots)
-				return nil, "", nil, fmt.Errorf("re-stat projection manifest: %w", err)
-			}
-		}
 		closeUnusedArtifactSnapshots(snapshots, eventSnapshot.File, artifacts)
 		return eventSnapshot.File, eventSnapshot.TempPath, artifacts, nil
 	}
@@ -830,27 +819,8 @@ func snapshotProjectionArtifactsContext(ctx context.Context, runDir string, maxB
 		if hook != nil {
 			hook(attempt)
 		}
-		eventPath := filepath.Join(runDir, actaevents.Filename)
-		eventSource, openErr := securefile.OpenRegular(resolvedRunDir, eventPath)
-		if openErr != nil {
-			if _, statErr := os.Stat(manifestPath); statErr == nil {
-				return nil, false, true, nil
-			}
-			return nil, false, false, openErr
-		}
-		defer eventSource.Close()
-		if _, statErr := os.Stat(manifestPath); statErr == nil {
-			return nil, false, true, nil
-		} else if !errors.Is(statErr, os.ErrNotExist) {
-			return nil, false, false, fmt.Errorf("re-stat projection manifest: %w", statErr)
-		}
-		eventFile, eventTempPath, snapshotErr := snapshotOpenFileContext(ctx, eventSource, maxBytes, "")
-		if snapshotErr != nil {
-			return nil, false, false, snapshotErr
-		}
-		return map[string]artifactSnapshot{
-			actaevents.Filename: {File: eventFile, TempPath: eventTempPath},
-		}, false, false, nil
+		snapshots, retry, snapshotErr := snapshotLegacyProjectionArtifactsContext(ctx, resolvedRunDir, runDir, manifestPath, maxBytes)
+		return snapshots, false, retry, snapshotErr
 	}
 	if err != nil {
 		return nil, false, false, fmt.Errorf("open projection manifest: %w", err)
@@ -914,6 +884,61 @@ func snapshotProjectionArtifactsContext(ctx context.Context, runDir string, maxB
 		snapshots[name] = artifactSnapshot{File: file, TempPath: tempPath}
 	}
 	return snapshots, true, false, nil
+}
+
+func snapshotLegacyProjectionArtifactsContext(ctx context.Context, resolvedRunDir, runDir, manifestPath string, maxBytes int64) (snapshots map[string]artifactSnapshot, retry bool, returnErr error) {
+	lock, err := actaevents.AcquireProjectionLock(runDir)
+	if err != nil {
+		return nil, false, fmt.Errorf("lock legacy projection snapshot: %w", err)
+	}
+	defer func() {
+		returnErr = errors.Join(returnErr, lock.Close())
+	}()
+	if _, err := os.Stat(manifestPath); err == nil {
+		return nil, true, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, false, fmt.Errorf("re-stat projection manifest: %w", err)
+	}
+	sources := make(map[string]*os.File, 2)
+	defer func() {
+		for _, source := range sources {
+			_ = source.Close()
+		}
+	}()
+	for _, name := range []string{actaevents.Filename, "digest.json"} {
+		source, openErr := securefile.OpenRegular(resolvedRunDir, filepath.Join(runDir, name))
+		if openErr != nil {
+			if name == "digest.json" && errors.Is(openErr, os.ErrNotExist) {
+				continue
+			}
+			if _, statErr := os.Stat(manifestPath); statErr == nil {
+				return nil, true, nil
+			}
+			return nil, false, openErr
+		}
+		sources[name] = source
+	}
+
+	snapshots = make(map[string]artifactSnapshot, len(sources))
+	for _, name := range []string{actaevents.Filename, "digest.json"} {
+		if sources[name] == nil {
+			continue
+		}
+		file, tempPath, snapshotErr := snapshotOpenFileContext(ctx, sources[name], maxBytes, "")
+		if snapshotErr != nil {
+			closeArtifactSnapshots(snapshots)
+			return nil, false, snapshotErr
+		}
+		snapshots[name] = artifactSnapshot{File: file, TempPath: tempPath}
+	}
+	if _, err := os.Stat(manifestPath); err == nil {
+		closeArtifactSnapshots(snapshots)
+		return nil, true, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		closeArtifactSnapshots(snapshots)
+		return nil, false, fmt.Errorf("re-stat projection manifest: %w", err)
+	}
+	return snapshots, false, nil
 }
 
 func projectionManifestUnchanged(root, path string, firstInfo os.FileInfo, firstHash [sha256.Size]byte) (bool, error) {
@@ -1079,14 +1104,16 @@ func buildArtifactsContext(ctx context.Context, runDir string, refs []actaevents
 				closeArtifacts(artifacts)
 				return nil, fmt.Errorf("snapshot artifact %s: %w", ref.Path, err)
 			}
-			if redactReasoning {
-				redactionVerified, err = redactArtifactSnapshot(ctx, file, ref.Kind, ref.Path, maxRedactionLineBytes)
-				if err != nil {
+		}
+		if redactReasoning {
+			redactionVerified, err = redactArtifactSnapshot(ctx, file, ref.Kind, ref.Path, maxRedactionLineBytes)
+			if err != nil {
+				if tempPath != eventTempPath {
 					_ = file.Close()
 					_ = os.Remove(tempPath)
-					closeArtifacts(artifacts)
-					return nil, fmt.Errorf("redact reasoning from artifact %s: %w", ref.Path, err)
 				}
+				closeArtifacts(artifacts)
+				return nil, fmt.Errorf("redact reasoning from artifact %s: %w", ref.Path, err)
 			}
 		}
 		if !redactReasoning {

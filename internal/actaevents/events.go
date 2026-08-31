@@ -547,13 +547,38 @@ func WriteProjectionForRunDir(runDir string, d *digest.Digest) error {
 	return commitProjection(runDir, generation, finals, payloads, nil)
 }
 
-func commitProjection(runDir, generation string, finals []string, payloads [][]byte, afterLock func() error) (returnErr error) {
+// ProjectionLock serializes projection publication and legacy projection
+// snapshots for one run bundle.
+type ProjectionLock struct {
+	lock *projectionLock
+}
+
+// AcquireProjectionLock blocks until the per-bundle projection lock is held.
+func AcquireProjectionLock(runDir string) (*ProjectionLock, error) {
 	lock, err := lockProjection(filepath.Join(runDir, ".projection.lock"))
+	if err != nil {
+		return nil, err
+	}
+	return &ProjectionLock{lock: lock}, nil
+}
+
+// Close releases the per-bundle projection lock.
+func (lock *ProjectionLock) Close() error {
+	if lock == nil || lock.lock == nil {
+		return nil
+	}
+	projectionLock := lock.lock
+	lock.lock = nil
+	return projectionLock.close()
+}
+
+func commitProjection(runDir, generation string, finals []string, payloads [][]byte, afterLock func() error) (returnErr error) {
+	lock, err := AcquireProjectionLock(runDir)
 	if err != nil {
 		return fmt.Errorf("lock projection commit: %w", err)
 	}
 	defer func() {
-		returnErr = errors.Join(returnErr, lock.close())
+		returnErr = errors.Join(returnErr, lock.Close())
 	}()
 	if afterLock != nil {
 		if err := afterLock(); err != nil {
