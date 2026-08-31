@@ -55,21 +55,11 @@ func createPrivateFile(path string, disposition uint32, flags uint32) (*os.File,
 		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
 		SecurityDescriptor: descriptor,
 	}
-	name, err := windows.UTF16PtrFromString(path)
-	if err != nil {
-		return nil, err
-	}
-	handle, err := windows.CreateFile(
-		name,
+	return openWindowsFile(
+		path,
 		windows.GENERIC_READ|windows.GENERIC_WRITE,
-		regularFileShareMode,
 		&attributes,
 		disposition,
-		windows.FILE_ATTRIBUTE_NORMAL|flags,
-		0,
+		flags,
 	)
-	if err != nil {
-		return nil, &os.PathError{Op: "open", Path: path, Err: err}
-	}
-	return os.NewFile(uintptr(handle), path), nil
 }

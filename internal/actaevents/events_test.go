@@ -1020,16 +1020,17 @@ func TestProjectionCommitCrashBeforeManifestRecoversPinnedGeneration(t *testing.
 	}
 
 	originalAfterPublish := projectionAfterPublish
+	simulatedKill := errors.New("simulated kill")
 	projectionAfterPublish = func(name string) error {
 		if name == Filename {
-			return errors.New("simulated kill")
+			return simulatedKill
 		}
 		return nil
 	}
 	t.Cleanup(func() { projectionAfterPublish = originalAfterPublish })
 	err = commitProjection(runDir, "200", finals, interruptedPayloads, nil)
 	projectionAfterPublish = originalAfterPublish
-	if err == nil || !strings.Contains(err.Error(), "simulated kill") {
+	if !errors.Is(err, simulatedKill) {
 		t.Fatalf("commit error = %v, want simulated kill", err)
 	}
 	for index, file := range pinned {
