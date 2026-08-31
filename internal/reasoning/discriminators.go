@@ -236,8 +236,7 @@ func redactReasoningFieldsContext(ctx context.Context, value any) (changed, veri
 		}
 		return changed, verified, nil
 	case map[string]any:
-		typeDiscriminator, _ := typed["type"].(string)
-		kindDiscriminator, _ := typed["kind"].(string)
+		typeDiscriminator, kindDiscriminator := objectDiscriminators(typed)
 		if IsBlockDiscriminator(typeDiscriminator) || IsBlockDiscriminator(kindDiscriminator) {
 			return redactToStructuralReferencesContext(ctx, typed)
 		}
@@ -539,29 +538,31 @@ func containsRedactedProviderBlock(ctx context.Context, value any) (bool, error)
 // envelope. Bare payload-like keys on unknown envelopes are not exempt: future
 // provider shapes must remain inspectable by the generic reasoning pass.
 func IsUserDataPayloadKey(parent map[string]any, key string) bool {
-	typeDiscriminator, _ := parent["type"].(string)
-	kindDiscriminator, _ := parent["kind"].(string)
+	typeDiscriminator, kindDiscriminator := objectDiscriminators(parent)
 	role, _ := parent["role"].(string)
 	typeDiscriminator = strings.ToLower(strings.TrimSpace(typeDiscriminator))
 	kindDiscriminator = strings.ToLower(strings.TrimSpace(kindDiscriminator))
 	role = strings.ToLower(strings.TrimSpace(role))
+	payloadKey := strings.ToLower(strings.TrimSpace(key))
 
-	switch strings.ToLower(strings.TrimSpace(key)) {
+	if normalizedDataKind(kindDiscriminator) {
+		kind, ok := normalizedEnvelopeKind(parent)
+		return ok && normalizedEnvelopePayloadKey(parent, kind, key)
+	}
+
+	switch payloadKey {
 	case "input":
-		return typeDiscriminator == "tool_use" || normalizedToolDataKind(kindDiscriminator)
+		return typeDiscriminator == "tool_use"
 	case "arguments":
 		return typeDiscriminator == "mcp_tool_call" || typeDiscriminator == "collab_tool_call"
 	case "result":
-		return typeDiscriminator == "mcp_tool_call" || typeDiscriminator == "collab_tool_call" ||
-			normalizedToolDataKind(kindDiscriminator)
+		return typeDiscriminator == "mcp_tool_call" || typeDiscriminator == "collab_tool_call"
 	case "output":
-		return typeDiscriminator == "tool_result" || normalizedToolDataKind(kindDiscriminator)
+		return typeDiscriminator == "tool_result"
 	case "structured_output":
 		return typeDiscriminator == "result"
 	case "tool_use_result":
 		return typeDiscriminator == "user"
-	case "details":
-		return kindDiscriminator == "structured_output"
 	case "content":
 		return typeDiscriminator == "tool_result" || typeDiscriminator == "user" || role == "user"
 	default:
@@ -569,13 +570,98 @@ func IsUserDataPayloadKey(parent map[string]any, key string) bool {
 	}
 }
 
-func normalizedToolDataKind(kind string) bool {
+func objectDiscriminators(parent map[string]any) (string, string) {
+	typeDiscriminator, _ := parent["type"].(string)
+	kindDiscriminator, _ := parent["kind"].(string)
+	return typeDiscriminator, kindDiscriminator
+}
+
+func normalizedDataKind(kind string) bool {
 	switch kind {
-	case "tool_call", "tool_result", "command", "file_edit", "todo", "web_search", "task", "permission":
+	case "tool_call", "tool_result", "command", "file_edit", "todo", "web_search", "task", "permission", "structured_output":
 		return true
 	default:
 		return false
 	}
+}
+
+// normalizedEnvelopeKind positively identifies an Acta-normalized payload.
+// A second discriminator must agree with kind; foreign or conflicting types
+// leave the object on the conservative provider-data traversal path.
+func normalizedEnvelopeKind(parent map[string]any) (string, bool) {
+	_, kind := objectDiscriminators(parent)
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	if !normalizedDataKind(kind) {
+		return "", false
+	}
+	typeValue, hasType := parent["type"]
+	if !hasType {
+		return kind, true
+	}
+	typeDiscriminator, ok := typeValue.(string)
+	if !ok {
+		return "", false
+	}
+	typeKind, ok := normalizedEnvelopeTypeKind(strings.ToLower(strings.TrimSpace(typeDiscriminator)))
+	return kind, ok && typeKind == kind
+}
+
+func normalizedEnvelopeTypeKind(discriminator string) (string, bool) {
+	switch discriminator {
+	case "tool_call", "tool.call.completed", "tool.call.incomplete":
+		return "tool_call", true
+	case "tool_result", "tool.result.orphaned":
+		return "tool_result", true
+	case "command", "shell.command.completed", "shell.command.incomplete":
+		return "command", true
+	case "file_edit", "file.written", "file.write.incomplete":
+		return "file_edit", true
+	case "todo", "agent.todo", "agent.todo.updated":
+		return "todo", true
+	case "web_search", "web.search.completed", "web.search.incomplete":
+		return "web_search", true
+	case "task", "agent.task.started", "agent.task.progress", "agent.task.completed", "agent.task.incomplete":
+		return "task", true
+	case "permission", "agent.permission.denied":
+		return "permission", true
+	case "structured_output", "agent.output.structured":
+		return "structured_output", true
+	default:
+		return "", false
+	}
+}
+
+func normalizedEnvelopePayloadKey(parent map[string]any, kind, key string) bool {
+	if key != strings.ToLower(strings.TrimSpace(key)) {
+		return false
+	}
+	value, exists := parent[key]
+	if !exists || !maskableValue(value) {
+		return false
+	}
+	switch key {
+	case "input":
+		switch kind {
+		case "tool_call", "command", "file_edit", "todo", "web_search", "task", "permission":
+			return true
+		}
+	case "result":
+		switch kind {
+		case "tool_call", "tool_result", "command", "file_edit", "todo", "web_search", "task":
+			return true
+		}
+	case "output":
+		if _, ok := value.(string); !ok {
+			return false
+		}
+		switch kind {
+		case "tool_call", "tool_result", "command", "file_edit", "todo", "web_search", "task":
+			return true
+		}
+	case "details":
+		return kind == "structured_output"
+	}
+	return false
 }
 
 func redactedCodexBlock(event map[string]any) bool {

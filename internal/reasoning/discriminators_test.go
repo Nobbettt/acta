@@ -102,7 +102,7 @@ func TestRedactProviderBlocksPreservesProviderShapesInsideUserData(t *testing.T)
 		"result":                    `{"type":"mcp_tool_call","result":` + fixture + `}`,
 		"arguments":                 `{"type":"mcp_tool_call","arguments":` + fixture + `}`,
 		"input":                     `{"type":"tool_use","input":` + fixture + `}`,
-		"output":                    `{"kind":"tool_result","output":` + fixture + `}`,
+		"normalized result":         `{"kind":"tool_result","provider_event":"user.tool_result","phase":"completed","status":"orphaned","result":` + fixture + `}`,
 		"structured output":         `{"type":"result","structured_output":` + fixture + `}`,
 		"tool use result":           `{"type":"user","tool_use_result":` + fixture + `}`,
 		"structured output details": `{"kind":"structured_output","details":` + fixture + `}`,
@@ -160,5 +160,59 @@ func TestRedactValueTraversesPayloadKeysOnUnknownEnvelopes(t *testing.T) {
 	}
 	if strings.Contains(string(encoded), secret) || !strings.Contains(string(encoded), `"redacted":true`) {
 		t.Fatalf("future output reasoning was not redacted: %s", encoded)
+	}
+}
+
+func TestRedactValueRequiresPositiveNormalizedEnvelopeIdentification(t *testing.T) {
+	const secret = "normalized-envelope-secret-5183"
+	tests := []struct {
+		name       string
+		raw        string
+		wantChange bool
+		wantSecret bool
+	}{
+		{
+			name:       "foreign type",
+			raw:        `{"type":"future.event","kind":"tool_result","output":{"thinking":"` + secret + `"}}`,
+			wantChange: true,
+		},
+		{
+			name:       "genuine normalized tool result",
+			raw:        `{"kind":"tool_result","provider_event":"user.tool_result","phase":"completed","status":"orphaned","result":{"thinking":"` + secret + `"},"output":"tool output"}`,
+			wantSecret: true,
+		},
+		{
+			name:       "conflicting recognized type",
+			raw:        `{"type":"tool.call.completed","kind":"tool_result","result":{"thinking":"` + secret + `"}}`,
+			wantChange: true,
+		},
+		{
+			name:       "wrong normalized shape",
+			raw:        `{"kind":"tool_result","input":{"thinking":"` + secret + `"}}`,
+			wantChange: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var payload any
+			if err := json.Unmarshal([]byte(test.raw), &payload); err != nil {
+				t.Fatal(err)
+			}
+			changed, verified := RedactValue(payload)
+			if changed != test.wantChange || !verified {
+				t.Fatalf("redaction = changed %v, verified %v; want changed %v, verified true", changed, verified, test.wantChange)
+			}
+			encoded, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			hasSecret := strings.Contains(string(encoded), secret)
+			if hasSecret != test.wantSecret {
+				t.Fatalf("secret retained = %v, want %v: %s", hasSecret, test.wantSecret, encoded)
+			}
+			if test.wantChange && !strings.Contains(string(encoded), `"thinking":"[REDACTED]"`) {
+				t.Fatalf("nested reasoning was not masked: %s", encoded)
+			}
+		})
 	}
 }

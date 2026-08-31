@@ -140,18 +140,18 @@ func TestRedactReasoningLineScrubsGenericReasoningFields(t *testing.T) {
 	}
 }
 
-func TestRedactReasoningLineTraversesFutureOutputArray(t *testing.T) {
-	const secret = "private-future-output-reasoning-4187"
-	original := []byte(`{"type":"future.event","output":[{"type":"reasoning","text":"` + secret + `"}]}` + "\n")
+func TestRedactReasoningLineRejectsForeignTypeForNormalizedKind(t *testing.T) {
+	const secret = "private-foreign-normalized-kind-reasoning-4187"
+	original := []byte(`{"type":"future.event","kind":"tool_result","output":{"thinking":"` + secret + `"}}` + "\n")
 	redacted, err := redactReasoningLine(original)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if bytes.Contains(redacted, []byte(secret)) ||
 		!bytes.Contains(redacted, []byte(`"type":"future.event"`)) ||
-		!bytes.Contains(redacted, []byte(`"type":"reasoning"`)) ||
-		!bytes.Contains(redacted, []byte(`"redacted":true`)) {
-		t.Fatalf("future output reasoning was not safely redacted: %s", redacted)
+		!bytes.Contains(redacted, []byte(`"kind":"tool_result"`)) ||
+		!bytes.Contains(redacted, []byte(`"thinking":"[REDACTED]"`)) {
+		t.Fatalf("foreign normalized-kind output was not safely redacted: %s", redacted)
 	}
 }
 

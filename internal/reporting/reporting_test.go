@@ -857,13 +857,13 @@ func TestUploadRunRedactsReasoningKindDespiteFutureType(t *testing.T) {
 	}
 }
 
-func TestUploadRunRedactsFutureOutputArray(t *testing.T) {
+func TestUploadRunRejectsForeignTypeForNormalizedKind(t *testing.T) {
 	const (
 		rawName = "codex-events.jsonl"
-		secret  = "private-remote-future-output-reasoning-6452"
+		secret  = "private-remote-foreign-normalized-kind-6452"
 	)
 	runDir := writeBundle(t)
-	original := `{"type":"future.event","output":[{"type":"reasoning","text":"` + secret + `"}]}` + "\n"
+	original := `{"type":"future.event","kind":"tool_result","output":{"thinking":"` + secret + `"}}` + "\n"
 	writeFile(t, filepath.Join(runDir, rawName), original)
 	addArtifactRef(t, runDir, `{"kind":"raw_stdout","path":"`+rawName+`"}`)
 
@@ -888,9 +888,9 @@ func TestUploadRunRedactsFutureOutputArray(t *testing.T) {
 	}
 	if strings.Contains(remoteRaw, secret) ||
 		!strings.Contains(remoteRaw, `"type":"future.event"`) ||
-		!strings.Contains(remoteRaw, `"type":"reasoning"`) ||
-		!strings.Contains(remoteRaw, `"redacted":true`) || remoteState != "redacted" {
-		t.Fatalf("remote future output body/state = %q / %q", remoteRaw, remoteState)
+		!strings.Contains(remoteRaw, `"kind":"tool_result"`) ||
+		!strings.Contains(remoteRaw, `"thinking":"[REDACTED]"`) || remoteState != "redacted" {
+		t.Fatalf("remote foreign normalized-kind body/state = %q / %q", remoteRaw, remoteState)
 	}
 	if local := readTestFile(t, filepath.Join(runDir, rawName)); local != original {
 		t.Fatalf("remote redaction changed local raw stream:\n got %s\nwant %s", local, original)
