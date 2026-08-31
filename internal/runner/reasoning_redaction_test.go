@@ -126,14 +126,17 @@ func TestRedactReasoningLineRequiresExactProviderDiscriminator(t *testing.T) {
 	}
 }
 
-func TestRedactReasoningLineRequiresProviderEventPosition(t *testing.T) {
-	original := []byte(`{"type":"thinking","thinking":"visible non-provider data"}` + "\n")
+func TestRedactReasoningLineScrubsGenericReasoningFields(t *testing.T) {
+	const secret = "private future reasoning"
+	original := []byte(`{"type":"future.event","thinking":"` + secret + `"}` + "\n")
 	redacted, err := redactReasoningLine(original)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(redacted, original) {
-		t.Fatalf("non-provider object changed:\n got %s\nwant %s", redacted, original)
+	if bytes.Contains(redacted, []byte(secret)) ||
+		!bytes.Contains(redacted, []byte(`"type":"future.event"`)) ||
+		!bytes.Contains(redacted, []byte(`"thinking":"[REDACTED]"`)) {
+		t.Fatalf("generic reasoning field was not safely redacted: %s", redacted)
 	}
 }
 

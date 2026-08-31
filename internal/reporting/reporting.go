@@ -1368,7 +1368,9 @@ func inspectOpaqueTextSnapshot(ctx context.Context, file *os.File, maxLineBytes 
 				inspection.Verified = false
 				return inspection, nil
 			}
-			inspection.ContainsReasoning = redactReasoningValue(value) || inspection.ContainsReasoning
+			containsReasoning, verified := reasoning.RedactValue(value)
+			inspection.ContainsReasoning = containsReasoning || inspection.ContainsReasoning
+			inspection.Verified = verified && inspection.Verified
 		}
 		if readErr != nil {
 			if readErr != io.EOF {
@@ -1421,7 +1423,7 @@ func inspectJSONLinesSnapshot(ctx context.Context, file *os.File, maxLineBytes i
 }
 
 func inspectProviderValue(value any) (bool, bool) {
-	return redactReasoningValue(value), true
+	return reasoning.RedactValue(value)
 }
 
 func inspectActaEventValue(value any) (bool, bool) {
@@ -1448,7 +1450,7 @@ func inspectActaEventValue(value any) (bool, bool) {
 	if !hasPayload {
 		return false, true
 	}
-	return redactReasoningValue(payload), true
+	return reasoning.RedactValue(payload)
 }
 
 func inspectJSONDocumentSnapshot(ctx context.Context, file *os.File, maxBytes int64) (artifactInspection, error) {
@@ -1469,7 +1471,8 @@ func inspectJSONDocumentSnapshot(ctx context.Context, file *os.File, maxBytes in
 	if err := ctx.Err(); err != nil {
 		return artifactInspection{}, err
 	}
-	return artifactInspection{ContainsReasoning: redactReasoningValue(value), Verified: true}, nil
+	containsReasoning, verified := reasoning.RedactValue(value)
+	return artifactInspection{ContainsReasoning: containsReasoning, Verified: verified}, nil
 }
 
 func rewriteJSONLSnapshot(ctx context.Context, file *os.File, maxLineBytes int, transform func([]byte) ([]byte, error)) error {
@@ -1686,7 +1689,11 @@ func redactProviderReasoningLine(line []byte) ([]byte, error) {
 		return nil, fmt.Errorf("parse provider event for remote reasoning redaction: %w", err)
 	}
 	changed := setReasoningRedactionState(value)
-	changed = redactReasoningValue(value) || changed
+	reasoningChanged, verified := reasoning.RedactValue(value)
+	if !verified {
+		return nil, errors.New("provider event reasoning redaction could not be verified")
+	}
+	changed = reasoningChanged || changed
 	if !changed {
 		return line, nil
 	}
@@ -1731,7 +1738,11 @@ func redactActaReasoningEventLine(line []byte) ([]byte, error) {
 		default:
 			// Known reasoning-free payloads retain their documented content, but
 			// still receive a defensive recursive pass for nested provider blocks.
-			changed = redactReasoningValue(payload) || changed
+			reasoningChanged, verified := reasoning.RedactValue(payload)
+			if !verified {
+				return nil, errors.New("acta event reasoning redaction could not be verified")
+			}
+			changed = reasoningChanged || changed
 		}
 	}
 	if !changed {
@@ -1753,96 +1764,7 @@ func redactActaReasoningEventLine(line []byte) ([]byte, error) {
 // masked recursively. Other inspectable diagnostics remain byte-for-byte data;
 // unfamiliar shapes fail verification so their artifact can be withheld.
 func redactUnsupportedPayload(value any) (any, bool, bool) {
-	redacted, changed, verified, _ := redactUnsupportedPayloadContext(context.Background(), value)
-	return redacted, changed, verified
-}
-
-func redactUnsupportedPayloadContext(ctx context.Context, value any) (any, bool, bool, error) {
-	payload, ok := value.(map[string]any)
-	if !ok {
-		return value, false, false, nil
-	}
-	kind, _ := payload["kind"].(string)
-	if kind != "unsupported" {
-		return value, false, false, nil
-	}
-	providerEvent, _ := payload["provider_event"].(string)
-	var detailsType string
-	detailsChanged := false
-	detailsVerified := false
-	if details, exists := payload["details"]; !exists {
-		detailsVerified = true
-	} else {
-		switch typed := details.(type) {
-		case nil:
-			detailsVerified = true
-		case []any:
-			var err error
-			detailsChanged, detailsVerified, err = redactUnsupportedDetailsArrayContext(ctx, typed)
-			if err != nil {
-				return payload, false, false, err
-			}
-		case map[string]any:
-			detailsType, _ = typed["type"].(string)
-			var err error
-			detailsChanged, err = redactReasoningValueContext(ctx, typed)
-			if err != nil {
-				return payload, false, false, err
-			}
-			detailsVerified = true
-		default:
-			return payload, false, false, nil
-		}
-	}
-	if reasoning.IsNormalizedEvent(kind, providerEvent, detailsType) {
-		changed, err := redactToStructuralReferencesContext(ctx, payload)
-		return payload, changed, true, err
-	}
-	providerChanged, err := reasoning.RedactProviderBlocksContext(ctx, payload)
-	if err != nil {
-		return payload, false, false, err
-	}
-	containsRedacted, err := reasoning.ContainsRedactedProviderBlockContext(ctx, payload)
-	if err != nil {
-		return payload, false, false, err
-	}
-	changed := detailsChanged || providerChanged
-	if changed || containsRedacted {
-		if redacted, _ := payload["redacted"].(bool); !redacted {
-			payload["redacted"] = true
-			changed = true
-		}
-	}
-	return payload, changed, detailsVerified, nil
-}
-
-func redactUnsupportedDetailsArrayContext(ctx context.Context, details []any) (bool, bool, error) {
-	changed := false
-	verified := true
-	for _, detail := range details {
-		if err := ctx.Err(); err != nil {
-			return false, false, err
-		}
-		switch typed := detail.(type) {
-		case nil:
-		case map[string]any:
-			itemChanged, err := redactReasoningValueContext(ctx, typed)
-			if err != nil {
-				return false, false, err
-			}
-			changed = itemChanged || changed
-		case []any:
-			itemChanged, itemVerified, err := redactUnsupportedDetailsArrayContext(ctx, typed)
-			if err != nil {
-				return false, false, err
-			}
-			changed = itemChanged || changed
-			verified = itemVerified && verified
-		default:
-			verified = false
-		}
-	}
-	return changed, verified, nil
+	return reasoning.RedactUnsupportedPayload(value)
 }
 
 // reasoningFreeActaEventType is deliberately explicit. A newly introduced
@@ -1945,147 +1867,12 @@ func reasoningRedactionMask(value any) (any, bool) {
 	return reasoning.MaskValue(value)
 }
 
-func redactReasoningValue(value any) bool {
-	changed := reasoning.RedactProviderBlocks(value)
-	return redactReasoningFields(value) || changed
-}
-
-func redactReasoningFields(value any) bool {
-	switch typed := value.(type) {
-	case []any:
-		changed := false
-		for _, item := range typed {
-			changed = redactReasoningFields(item) || changed
-		}
-		return changed
-	case map[string]any:
-		kind, _ := typed["type"].(string)
-		if kind == "" {
-			kind, _ = typed["kind"].(string)
-		}
-		if kind == "unsupported" {
-			_, changed, verified := redactUnsupportedPayload(typed)
-			if verified {
-				return changed
-			}
-		}
-		if reasoning.IsBlockDiscriminator(kind) {
-			_, changed := redactToStructuralReferences(typed)
-			return changed
-		}
-		changed := false
-		for key, item := range typed {
-			if userDataPayloadKey(typed, key) {
-				continue
-			}
-			if reasoningContentKey(key, item) {
-				masked, itemChanged := reasoningRedactionMask(item)
-				if itemChanged {
-					typed[key] = masked
-					changed = true
-				}
-				continue
-			}
-			changed = redactReasoningFields(item) || changed
-		}
-		return changed
-	default:
-		return false
-	}
-}
-
 func redactReasoningValueContext(ctx context.Context, value any) (bool, error) {
-	if err := ctx.Err(); err != nil {
-		return false, err
+	changed, verified, err := reasoning.RedactValueContext(ctx, value)
+	if err == nil && !verified {
+		err = errors.New("reasoning redaction could not verify provider payload")
 	}
-	changed, err := reasoning.RedactProviderBlocksContext(ctx, value)
-	if err != nil {
-		return false, err
-	}
-	genericChanged, err := redactReasoningFieldsContext(ctx, value)
-	return genericChanged || changed, err
-}
-
-func redactReasoningFieldsContext(ctx context.Context, value any) (bool, error) {
-	if err := ctx.Err(); err != nil {
-		return false, err
-	}
-	switch typed := value.(type) {
-	case []any:
-		changed := false
-		for _, item := range typed {
-			itemChanged, err := redactReasoningFieldsContext(ctx, item)
-			if err != nil {
-				return false, err
-			}
-			changed = itemChanged || changed
-		}
-		return changed, nil
-	case map[string]any:
-		kind, _ := typed["type"].(string)
-		if kind == "" {
-			kind, _ = typed["kind"].(string)
-		}
-		if kind == "unsupported" {
-			_, changed, verified, err := redactUnsupportedPayloadContext(ctx, typed)
-			if err != nil {
-				return false, err
-			}
-			if verified {
-				return changed, nil
-			}
-		}
-		if reasoning.IsBlockDiscriminator(kind) {
-			return redactToStructuralReferencesContext(ctx, typed)
-		}
-		changed := false
-		for key, item := range typed {
-			if err := ctx.Err(); err != nil {
-				return false, err
-			}
-			if userDataPayloadKey(typed, key) {
-				continue
-			}
-			if reasoningContentKey(key, item) {
-				masked, itemChanged := reasoningRedactionMask(item)
-				if itemChanged {
-					typed[key] = masked
-					changed = true
-				}
-				continue
-			}
-			itemChanged, err := redactReasoningFieldsContext(ctx, item)
-			if err != nil {
-				return false, err
-			}
-			changed = itemChanged || changed
-		}
-		return changed, nil
-	default:
-		return false, nil
-	}
-}
-
-func redactToStructuralReferencesContext(ctx context.Context, payload map[string]any) (bool, error) {
-	changed := false
-	for key, item := range payload {
-		if err := ctx.Err(); err != nil {
-			return false, err
-		}
-		if structuralPayloadValue(key, item) {
-			continue
-		}
-		masked, itemChanged := reasoningRedactionMask(item)
-		if itemChanged {
-			payload[key] = masked
-			changed = true
-		}
-	}
-	if redacted, _ := payload["redacted"].(bool); !redacted {
-		payload["redacted"] = true
-		changed = true
-	}
-	return changed, nil
+	return changed, err
 }
 
 // userDataPayloadKey identifies containers whose contents belong to the user
@@ -2093,22 +1880,6 @@ func redactToStructuralReferencesContext(ctx context.Context, payload map[string
 // the surrounding provider event itself is an exact reasoning block.
 func userDataPayloadKey(parent map[string]any, key string) bool {
 	return reasoning.IsUserDataPayloadKey(parent, key)
-}
-
-func reasoningContentKey(key string, value any) bool {
-	switch strings.ToLower(strings.TrimSpace(key)) {
-	case "reasoning", "thinking", "reasoning_text", "thinking_text", "reasoning_content", "thinking_content", "chain_of_thought":
-		// Numeric reasoning-token counters are non-content evidence and must
-		// survive redaction. Suspicious text or structured content is masked.
-		switch value.(type) {
-		case string, []any, map[string]any:
-			return true
-		default:
-			return false
-		}
-	default:
-		return false
-	}
 }
 
 func setReasoningRedactionState(value any) bool {

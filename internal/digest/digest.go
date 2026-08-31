@@ -171,11 +171,13 @@ func (e Event) LocalReasoningText() string {
 
 // RedactReasoning removes provider-private reasoning from the in-memory local
 // projection before a redacted bundle is persisted. Structural events and raw
-// line references remain intact.
-func RedactReasoning(d *Digest) {
+// line references remain intact. It reports whether every payload was safely
+// inspected; unverifiable payloads are still conservatively masked.
+func RedactReasoning(d *Digest) bool {
 	if d == nil {
-		return
+		return true
 	}
+	verified := true
 	for i := range d.Timeline {
 		event := &d.Timeline[i]
 		if isReasoningEvent(*event) {
@@ -183,7 +185,8 @@ func RedactReasoning(d *Digest) {
 			continue
 		}
 		if event.Kind == KindUnsupported {
-			details, changed := redactUnsupportedDetails(event.Details)
+			details, changed, detailsVerified := redactUnsupportedDetails(event.ProviderEvent, event.Details)
+			verified = detailsVerified && verified
 			if changed {
 				event.Details = details
 				event.Redacted = true
@@ -195,6 +198,7 @@ func RedactReasoning(d *Digest) {
 			event.Details = json.RawMessage(`"` + reasoning.RedactedMarker + `"`)
 		}
 	}
+	return verified
 }
 
 func redactEventPayload(event *Event) {
@@ -233,41 +237,41 @@ func isKnownEventKind(kind string) bool {
 	}
 }
 
-// redactUnsupportedDetails retains inspectable diagnostics while recursively
-// masking exact provider reasoning blocks. Invalid JSON cannot be proved safe,
-// so it is replaced with the explicit redaction marker.
-func redactUnsupportedDetails(raw json.RawMessage) (json.RawMessage, bool) {
+// redactUnsupportedDetails retains inspectable diagnostics while applying the
+// shared exact and generic reasoning passes. Unverifiable details are replaced
+// with an explicit marker, and verified reports the uncertainty to the caller
+// so a local bundle is never labeled successfully redacted on that basis.
+func redactUnsupportedDetails(providerEvent string, raw json.RawMessage) (json.RawMessage, bool, bool) {
 	if len(raw) == 0 {
-		return raw, false
+		return raw, false, true
 	}
 	var value any
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	if err := decoder.Decode(&value); err != nil {
-		return json.RawMessage(`"` + reasoning.RedactedMarker + `"`), true
+		return json.RawMessage(`"` + reasoning.RedactedMarker + `"`), true, false
 	}
 	var extra any
 	if err := decoder.Decode(&extra); err != io.EOF {
-		return json.RawMessage(`"` + reasoning.RedactedMarker + `"`), true
+		return json.RawMessage(`"` + reasoning.RedactedMarker + `"`), true, false
 	}
-	switch value.(type) {
-	case nil, []any, map[string]any:
-	default:
-		masked, _ := reasoning.MaskValue(value)
-		redacted, err := json.Marshal(masked)
-		if err != nil {
-			return json.RawMessage(`"` + reasoning.RedactedMarker + `"`), true
-		}
-		return redacted, true
+	payload := map[string]any{
+		"kind":           KindUnsupported,
+		"provider_event": providerEvent,
+		"details":        value,
 	}
-	if !reasoning.RedactProviderBlocks(value) {
-		return raw, false
+	_, changed, verified := reasoning.RedactUnsupportedPayload(payload)
+	if !verified {
+		return json.RawMessage(`"` + reasoning.RedactedMarker + `"`), true, false
 	}
-	redacted, err := json.Marshal(value)
+	if !changed {
+		return raw, false, true
+	}
+	redacted, err := json.Marshal(payload["details"])
 	if err != nil {
-		return json.RawMessage(`"` + reasoning.RedactedMarker + `"`), true
+		return json.RawMessage(`"` + reasoning.RedactedMarker + `"`), true, false
 	}
-	return redacted, true
+	return redacted, true, true
 }
 
 type FileMutation struct {

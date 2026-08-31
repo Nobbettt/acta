@@ -165,7 +165,11 @@ func redactReasoningLine(line []byte) ([]byte, error) {
 		}
 		return nil, fmt.Errorf("parse raw provider event for reasoning redaction: %w", err)
 	}
-	if !redactReasoningValue(value) {
+	changed, verified := reasoning.RedactValue(value)
+	if !verified {
+		return nil, fmt.Errorf("provider event reasoning redaction could not be verified")
+	}
+	if !changed {
 		return line, nil
 	}
 	encoded, err := json.Marshal(value)
@@ -176,8 +180,4 @@ func redactReasoningLine(line []byte) ([]byte, error) {
 		encoded = append(encoded, '\n')
 	}
 	return encoded, nil
-}
-
-func redactReasoningValue(value any) bool {
-	return reasoning.RedactProviderBlocks(value)
 }

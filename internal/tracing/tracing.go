@@ -8,11 +8,13 @@ package tracing
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -169,12 +171,45 @@ func inboundParentSpanContext() trace.SpanContext {
 // runner can call them unconditionally.
 type Run struct {
 	provider      *sdktrace.TracerProvider
+	exportErrors  *errorCapturingExporter
 	tracer        trace.Tracer
 	rootCtx       context.Context
 	root          trace.Span
 	sampled       bool
 	mapper        mapper
 	includeOutput bool
+}
+
+// errorCapturingExporter retains failures from batches exported by the
+// processor's background worker. The SDK reports those failures to its global
+// error handler instead of returning them from a later ForceFlush.
+type errorCapturingExporter struct {
+	exporter sdktrace.SpanExporter
+	mu       sync.Mutex
+	err      error
+}
+
+func (e *errorCapturingExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
+	err := e.exporter.ExportSpans(ctx, spans)
+	if err != nil {
+		e.mu.Lock()
+		e.err = errors.Join(e.err, err)
+		e.mu.Unlock()
+	}
+	return err
+}
+
+func (e *errorCapturingExporter) Shutdown(ctx context.Context) error {
+	return e.exporter.Shutdown(ctx)
+}
+
+func (e *errorCapturingExporter) Err() error {
+	if e == nil {
+		return nil
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.err
 }
 
 // mapper turns one raw agent output line into span operations.
@@ -203,12 +238,19 @@ func Setup(ctx context.Context, cfg Config) (*Run, error) {
 	if err != nil {
 		res = resource.Default()
 	}
+	capturingExporter := &errorCapturingExporter{exporter: exporter}
 	provider := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter),
+		sdktrace.WithBatcher(capturingExporter),
 		sdktrace.WithResource(res),
 		sdktrace.WithSampler(samplerFromEnvironment()),
 	)
-	return newRun(ctx, provider, cfg)
+	run, err := newRun(ctx, provider, cfg)
+	if err != nil {
+		_ = provider.Shutdown(context.Background())
+		return nil, err
+	}
+	run.exportErrors = capturingExporter
+	return run, nil
 }
 
 // samplerFromEnvironment implements the standard built-in
@@ -344,16 +386,13 @@ func (r *Run) Finish(record *runrecord.Record, completedAt time.Time) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	// ForceFlush returns the exporter's error; Shutdown alone swallows export
-	// failures into otel's global error handler. The run recorded a trace_id, so
-	// a dropped export leaves it pointing at spans that never reached the
-	// backend — surface it.
+	// The wrapper retains errors from batches already handled by the background
+	// worker; ForceFlush and Shutdown cover the final batch and teardown. The run
+	// recorded a trace_id, so any dropped batch must be surfaced.
 	flushErr := r.provider.ForceFlush(ctx)
-	if err := r.provider.Shutdown(ctx); err != nil && flushErr == nil {
-		flushErr = err
-	}
-	if flushErr != nil {
-		return fmt.Errorf("flush traces: %w", flushErr)
+	shutdownErr := r.provider.Shutdown(ctx)
+	if err := errors.Join(r.exportErrors.Err(), flushErr, shutdownErr); err != nil {
+		return fmt.Errorf("flush traces: %w", err)
 	}
 	return nil
 }

@@ -92,6 +92,25 @@ func TestRedactReasoningPreservesUnsupportedCodexRethinkingDetails(t *testing.T)
 	}
 }
 
+func TestRedactReasoningScrubsUnsupportedFutureThinking(t *testing.T) {
+	const secret = "private-future-thinking-3571"
+	d := &Digest{Timeline: []Event{{
+		Kind: KindUnsupported, ProviderEvent: "future.event",
+		Details: json.RawMessage(`{"type":"future.event","thinking":"` + secret + `"}`),
+	}}}
+
+	if verified := RedactReasoning(d); !verified {
+		t.Fatal("future event reasoning redaction was not verified")
+	}
+
+	event := d.Timeline[0]
+	if !event.Redacted || bytes.Contains(event.Details, []byte(secret)) ||
+		!bytes.Contains(event.Details, []byte(`"type":"future.event"`)) ||
+		!bytes.Contains(event.Details, []byte(`"thinking":"[REDACTED]"`)) {
+		t.Fatalf("unsupported future reasoning was not safely redacted: %+v / %s", event, event.Details)
+	}
+}
+
 func TestRedactReasoningScrubsIDLessUnsupportedCodexReasoning(t *testing.T) {
 	const secret = "private-idless-reasoning-9137"
 	raw := strings.Join([]string{
@@ -127,10 +146,10 @@ func TestRedactReasoningMasksUninspectableUnsupportedDetails(t *testing.T) {
 		Kind: KindUnsupported, ProviderEvent: "future.event", Details: json.RawMessage(`{"unterminated":`),
 	}}}
 
-	RedactReasoning(d)
+	verified := RedactReasoning(d)
 
 	event := d.Timeline[0]
-	if !event.Redacted || string(event.Details) != `"[REDACTED]"` {
+	if verified || !event.Redacted || string(event.Details) != `"[REDACTED]"` {
 		t.Fatalf("uninspectable unsupported details = %+v / %s", event, event.Details)
 	}
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/nobbettt/acta/internal/actaevents"
 	"github.com/nobbettt/acta/internal/agents"
 	"github.com/nobbettt/acta/internal/digest"
+	"github.com/nobbettt/acta/internal/reasoning"
 	"github.com/nobbettt/acta/internal/reporting"
 	"github.com/nobbettt/acta/internal/runrecord"
 )
@@ -1211,9 +1212,14 @@ func TestRunBestEffortSkipsInvalidOTLPEndpointWithoutAmbientFallback(t *testing.
 	record, err := runForTest(context.Background(), Options{
 		Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test", OTLPEndpoint: "%invalid",
 	}, io.Discard, stderr)
-	if err != nil || record == nil || !record.OK || record.OTLPStatus != "not_configured" || record.TraceID != "" {
+	if err != nil || record == nil || !record.OK || record.OTLPStatus != "failed" || record.OTLPError == "" || record.TraceID != "" {
 		t.Fatalf("best-effort invalid endpoint result = record %#v, err %v", record, err)
 	}
+	if !strings.Contains(record.OTLPError, "--otlp-endpoint must be an absolute http(s) URL with a host") {
+		t.Fatalf("best-effort invalid endpoint error = %q", record.OTLPError)
+	}
+	assertFileContains(t, filepath.Join(record.RunDir, "run.json"), `"otlp_status": "failed"`)
+	assertFileContains(t, filepath.Join(record.RunDir, "run.json"), `"otlp_error": "--otlp-endpoint`)
 	if got := stderr.String(); !strings.Contains(got, "acta: OTLP export disabled") ||
 		!strings.Contains(got, "--otlp-endpoint must be an absolute http(s) URL with a host") {
 		t.Fatalf("best-effort warning = %q, want invalid endpoint skip", got)
@@ -1222,6 +1228,26 @@ func TestRunBestEffortSkipsInvalidOTLPEndpointWithoutAmbientFallback(t *testing.
 	case <-requests:
 		t.Fatal("invalid explicit endpoint fell back to the ambient collector")
 	default:
+	}
+}
+
+func TestRunBestEffortRecordsInvalidEnvironmentOTLPEndpointFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	cwd := t.TempDir()
+	fakeBin := t.TempDir()
+	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
+		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "%invalid")
+
+	record, err := runForTest(context.Background(), Options{
+		Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test",
+	}, io.Discard, io.Discard)
+	if err != nil || record == nil || !record.OK || record.OTLPStatus != "failed" ||
+		!strings.Contains(record.OTLPError, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") || record.TraceID != "" {
+		t.Fatalf("best-effort invalid environment endpoint result = record %#v, err %v", record, err)
 	}
 }
 
@@ -1390,6 +1416,39 @@ func TestRunRedactReasoningRemovesTextFromEntireBundle(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRunRedactReasoningScrubsUnsupportedFutureEventFromEntireBundle(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	const secretReasoning = "private-future-event-thinking-8426"
+	cwd := t.TempDir()
+	fakeBin := t.TempDir()
+	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
+		`printf '{"type":"future.event","thinking":"`+secretReasoning+`"}\n'`+"\n"+
+		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	record, err := runForTest(context.Background(), Options{
+		Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test", RedactReasoning: true,
+	}, io.Discard, io.Discard)
+	if err == nil || record == nil || !strings.Contains(err.Error(), "unsupported event") {
+		t.Fatalf("record=%+v error=%v, want retained bundle with unsupported-event failure", record, err)
+	}
+	if record.ReasoningRedactionState != "redacted" {
+		t.Fatalf("reasoning redaction state = %q, want redacted", record.ReasoningRedactionState)
+	}
+	for _, name := range []string{record.RawStdoutArtifact, "digest.json", actaevents.Filename} {
+		payload, readErr := os.ReadFile(filepath.Join(record.RunDir, name))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if strings.Contains(string(payload), secretReasoning) ||
+			!strings.Contains(string(payload), reasoning.RedactedMarker) {
+			t.Errorf("unsupported future reasoning was not redacted in %s: %s", name, payload)
+		}
 	}
 }
 

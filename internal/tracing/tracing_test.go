@@ -3,9 +3,11 @@ package tracing
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/nobbettt/acta/internal/agents"
 	"github.com/nobbettt/acta/internal/runrecord"
@@ -188,6 +191,65 @@ func TestFinishSurfacesFlushError(t *testing.T) {
 	var nilRun *Run
 	if err := nilRun.Finish(&runrecord.Record{}, testStart); err != nil {
 		t.Fatalf("nil Run Finish should be a no-op, got %v", err)
+	}
+}
+
+type failFirstExporter struct {
+	mu          sync.Mutex
+	calls       int
+	firstExport chan struct{}
+}
+
+func (e *failFirstExporter) ExportSpans(context.Context, []sdktrace.ReadOnlySpan) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.calls++
+	if e.calls == 1 {
+		close(e.firstExport)
+		return errTestMidRunExport
+	}
+	return nil
+}
+
+func (*failFirstExporter) Shutdown(context.Context) error { return nil }
+
+func (e *failFirstExporter) Calls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.calls
+}
+
+var errTestMidRunExport = errorString("mid-run export boom")
+
+func TestFinishSurfacesEarlierAsynchronousBatchError(t *testing.T) {
+	exporter := &failFirstExporter{firstExport: make(chan struct{})}
+	capturingExporter := &errorCapturingExporter{exporter: exporter}
+	provider := sdktrace.NewTracerProvider(sdktrace.WithBatcher(
+		capturingExporter,
+		sdktrace.WithMaxExportBatchSize(1),
+		sdktrace.WithBatchTimeout(time.Hour),
+	))
+	r, err := newRun(context.Background(), provider, Config{Agent: "codex", RunID: "t", StartedAt: testStart})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.exportErrors = capturingExporter
+
+	span := r.startToolSpan("test", testStart.Add(time.Millisecond))
+	span.End(trace.WithTimestamp(testStart.Add(2 * time.Millisecond)))
+	select {
+	case <-exporter.firstExport:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the asynchronous mid-run export")
+	}
+
+	exit := 0
+	err = r.Finish(&runrecord.Record{OK: true, ExitCode: &exit}, testStart.Add(time.Second))
+	if !errors.Is(err, errTestMidRunExport) {
+		t.Fatalf("Finish error = %v, want retained mid-run batch error", err)
+	}
+	if calls := exporter.Calls(); calls < 2 {
+		t.Fatalf("export calls = %d, want failed mid-run batch and successful final batch", calls)
 	}
 }
 

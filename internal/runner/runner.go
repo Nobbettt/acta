@@ -309,6 +309,10 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 	otlpStatus := "not_configured"
 	otlpError := ""
 	var telemetryErr error
+	if otlpEndpointErr != nil {
+		otlpStatus = "failed"
+		otlpError = otlpEndpointErr.Error()
+	}
 	if tracing.Enabled(opts.OTLPEndpoint) {
 		otlpStatus = "configured"
 		traceStartedAt := time.Now().UTC()
@@ -758,8 +762,12 @@ func postRun(ctx context.Context, record *runrecord.Record, artifactDir string, 
 	// Finalize AFTER the diff is written so HasWorkspaceDiff sees it. No
 	// re-decode of the raw stream, no sidecar re-read — times are already set.
 	d := digester.Finalize(record, artifactDir)
-	if redactReasoning {
-		digest.RedactReasoning(d)
+	if redactReasoning && !digest.RedactReasoning(d) {
+		err := errors.New("reasoning redaction could not verify normalized digest payload")
+		record.ReasoningRedactionState = "failed"
+		fmt.Fprintf(stderr, "acta: %v\n", err)
+		postErr = errors.Join(postErr, err)
+		refreshOutcome()
 	}
 	digest.ReconcileRecord(record, d)
 	if !record.OK && priorErr == nil && postErr == nil {
