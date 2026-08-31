@@ -111,6 +111,8 @@ func (m *claudeMapper) onAssistantContent(r *Run, content *digest.ClaudeContent,
 		if strings.TrimSpace(content.Thinking) != "" {
 			r.addReasoningEvent(content.Thinking, at)
 		}
+	case "redacted_thinking":
+		r.addRedactedReasoningEvent(at)
 	}
 }
 

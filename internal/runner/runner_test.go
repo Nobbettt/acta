@@ -1750,6 +1750,32 @@ func TestRunRedactionFailurePublishesUnredactedEvidenceAndRefusesDefaultUpload(t
 	}
 }
 
+func TestRunRedactReasoningDoesNotReportScalarProviderRecordAsRedacted(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	const scalar = `"private reasoning"`
+	cwd := t.TempDir()
+	fakeBin := t.TempDir()
+	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
+		`printf '`+scalar+`\n'`+"\n"+
+		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	record, err := runForTest(context.Background(), Options{
+		Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test", RedactReasoning: true,
+	}, io.Discard, io.Discard)
+	if err == nil || record == nil {
+		t.Fatalf("record=%+v error=%v, want scalar-envelope redaction failure", record, err)
+	}
+	if record.ReasoningRedactionState != "failed" {
+		t.Fatalf("reasoning redaction state = %q, want failed", record.ReasoningRedactionState)
+	}
+	if raw := readFile(t, filepath.Join(record.RunDir, record.RawStdoutArtifact)); !strings.Contains(raw, scalar) {
+		t.Fatalf("failed redaction did not retain the scalar evidence: %q", raw)
+	}
+}
+
 // Run ids must be unique — the timestamp is only second-granular, so uniqueness
 // rests on the random suffix. A collision would let one run overwrite another's
 // bundle (guarded belt-and-suspenders by os.Mkdir on the run dir).

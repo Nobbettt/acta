@@ -126,6 +126,52 @@ func TestReasoningTextNeverEntersTelemetry(t *testing.T) {
 	}
 }
 
+func TestClaudeRedactedThinkingEntersTelemetryWithoutPayload(t *testing.T) {
+	const (
+		thinking = "private thinking"
+		data     = "opaque redacted thinking data"
+	)
+	recorder, run := newTestRunOutput(t, "claude", true)
+	run.OnLine([]byte(`{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"`+thinking+`"},{"type":"redacted_thinking","data":"`+data+`"}]}}`), testStart.Add(time.Millisecond))
+	finish(t, run, true, testStart.Add(time.Second))
+
+	var thinkingEvents, redactedEvents int
+	for _, span := range recorder.Ended() {
+		for _, event := range span.Events() {
+			if event.Name != "acta.reasoning" {
+				continue
+			}
+			chars := -1
+			redacted := false
+			for _, value := range event.Attributes {
+				if value.Key == "text" || value.Key == "data" || strings.Contains(fmt.Sprint(value.Value.AsInterface()), thinking) || strings.Contains(fmt.Sprint(value.Value.AsInterface()), data) {
+					t.Fatalf("reasoning event attribute %s leaked payload", value.Key)
+				}
+				switch value.Key {
+				case attrEventChars:
+					chars = int(value.Value.AsInt64())
+				case attrEventRedacted:
+					redacted = value.Value.AsBool()
+				}
+			}
+			if redacted {
+				redactedEvents++
+				if chars != 0 {
+					t.Errorf("redacted reasoning chars = %d, want 0", chars)
+				}
+			} else {
+				thinkingEvents++
+				if chars != len(thinking) {
+					t.Errorf("thinking chars = %d, want %d", chars, len(thinking))
+				}
+			}
+		}
+	}
+	if thinkingEvents != 1 || redactedEvents != 1 {
+		t.Fatalf("reasoning events = thinking %d, redacted %d; want 1 each", thinkingEvents, redactedEvents)
+	}
+}
+
 func TestDuplicateProviderKeysNeverEnterTelemetry(t *testing.T) {
 	const secret = "secret"
 	recorder, run := newTestRunOutput(t, "codex", true)

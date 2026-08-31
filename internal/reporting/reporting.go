@@ -1112,7 +1112,11 @@ func redactArtifactSnapshot(ctx context.Context, file *os.File, kind, path strin
 		}
 		return true, redactJSONDocumentSnapshot(ctx, file)
 	case artifactJSONLines:
-		return true, rewriteJSONLSnapshot(ctx, file, maxLineBytes, redactProviderReasoningLine)
+		err := rewriteJSONLSnapshot(ctx, file, maxLineBytes, redactProviderReasoningLine)
+		if errors.Is(err, errProviderRedactionUnverified) {
+			return false, nil
+		}
+		return true, err
 	case artifactActaEventStream:
 		return true, redactActaEventSnapshot(ctx, file, maxLineBytes)
 	default:
@@ -1684,6 +1688,8 @@ func replaceSnapshotFromReader(ctx context.Context, file *os.File, source io.Rea
 
 var errRedactionLineTooLong = errors.New("redaction line too long")
 
+var errProviderRedactionUnverified = errors.New("provider event reasoning redaction could not be verified")
+
 func readBoundedJSONLLine(reader *bufio.Reader, maxLineBytes int) ([]byte, error) {
 	line := make([]byte, 0, min(maxLineBytes, 64<<10))
 	for {
@@ -1705,7 +1711,7 @@ func redactProviderReasoningLine(line []byte) ([]byte, error) {
 		return nil, err
 	}
 	if !verified {
-		return nil, errors.New("provider event reasoning redaction could not be verified")
+		return nil, errProviderRedactionUnverified
 	}
 	return redacted, nil
 }
@@ -1717,6 +1723,9 @@ func redactProviderReasoningLineVerified(line []byte) ([]byte, bool, error) {
 	}
 	var value any
 	if err := reasoning.UnmarshalProviderLine(payload, &value); err != nil {
+		if errors.Is(err, reasoning.ErrInvalidProviderEnvelope) {
+			return line, false, nil
+		}
 		return nil, false, fmt.Errorf("parse provider event for remote reasoning redaction: %w", err)
 	}
 	traversal := reasoning.ProviderTraversal()

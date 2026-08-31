@@ -805,6 +805,57 @@ func TestUploadRunRedactsRemoteReasoningByDefaultForEveryAgentShape(t *testing.T
 	}
 }
 
+func TestUploadRunWithholdsScalarProviderRecords(t *testing.T) {
+	tests := map[string]string{
+		"string":  `"private reasoning"`,
+		"number":  "42",
+		"boolean": "true",
+	}
+	for name, scalar := range tests {
+		t.Run(name, func(t *testing.T) {
+			runDir := writeBundle(t)
+			const rawName = "codex-events.jsonl"
+			writeFile(t, filepath.Join(runDir, rawName), scalar+"\n")
+			addArtifactRef(t, runDir, `{"kind":"raw_stdout","path":"`+rawName+`"}`)
+
+			uploaded := map[string]bool{}
+			var remoteEvents []actaevents.Event
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				switch request.URL.Path {
+				case "/api/ingest/runs/run-1/events":
+					var body eventsRequest
+					if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+						t.Error(err)
+					}
+					remoteEvents = append(remoteEvents, body.Events...)
+				case "/api/ingest/runs/run-1/artifacts":
+					uploaded[request.URL.Query().Get("filename")] = true
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+
+			if err := UploadRun(context.Background(), Config{
+				BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+			}, testRecord(runDir)); err != nil {
+				t.Fatalf("UploadRun() rejected an unverifiable provider scalar: %v", err)
+			}
+			if uploaded[rawName] {
+				t.Fatal("provider scalar was uploaded unchanged as redacted")
+			}
+			for _, event := range remoteEvents {
+				for _, ref := range event.ArtifactRefs {
+					if ref.Path == rawName && ref.Status == actaevents.ArtifactStatusWithheld &&
+						ref.Reason == withheldArtifactReason && ref.RedactionState == actaevents.ArtifactRedactionStateUnverified {
+						return
+					}
+				}
+			}
+			t.Fatalf("remote manifest did not mark provider scalar withheld/unverified: %#v", remoteEvents)
+		})
+	}
+}
+
 func TestUploadRunRedactsReasoningKindDespiteFutureType(t *testing.T) {
 	const (
 		rawName = "codex-events.jsonl"

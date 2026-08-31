@@ -478,3 +478,10 @@ func (r *Run) addReasoningEvent(text string, at time.Time) {
 		attrEventChars.Int(utf8.RuneCountInString(text)),
 	))
 }
+
+func (r *Run) addRedactedReasoningEvent(at time.Time) {
+	r.root.AddEvent("acta.reasoning", trace.WithTimestamp(at), trace.WithAttributes(
+		attrEventChars.Int(0),
+		attrEventRedacted.Bool(true),
+	))
+}

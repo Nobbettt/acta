@@ -4,9 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 )
+
+// ErrInvalidProviderEnvelope reports a complete JSON provider line whose
+// top-level value is not an object envelope.
+var ErrInvalidProviderEnvelope = errors.New("provider line is not a JSON object envelope")
 
 // ValidateUniqueObjectKeys verifies that payload is one complete JSON value
 // and rejects duplicate keys at any object depth. Redaction callers must run
@@ -17,11 +22,15 @@ func ValidateUniqueObjectKeys(payload []byte) error {
 }
 
 // UnmarshalProviderLine is the single decode boundary for raw provider lines.
-// It rejects duplicate object keys at any depth before decoding can apply
-// encoding/json's last-key-wins behavior.
+// It requires an object envelope and rejects duplicate keys at any depth
+// before decoding can apply encoding/json's last-key-wins behavior.
 func UnmarshalProviderLine(payload []byte, value any) error {
 	if err := ValidateUniqueObjectKeys(payload); err != nil {
 		return err
+	}
+	trimmed := bytes.TrimSpace(payload)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return ErrInvalidProviderEnvelope
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.UseNumber()

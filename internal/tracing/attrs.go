@@ -38,6 +38,7 @@ const (
 	attrFilePath        = attribute.Key("acta.file.path")
 	attrCommandExitCode = attribute.Key("acta.command.exit_code")
 	attrEventChars      = attribute.Key("acta.event.chars")
+	attrEventRedacted   = attribute.Key("acta.event.redacted")
 )
 
 // Attribute size caps. Content that can carry secrets or local paths —
