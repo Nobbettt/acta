@@ -26,6 +26,7 @@ import (
 	"github.com/nobbettt/acta/internal/digest"
 	"github.com/nobbettt/acta/internal/runrecord"
 	"github.com/nobbettt/acta/internal/schemaversion"
+	"github.com/nobbettt/acta/internal/securefile"
 )
 
 func TestWriterEventBudgetFitsUploadEnvelope(t *testing.T) {
@@ -200,6 +201,125 @@ func TestUploadRunPostsRunEventsArtifactsAndCompletion(t *testing.T) {
 	}
 	if completeMetadata.TerminationReason != "completed" {
 		t.Fatalf("completion termination_reason = %#v, want completed", completeMetadata.TerminationReason)
+	}
+}
+
+func TestUploadRunRetriesChangedProjectionGeneration(t *testing.T) {
+	runDir := writeBundle(t)
+	oldDigest := readTestFile(t, filepath.Join(runDir, "digest.json"))
+	oldEvents := readTestFile(t, filepath.Join(runDir, actaevents.Filename))
+	writeProjectionGeneration(t, runDir, "100", oldDigest, oldEvents)
+
+	newDigest := `{"run_id":"run-1","generation":"new"}` + "\n"
+	newEvents := strings.Replace(oldEvents, `"duration_ms":1000`, `"duration_ms":2000`, 1)
+	var attempts []int
+	var uploadedDigest string
+	var uploadedDuration int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/api/ingest/runs/run-1/events" {
+			var body eventsRequest
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			for _, event := range body.Events {
+				if event.Type == actaevents.TypeRunCompleted {
+					var payload struct {
+						DurationMillis int64 `json:"duration_ms"`
+					}
+					if err := json.Unmarshal(event.Payload, &payload); err != nil {
+						t.Error(err)
+					}
+					uploadedDuration = payload.DurationMillis
+				}
+			}
+		}
+		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == "digest.json" {
+			payload, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Error(err)
+			}
+			uploadedDigest = string(payload)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	err := UploadRun(context.Background(), Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+		AllowUnredactedRemoteReasoning: true,
+		projectionSnapshotHook: func(attempt int) {
+			attempts = append(attempts, attempt)
+			if attempt == 1 {
+				writeProjectionGeneration(t, runDir, "200", newDigest, newEvents)
+			}
+		},
+	}, testRecord(runDir))
+	if err != nil {
+		t.Fatalf("UploadRun() error = %v", err)
+	}
+	if len(attempts) != 2 {
+		t.Fatalf("projection snapshot attempts = %v, want [1 2]", attempts)
+	}
+	if uploadedDigest != newDigest || uploadedDuration != 2000 {
+		t.Fatalf("uploaded generation digest/duration = %q/%d, want new generation %q/2000", uploadedDigest, uploadedDuration, newDigest)
+	}
+}
+
+func TestUploadRunRejectsRepeatedlyChangingProjectionBeforeUpload(t *testing.T) {
+	runDir := writeBundle(t)
+	events := readTestFile(t, filepath.Join(runDir, actaevents.Filename))
+	writeProjectionGeneration(t, runDir, "100", readTestFile(t, filepath.Join(runDir, "digest.json")), events)
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	var attempts []int
+	err := UploadRun(context.Background(), Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+		AllowUnredactedRemoteReasoning: true,
+		projectionSnapshotHook: func(attempt int) {
+			attempts = append(attempts, attempt)
+			digestPayload := fmt.Sprintf("{\"run_id\":\"run-1\",\"attempt\":%d}\n", attempt)
+			writeProjectionGeneration(t, runDir, strconv.Itoa(100+attempt), digestPayload, events)
+		},
+	}, testRecord(runDir))
+	if err == nil || !strings.Contains(err.Error(), "torn bundle") || !strings.Contains(err.Error(), "after 3 attempts") {
+		t.Fatalf("UploadRun() error = %v, want bounded torn-bundle error", err)
+	}
+	if len(attempts) != maxProjectionSnapshotAttempts {
+		t.Fatalf("projection snapshot attempts = %v, want %d attempts", attempts, maxProjectionSnapshotAttempts)
+	}
+	if requests != 0 {
+		t.Fatalf("torn bundle issued %d upload requests, want none", requests)
+	}
+}
+
+func TestUploadRunSteadyProjectionUsesSinglePass(t *testing.T) {
+	runDir := writeBundle(t)
+	digestPayload := readTestFile(t, filepath.Join(runDir, "digest.json"))
+	eventsPayload := readTestFile(t, filepath.Join(runDir, actaevents.Filename))
+	writeProjectionGeneration(t, runDir, "100", digestPayload, eventsPayload)
+
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	err := UploadRun(context.Background(), Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+		AllowUnredactedRemoteReasoning: true,
+		projectionSnapshotHook: func(int) {
+			attempts++
+		},
+	}, testRecord(runDir))
+	if err != nil {
+		t.Fatalf("UploadRun() error = %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("projection snapshot passes = %d, want 1", attempts)
 	}
 }
 
@@ -555,7 +675,7 @@ func TestUploadRunWithholdsAmbiguousOpaqueStderrByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	artifacts, err := buildArtifactsContext(context.Background(), runDir, refs, eventFile, eventTempPath, 0, true, DefaultMaxRedactionLineBytes)
+	artifacts, err := buildArtifactsContext(context.Background(), runDir, refs, eventFile, eventTempPath, nil, 0, true, DefaultMaxRedactionLineBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2499,6 +2619,38 @@ func writeBundle(t *testing.T) string {
 		"",
 	}, "\n"))
 	return runDir
+}
+
+func writeProjectionGeneration(t *testing.T, runDir, generation, digestPayload, eventsPayload string) {
+	t.Helper()
+	manifestPayload, err := json.Marshal(struct {
+		SchemaVersion int                `json:"schema_version"`
+		Producer      runrecord.Producer `json:"producer"`
+		Generation    string             `json:"generation"`
+		DigestSHA256  string             `json:"digest_sha256"`
+		EventsSHA256  string             `json:"events_sha256"`
+	}{
+		SchemaVersion: actaevents.ProjectionSchemaVersion,
+		Producer:      runrecord.Producer{Name: "acta", Version: "test"},
+		Generation:    generation,
+		DigestSHA256:  fmt.Sprintf("%x", sha256.Sum256([]byte(digestPayload))),
+		EventsSHA256:  fmt.Sprintf("%x", sha256.Sum256([]byte(eventsPayload))),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, artifact := range []struct {
+		name    string
+		payload []byte
+	}{
+		{name: "digest.json", payload: []byte(digestPayload)},
+		{name: actaevents.Filename, payload: []byte(eventsPayload)},
+		{name: "projection.json", payload: append(manifestPayload, '\n')},
+	} {
+		if err := securefile.WriteFile(filepath.Join(runDir, artifact.name), artifact.payload); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func addArtifactRef(t *testing.T, runDir, ref string) {

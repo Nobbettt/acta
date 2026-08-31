@@ -47,6 +47,8 @@ type Config struct {
 	// MaxRedactionLineBytes bounds one JSONL record while preparing redacted
 	// upload snapshots. Zero selects DefaultMaxRedactionLineBytes.
 	MaxRedactionLineBytes int
+	// projectionSnapshotHook is a test seam invoked after each manifest read.
+	projectionSnapshotHook func(attempt int)
 }
 
 const (
@@ -56,6 +58,8 @@ const (
 	DefaultMaxRedactionLineBytes        = 8 << 20
 	maxRedactionJSONDocumentBytes int64 = 64 << 20
 	withheldArtifactReason              = "reasoning_redaction_unverified"
+	maxProjectionManifestBytes    int64 = 64 << 10
+	maxProjectionSnapshotAttempts       = 3
 )
 
 type createRunRequest struct {
@@ -92,6 +96,19 @@ type artifactUpload struct {
 	File           *os.File
 	TempPath       string
 	Withheld       bool `json:"-"`
+}
+
+type artifactSnapshot struct {
+	File     *os.File
+	TempPath string
+}
+
+type projectionManifest struct {
+	SchemaVersion int                `json:"schema_version"`
+	Producer      runrecord.Producer `json:"producer"`
+	Generation    string             `json:"generation"`
+	DigestSHA256  string             `json:"digest_sha256"`
+	EventsSHA256  string             `json:"events_sha256"`
 }
 
 type completionMetadata struct {
@@ -186,7 +203,7 @@ func UploadRun(ctx context.Context, cfg Config, record *runrecord.Record) error 
 	if !redactRemoteReasoning {
 		remoteRedactionState = "unredacted"
 	}
-	eventFile, eventTempPath, err := snapshotEventStreamLimit(ctx, record.RunDir, artifactLimit)
+	eventFile, eventTempPath, artifacts, err := prepareUploadSnapshotContext(ctx, record, artifactLimit, redactRemoteReasoning, maxRedactionLineBytes, cfg.projectionSnapshotHook)
 	if err != nil {
 		return err
 	}
@@ -194,22 +211,6 @@ func UploadRun(ctx context.Context, cfg Config, record *runrecord.Record) error 
 		_ = eventFile.Close()
 		_ = os.Remove(eventTempPath)
 	}()
-	artifactRefs, err := terminalArtifactRefsFromFile(ctx, eventFile, record)
-	if err != nil {
-		return err
-	}
-	if redactRemoteReasoning {
-		if _, err := redactArtifactSnapshot(ctx, eventFile, "event_stream", actaevents.Filename, maxRedactionLineBytes); err != nil {
-			return fmt.Errorf("redact reasoning from event snapshot: %w", err)
-		}
-		if _, err := scanEventsFile(ctx, eventFile, record.ID, nil); err != nil {
-			return fmt.Errorf("validate redacted replay event snapshot: %w", err)
-		}
-	}
-	artifacts, err := buildArtifactsContext(ctx, record.RunDir, artifactRefs, eventFile, eventTempPath, artifactLimit, redactRemoteReasoning, maxRedactionLineBytes)
-	if err != nil {
-		return err
-	}
 	defer closeArtifacts(artifacts)
 	annotated, err := annotateWithheldArtifactRefsContext(ctx, eventFile, record.ID, artifacts)
 	if err != nil {
@@ -771,7 +772,244 @@ func dedupeArtifactRefs(refs []actaevents.ArtifactRef) []actaevents.ArtifactRef 
 	return out
 }
 
-func buildArtifactsContext(ctx context.Context, runDir string, refs []actaevents.ArtifactRef, eventFile *os.File, eventTempPath string, maxBytes int64, redactReasoning bool, maxRedactionLineBytes int) ([]artifactUpload, error) {
+func prepareUploadSnapshotContext(ctx context.Context, record *runrecord.Record, maxBytes int64, redactReasoning bool, maxRedactionLineBytes int, hook func(int)) (*os.File, string, []artifactUpload, error) {
+	for attempt := 1; attempt <= maxProjectionSnapshotAttempts; attempt++ {
+		snapshots, manifestPresent, retry, err := snapshotProjectionArtifactsContext(ctx, record.RunDir, maxBytes, attempt, hook)
+		if err != nil {
+			return nil, "", nil, err
+		}
+		if retry {
+			continue
+		}
+		eventSnapshot := snapshots[actaevents.Filename]
+		artifactRefs, err := terminalArtifactRefsFromFile(ctx, eventSnapshot.File, record)
+		if err != nil {
+			closeArtifactSnapshots(snapshots)
+			return nil, "", nil, err
+		}
+		if redactReasoning {
+			if _, err := redactArtifactSnapshot(ctx, eventSnapshot.File, "event_stream", actaevents.Filename, maxRedactionLineBytes); err != nil {
+				closeArtifactSnapshots(snapshots)
+				return nil, "", nil, fmt.Errorf("redact reasoning from event snapshot: %w", err)
+			}
+			if _, err := scanEventsFile(ctx, eventSnapshot.File, record.ID, nil); err != nil {
+				closeArtifactSnapshots(snapshots)
+				return nil, "", nil, fmt.Errorf("validate redacted replay event snapshot: %w", err)
+			}
+		}
+		artifacts, err := buildArtifactsContext(ctx, record.RunDir, artifactRefs, eventSnapshot.File, eventSnapshot.TempPath, snapshots, maxBytes, redactReasoning, maxRedactionLineBytes)
+		if err != nil {
+			closeArtifactSnapshots(snapshots)
+			return nil, "", nil, err
+		}
+		if !manifestPresent {
+			if _, err := os.Stat(filepath.Join(record.RunDir, "projection.json")); err == nil {
+				closeArtifacts(artifacts)
+				closeArtifactSnapshots(snapshots)
+				continue
+			} else if !errors.Is(err, os.ErrNotExist) {
+				closeArtifacts(artifacts)
+				closeArtifactSnapshots(snapshots)
+				return nil, "", nil, fmt.Errorf("re-stat projection manifest: %w", err)
+			}
+		}
+		closeUnusedArtifactSnapshots(snapshots, eventSnapshot.File, artifacts)
+		return eventSnapshot.File, eventSnapshot.TempPath, artifacts, nil
+	}
+	return nil, "", nil, fmt.Errorf("torn bundle: projection generation changed while opening artifacts after %d attempts", maxProjectionSnapshotAttempts)
+}
+
+func snapshotProjectionArtifactsContext(ctx context.Context, runDir string, maxBytes int64, attempt int, hook func(int)) (map[string]artifactSnapshot, bool, bool, error) {
+	resolvedRunDir, err := filepath.EvalSymlinks(runDir)
+	if err != nil {
+		return nil, false, false, fmt.Errorf("resolve run directory: %w", err)
+	}
+	manifestPath := filepath.Join(runDir, "projection.json")
+	manifestFile, err := securefile.OpenRegular(resolvedRunDir, manifestPath)
+	if errors.Is(err, os.ErrNotExist) {
+		if hook != nil {
+			hook(attempt)
+		}
+		eventPath := filepath.Join(runDir, actaevents.Filename)
+		eventSource, openErr := securefile.OpenRegular(resolvedRunDir, eventPath)
+		if openErr != nil {
+			if _, statErr := os.Stat(manifestPath); statErr == nil {
+				return nil, false, true, nil
+			}
+			return nil, false, false, openErr
+		}
+		defer eventSource.Close()
+		if _, statErr := os.Stat(manifestPath); statErr == nil {
+			return nil, false, true, nil
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return nil, false, false, fmt.Errorf("re-stat projection manifest: %w", statErr)
+		}
+		eventFile, eventTempPath, snapshotErr := snapshotOpenFileContext(ctx, eventSource, maxBytes, "")
+		if snapshotErr != nil {
+			return nil, false, false, snapshotErr
+		}
+		return map[string]artifactSnapshot{
+			actaevents.Filename: {File: eventFile, TempPath: eventTempPath},
+		}, false, false, nil
+	}
+	if err != nil {
+		return nil, false, false, fmt.Errorf("open projection manifest: %w", err)
+	}
+	defer manifestFile.Close()
+	manifestInfo, err := manifestFile.Stat()
+	if err != nil {
+		return nil, false, false, fmt.Errorf("stat projection manifest: %w", err)
+	}
+	manifestPayload, err := readBoundedFile(manifestFile, maxProjectionManifestBytes)
+	if err != nil {
+		return nil, false, false, fmt.Errorf("read projection manifest: %w", err)
+	}
+	manifest, err := decodeProjectionManifest(manifestPayload)
+	if err != nil {
+		return nil, false, false, err
+	}
+	manifestHash := sha256.Sum256(manifestPayload)
+	if hook != nil {
+		hook(attempt)
+	}
+
+	expectedHashes := map[string]string{
+		"digest.json":       manifest.DigestSHA256,
+		actaevents.Filename: manifest.EventsSHA256,
+	}
+	sources := make(map[string]*os.File, len(expectedHashes))
+	defer func() {
+		for _, source := range sources {
+			_ = source.Close()
+		}
+	}()
+	for _, name := range []string{"digest.json", actaevents.Filename} {
+		source, openErr := securefile.OpenRegular(resolvedRunDir, filepath.Join(runDir, name))
+		if openErr != nil {
+			if err := ctx.Err(); err != nil {
+				return nil, false, false, err
+			}
+			return nil, true, true, nil
+		}
+		sources[name] = source
+	}
+	same, err := projectionManifestUnchanged(resolvedRunDir, manifestPath, manifestInfo, manifestHash)
+	if err != nil {
+		return nil, true, false, err
+	}
+	if !same {
+		return nil, true, true, nil
+	}
+
+	snapshots := make(map[string]artifactSnapshot, len(sources))
+	for _, name := range []string{actaevents.Filename, "digest.json"} {
+		file, tempPath, snapshotErr := snapshotOpenFileContext(ctx, sources[name], maxBytes, expectedHashes[name])
+		if snapshotErr != nil {
+			closeArtifactSnapshots(snapshots)
+			if strings.Contains(snapshotErr.Error(), "does not match projection manifest") {
+				return nil, true, true, nil
+			}
+			return nil, true, false, snapshotErr
+		}
+		snapshots[name] = artifactSnapshot{File: file, TempPath: tempPath}
+	}
+	return snapshots, true, false, nil
+}
+
+func projectionManifestUnchanged(root, path string, firstInfo os.FileInfo, firstHash [sha256.Size]byte) (bool, error) {
+	current, err := securefile.OpenRegular(root, path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reopen projection manifest: %w", err)
+	}
+	defer current.Close()
+	payload, err := readBoundedFile(current, maxProjectionManifestBytes)
+	if err != nil {
+		return false, fmt.Errorf("re-read projection manifest: %w", err)
+	}
+	currentInfo, err := current.Stat()
+	if err != nil {
+		return false, fmt.Errorf("re-stat opened projection manifest: %w", err)
+	}
+	pathInfo, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("re-stat projection manifest path: %w", err)
+	}
+	return os.SameFile(firstInfo, currentInfo) && os.SameFile(currentInfo, pathInfo) && firstHash == sha256.Sum256(payload), nil
+}
+
+func decodeProjectionManifest(payload []byte) (projectionManifest, error) {
+	var manifest projectionManifest
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&manifest); err != nil {
+		return manifest, fmt.Errorf("decode projection manifest: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return manifest, errors.New("decode projection manifest: trailing JSON value")
+	}
+	if manifest.SchemaVersion != actaevents.ProjectionSchemaVersion {
+		return manifest, fmt.Errorf("projection manifest has unsupported schema_version %d", manifest.SchemaVersion)
+	}
+	if strings.TrimSpace(manifest.Producer.Name) == "" || strings.TrimSpace(manifest.Producer.Version) == "" {
+		return manifest, errors.New("projection manifest producer name and version are required")
+	}
+	if manifest.Generation == "" || strings.Trim(manifest.Generation, "0123456789") != "" {
+		return manifest, errors.New("projection manifest generation must contain only digits")
+	}
+	for name, value := range map[string]string{"digest_sha256": manifest.DigestSHA256, "events_sha256": manifest.EventsSHA256} {
+		decoded, err := hex.DecodeString(value)
+		if err != nil || len(decoded) != sha256.Size || value != strings.ToLower(value) {
+			return manifest, fmt.Errorf("projection manifest %s must be a lowercase SHA-256 digest", name)
+		}
+	}
+	return manifest, nil
+}
+
+func readBoundedFile(file *os.File, maxBytes int64) ([]byte, error) {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	payload, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(payload)) > maxBytes {
+		return nil, fmt.Errorf("file exceeds %d-byte limit", maxBytes)
+	}
+	return payload, nil
+}
+
+func closeArtifactSnapshots(snapshots map[string]artifactSnapshot) {
+	for _, snapshot := range snapshots {
+		if snapshot.File != nil {
+			_ = snapshot.File.Close()
+		}
+		if snapshot.TempPath != "" {
+			_ = os.Remove(snapshot.TempPath)
+		}
+	}
+}
+
+func closeUnusedArtifactSnapshots(snapshots map[string]artifactSnapshot, eventFile *os.File, artifacts []artifactUpload) {
+	used := map[*os.File]bool{eventFile: true}
+	for _, artifact := range artifacts {
+		used[artifact.File] = true
+	}
+	for _, snapshot := range snapshots {
+		if !used[snapshot.File] {
+			_ = snapshot.File.Close()
+			_ = os.Remove(snapshot.TempPath)
+		}
+	}
+}
+
+func buildArtifactsContext(ctx context.Context, runDir string, refs []actaevents.ArtifactRef, eventFile *os.File, eventTempPath string, snapshots map[string]artifactSnapshot, maxBytes int64, redactReasoning bool, maxRedactionLineBytes int) ([]artifactUpload, error) {
 	resolvedRunDir, err := filepath.EvalSymlinks(runDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve run directory: %w", err)
@@ -793,6 +1031,12 @@ func buildArtifactsContext(ctx context.Context, runDir string, refs []actaevents
 		for _, ref := range refs {
 			if isCanonicalEventArtifact(ref.Path) && eventFile != nil {
 				continue
+			} else if snapshot, ok := snapshots[ref.Path]; ok {
+				info, statErr := snapshot.File.Stat()
+				if statErr != nil {
+					return nil, fmt.Errorf("stat artifact snapshot %s: %w", ref.Path, statErr)
+				}
+				plannedBytes += info.Size()
 			} else {
 				plannedPath, pathErr := artifactPath(runDir, ref.Path)
 				if pathErr != nil {
@@ -823,6 +1067,8 @@ func buildArtifactsContext(ctx context.Context, runDir string, refs []actaevents
 		if isCanonicalEventArtifact(ref.Path) && eventFile != nil {
 			file, tempPath = eventFile, eventTempPath
 			redactionRequired = true
+		} else if snapshot, ok := snapshots[ref.Path]; ok {
+			file, tempPath = snapshot.File, snapshot.TempPath
 		} else {
 			remaining := int64(0)
 			if maxBytes > 0 {
@@ -2346,6 +2592,16 @@ func snapshotRegularFile(ctx context.Context, root, path string, maxBytes int64)
 		return nil, "", err
 	}
 	defer source.Close()
+	return snapshotOpenFileContext(ctx, source, maxBytes, "")
+}
+
+// snapshotOpenFileContext copies an already-pinned source into a private
+// temporary file. An expected hash supplied by projection.json authoritatively
+// binds the copied bytes to that projection generation.
+func snapshotOpenFileContext(ctx context.Context, source *os.File, maxBytes int64, expectedHash string) (*os.File, string, error) {
+	if _, err := source.Seek(0, io.SeekStart); err != nil {
+		return nil, "", err
+	}
 	temp, err := os.CreateTemp("", "acta-upload-snapshot-*")
 	if err != nil {
 		return nil, "", err
@@ -2367,7 +2623,7 @@ func snapshotRegularFile(ctx context.Context, root, path string, maxBytes int64)
 		if n > 0 {
 			if maxBytes > 0 && copied+int64(n) > maxBytes {
 				cleanup()
-				return nil, "", fmt.Errorf("file exceeded remaining upload snapshot budget of %d bytes", maxBytes)
+				return nil, "", fmt.Errorf("file exceeded remaining upload snapshot maximum of %d bytes", maxBytes)
 			}
 			if _, err := temp.Write(buffer[:n]); err != nil {
 				cleanup()
@@ -2385,6 +2641,10 @@ func snapshotRegularFile(ctx context.Context, root, path string, maxBytes int64)
 		}
 	}
 	copyHash := hex.EncodeToString(hasher.Sum(nil))
+	if expectedHash != "" && copyHash != expectedHash {
+		cleanup()
+		return nil, "", fmt.Errorf("opened artifact SHA-256 %s does not match projection manifest %s", copyHash, expectedHash)
+	}
 	sourceHash, _, err := hashFileContext(ctx, source)
 	if err != nil {
 		cleanup()

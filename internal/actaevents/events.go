@@ -544,6 +544,23 @@ func WriteProjectionForRunDir(runDir string, d *digest.Digest) error {
 	manifestPayload = append(manifestPayload, '\n')
 	finals := []string{"digest.json", Filename, "projection.json"}
 	payloads := [][]byte{digestPayload, eventPayload, manifestPayload}
+	return commitProjection(runDir, generation, finals, payloads, nil)
+}
+
+func commitProjection(runDir, generation string, finals []string, payloads [][]byte, afterLock func() error) (returnErr error) {
+	lock, err := lockProjection(filepath.Join(runDir, ".projection.lock"))
+	if err != nil {
+		return fmt.Errorf("lock projection commit: %w", err)
+	}
+	defer func() {
+		returnErr = errors.Join(returnErr, lock.close())
+	}()
+	if afterLock != nil {
+		if err := afterLock(); err != nil {
+			return fmt.Errorf("prepare projection commit: %w", err)
+		}
+	}
+
 	staged := make([]string, len(finals))
 	backups := make([]string, len(finals))
 	for index := range finals {

@@ -2,7 +2,9 @@ package actaevents
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -510,6 +512,125 @@ func TestWriteForRunDirRejectsPromptFromAnotherRun(t *testing.T) {
 	err = WriteForRunDir(dir, &digest.Digest{Status: "ok"})
 	if err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("WriteForRunDir() error = %v, want run-id mismatch", err)
+	}
+}
+
+func TestConcurrentProjectionCommitsSerializeGenerations(t *testing.T) {
+	runDir := t.TempDir()
+	firstFinals, firstPayloads := projectionCommitFixture(t, "100", "first digest\n", "first events\n")
+	secondFinals, secondPayloads := projectionCommitFixture(t, "200", "second digest\n", "second events\n")
+
+	firstLocked := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- commitProjection(runDir, "100", firstFinals, firstPayloads, func() error {
+			close(firstLocked)
+			<-releaseFirst
+			return nil
+		})
+	}()
+	<-firstLocked
+
+	secondLocked := make(chan struct{})
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- commitProjection(runDir, "200", secondFinals, secondPayloads, func() error {
+			close(secondLocked)
+			return nil
+		})
+	}()
+	select {
+	case <-secondLocked:
+		t.Fatal("second projection commit acquired the per-bundle lock before the first released it")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first projection commit: %v", err)
+	}
+	select {
+	case <-secondLocked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("second projection commit did not acquire the released lock")
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second projection commit: %v", err)
+	}
+	assertProjectionGeneration(t, runDir, secondPayloads)
+}
+
+func TestProjectionCommitLockReleasedAfterFailure(t *testing.T) {
+	runDir := t.TempDir()
+	finals, failedPayloads := projectionCommitFixture(t, "100", "failed digest\n", "failed events\n")
+	err := commitProjection(runDir, "100", finals, failedPayloads, func() error {
+		return errors.New("injected commit failure")
+	})
+	if err == nil || !strings.Contains(err.Error(), "injected commit failure") {
+		t.Fatalf("failed projection commit error = %v", err)
+	}
+
+	_, goodPayloads := projectionCommitFixture(t, "200", "good digest\n", "good events\n")
+	done := make(chan error, 1)
+	go func() {
+		done <- commitProjection(runDir, "200", finals, goodPayloads, nil)
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("projection commit after failure: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("projection lock remained held after a failed commit")
+	}
+	assertProjectionGeneration(t, runDir, goodPayloads)
+}
+
+func projectionCommitFixture(t *testing.T, generation, digestPayload, eventsPayload string) ([]string, [][]byte) {
+	t.Helper()
+	manifestPayload, err := json.Marshal(struct {
+		SchemaVersion int                `json:"schema_version"`
+		Producer      runrecord.Producer `json:"producer"`
+		Generation    string             `json:"generation"`
+		DigestSHA256  string             `json:"digest_sha256"`
+		EventsSHA256  string             `json:"events_sha256"`
+	}{
+		SchemaVersion: ProjectionSchemaVersion,
+		Producer:      runrecord.Producer{Name: "acta", Version: "test"},
+		Generation:    generation,
+		DigestSHA256:  fmt.Sprintf("%x", sha256.Sum256([]byte(digestPayload))),
+		EventsSHA256:  fmt.Sprintf("%x", sha256.Sum256([]byte(eventsPayload))),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return []string{"digest.json", Filename, "projection.json"}, [][]byte{
+		[]byte(digestPayload), []byte(eventsPayload), append(manifestPayload, '\n'),
+	}
+}
+
+func assertProjectionGeneration(t *testing.T, runDir string, wantPayloads [][]byte) {
+	t.Helper()
+	for index, name := range []string{"digest.json", Filename, "projection.json"} {
+		payload, err := os.ReadFile(filepath.Join(runDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(payload) != string(wantPayloads[index]) {
+			t.Fatalf("%s = %q, want one complete generation %q", name, payload, wantPayloads[index])
+		}
+	}
+	var manifest struct {
+		DigestSHA256 string `json:"digest_sha256"`
+		EventsSHA256 string `json:"events_sha256"`
+	}
+	if err := json.Unmarshal(wantPayloads[2], &manifest); err != nil {
+		t.Fatal(err)
+	}
+	for index, wantHash := range []string{manifest.DigestSHA256, manifest.EventsSHA256} {
+		if got := fmt.Sprintf("%x", sha256.Sum256(wantPayloads[index])); got != wantHash {
+			t.Fatalf("projection artifact %d hash = %s, manifest = %s", index, got, wantHash)
+		}
 	}
 }
 
