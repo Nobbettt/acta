@@ -931,23 +931,41 @@ func snapshotLegacyProjectionArtifactsContext(ctx context.Context, resolvedRunDi
 		}
 		slog.DebugContext(ctx, "uploading legacy projection without lock because bundle is not writable", "run_dir", runDir, "error", err)
 	}
+	recovered := false
 	if lock != nil {
 		defer func() {
 			returnErr = errors.Join(returnErr, lock.Close())
 		}()
+		var recoverErr error
+		recovered, recoverErr = actaevents.RecoverProjectionCommit(runDir)
+		if recoverErr != nil {
+			return nil, false, fmt.Errorf("torn bundle: recover interrupted projection commit: %w", recoverErr)
+		}
+	} else {
+		pending, pendingErr := actaevents.ProjectionCommitRecoveryPending(runDir)
+		if pendingErr != nil {
+			return nil, false, fmt.Errorf("inspect legacy projection commit debris: %w", pendingErr)
+		}
+		if pending {
+			return nil, false, errors.New("torn bundle: interrupted projection commit requires recovery, but the legacy bundle cannot be locked")
+		}
 	}
 	if _, err := os.Stat(manifestPath); err == nil {
 		return nil, true, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, false, fmt.Errorf("re-stat projection manifest: %w", err)
 	}
-	sources := make(map[string]*os.File, 2)
+	sources := make(map[string]*os.File, 3)
 	defer func() {
 		for _, source := range sources {
 			_ = source.Close()
 		}
 	}()
-	for _, name := range []string{actaevents.Filename, "digest.json"} {
+	names := []string{actaevents.Filename, "digest.json"}
+	if recovered {
+		names = append(names, "run.json")
+	}
+	for _, name := range names {
 		source, openErr := securefile.OpenRegular(resolvedRunDir, filepath.Join(runDir, name))
 		if openErr != nil {
 			if name == "digest.json" && errors.Is(openErr, os.ErrNotExist) {

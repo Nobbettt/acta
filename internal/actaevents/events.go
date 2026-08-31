@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -644,6 +645,7 @@ func marshalProjectionManifest(producer runrecord.Producer, generation string, r
 // Fault-injection seams; after-hook errors bypass rollback to model process death.
 var (
 	projectionReplace      = securefile.ReplaceFile
+	projectionLink         = os.Link
 	projectionAfterBackup  = func() error { return nil }
 	projectionAfterPublish = func(string) error { return nil }
 )
@@ -668,7 +670,7 @@ func commitProjectionContext(ctx context.Context, runDir, generation string, fin
 	defer func() {
 		returnErr = errors.Join(returnErr, lock.Close())
 	}()
-	if err := recoverProjectionCommit(runDir); err != nil {
+	if _, err := RecoverProjectionCommit(runDir); err != nil {
 		return fmt.Errorf("recover projection commit: %w", err)
 	}
 	if afterLock != nil {
@@ -708,7 +710,7 @@ func commitProjectionContext(ctx context.Context, runDir, generation string, fin
 	for index, name := range finals {
 		finalPath := filepath.Join(runDir, name)
 		if _, err := os.Stat(finalPath); err == nil {
-			if err := os.Link(finalPath, backups[index]); err != nil {
+			if err := backupProjectionArtifact(runDir, finalPath, backups[index]); err != nil {
 				return errors.Join(fmt.Errorf("backup projection %s: %w", name, err), rollback(0))
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
@@ -752,30 +754,72 @@ func commitProjectionContext(ctx context.Context, runDir, generation string, fin
 	return nil
 }
 
-// recoverProjectionCommit runs only while the bundle projection lock is held.
-// Staged files never define a generation and are always discarded. The current
-// manifest is the generation pointer: targets which do not match it are
-// restored from a matching hardlink backup. A backup is removed only after its
-// target exists as a regular file and, when the manifest supplies a digest,
-// matches that digest. If no manifest exists, the newest backup set is rolled
-// back deterministically before unmanifested backups are cleaned.
-func recoverProjectionCommit(runDir string) error {
-	staged, backups, err := projectionScratchFiles(runDir)
-	if err != nil {
+// backupProjectionArtifact first tries a hardlink backup. Filesystems which do
+// not support links fall back to an exclusive byte-for-byte copy that is
+// fsynced before publication; the source remains in place in either case.
+// EEXIST remains an error because it indicates an unexpected backup collision.
+func backupProjectionArtifact(runDir, sourcePath, backupPath string) error {
+	if err := projectionLink(sourcePath, backupPath); err == nil {
+		return nil
+	} else if errors.Is(err, os.ErrExist) {
 		return err
 	}
+
+	source, err := securefile.OpenRegular(runDir, sourcePath)
+	if err != nil {
+		return fmt.Errorf("open projection backup source: %w", err)
+	}
+	defer source.Close()
+	backup, err := securefile.CreateExclusive(backupPath)
+	if err != nil {
+		return fmt.Errorf("create projection copy backup: %w", err)
+	}
+	complete := false
+	defer func() {
+		_ = backup.Close()
+		if !complete {
+			_ = os.Remove(backupPath)
+		}
+	}()
+	if _, err := io.Copy(backup, source); err != nil {
+		return fmt.Errorf("copy projection backup: %w", err)
+	}
+	if err := backup.Sync(); err != nil {
+		return fmt.Errorf("sync projection copy backup: %w", err)
+	}
+	if err := backup.Close(); err != nil {
+		return fmt.Errorf("close projection copy backup: %w", err)
+	}
+	complete = true
+	return nil
+}
+
+// RecoverProjectionCommit runs only while the bundle projection lock is held.
+// Staged files never define a generation and are always discarded. The current
+// manifest is the generation pointer: targets which do not match it are
+// restored from a matching hardlink or copied backup. A backup is removed only
+// after its target exists as a regular file and, when the manifest supplies a
+// digest, matches that digest. If no manifest exists, the newest backup set is
+// rolled back deterministically before unmanifested backups are cleaned. The
+// boolean result reports whether any recognized commit scratch files were found.
+func RecoverProjectionCommit(runDir string) (bool, error) {
+	staged, backups, err := projectionScratchFiles(runDir)
+	if err != nil {
+		return false, err
+	}
+	recoveryRequired := len(staged) > 0 || len(backups) > 0
 	changed := false
 	for _, scratch := range staged {
 		if err := os.Remove(scratch.path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("discard staged projection %s: %w", scratch.name, err)
+			return recoveryRequired, fmt.Errorf("discard staged projection %s: %w", scratch.name, err)
 		}
 		changed = true
 	}
 	if len(backups) == 0 {
 		if changed {
-			return securefile.SyncDirectory(runDir)
+			return recoveryRequired, securefile.SyncDirectory(runDir)
 		}
-		return nil
+		return recoveryRequired, nil
 	}
 
 	manifest, manifestErr := readProjectionManifest(runDir, filepath.Join(runDir, "projection.json"))
@@ -793,7 +837,7 @@ func recoverProjectionCommit(runDir string) error {
 					break
 				}
 				if err := projectionReplace(backup.path, targetPath); err != nil {
-					return fmt.Errorf("restore interrupted projection %s: %w", name, err)
+					return recoveryRequired, fmt.Errorf("restore interrupted projection %s: %w", name, err)
 				}
 				changed = true
 				break
@@ -827,7 +871,7 @@ func recoverProjectionCommit(runDir string) error {
 					continue
 				}
 				if err := projectionReplace(backup.path, filepath.Join(runDir, name)); err != nil {
-					return fmt.Errorf("restore manifested projection %s: %w", name, err)
+					return recoveryRequired, fmt.Errorf("restore manifested projection %s: %w", name, err)
 				}
 				changed = true
 				restored = true
@@ -835,9 +879,9 @@ func recoverProjectionCommit(runDir string) error {
 			}
 			if !restored {
 				if targetErr != nil {
-					return fmt.Errorf("validate manifested projection %s: %w", name, targetErr)
+					return recoveryRequired, fmt.Errorf("validate manifested projection %s: %w", name, targetErr)
 				}
-				return fmt.Errorf("manifested projection %s has no intact target or backup", name)
+				return recoveryRequired, fmt.Errorf("manifested projection %s has no intact target or backup", name)
 			}
 		}
 	}
@@ -846,7 +890,7 @@ func recoverProjectionCommit(runDir string) error {
 		if _, err := os.Stat(backup.path); errors.Is(err, os.ErrNotExist) {
 			continue
 		} else if err != nil {
-			return fmt.Errorf("stat projection backup %s: %w", backup.name, err)
+			return recoveryRequired, fmt.Errorf("stat projection backup %s: %w", backup.name, err)
 		}
 		intact := false
 		if backup.name == "projection.json" && manifestErr == nil {
@@ -857,19 +901,26 @@ func recoverProjectionCommit(runDir string) error {
 		}
 		if !intact {
 			if err != nil {
-				return fmt.Errorf("validate projection target %s before backup cleanup: %w", backup.name, err)
+				return recoveryRequired, fmt.Errorf("validate projection target %s before backup cleanup: %w", backup.name, err)
 			}
-			return fmt.Errorf("projection target %s is not intact; preserving backup", backup.name)
+			return recoveryRequired, fmt.Errorf("projection target %s is not intact; preserving backup", backup.name)
 		}
 		if err := os.Remove(backup.path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("remove projection backup %s: %w", backup.name, err)
+			return recoveryRequired, fmt.Errorf("remove projection backup %s: %w", backup.name, err)
 		}
 		changed = true
 	}
 	if changed {
-		return securefile.SyncDirectory(runDir)
+		return recoveryRequired, securefile.SyncDirectory(runDir)
 	}
-	return nil
+	return recoveryRequired, nil
+}
+
+// ProjectionCommitRecoveryPending reports whether runDir contains scratch
+// files recognized by RecoverProjectionCommit without modifying the bundle.
+func ProjectionCommitRecoveryPending(runDir string) (bool, error) {
+	staged, backups, err := projectionScratchFiles(runDir)
+	return len(staged) > 0 || len(backups) > 0, err
 }
 
 func projectionScratchFiles(runDir string) ([]projectionScratchFile, []projectionScratchFile, error) {

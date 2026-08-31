@@ -452,6 +452,97 @@ func TestUploadRunLegacyProjectionUsesSingleLockedSnapshot(t *testing.T) {
 	}
 }
 
+func TestUploadRunRecoversInterruptedFirstProjectionCommit(t *testing.T) {
+	runDir := writeBundle(t)
+	oldRecord := testRecord(runDir)
+	oldRecord.Model = "old-model"
+	oldRecord.AgentVersion = "test"
+	oldRecord.CWD = "/workspace"
+	oldRecord.Command = []string{"codex", "exec"}
+	oldRecord.RawStdoutPath = filepath.Join(runDir, "codex-events.jsonl")
+	oldRecord.RawStderrPath = filepath.Join(runDir, "codex.stderr.log")
+	oldRecord.RawStdoutArtifact = "codex-events.jsonl"
+	oldRecord.RawStderrArtifact = "codex.stderr.log"
+	oldRecord.OTLPStatus = "not_configured"
+	oldRecord.ProcessContainment = "direct_process"
+	oldRecord.AgentConfigMode = "ambient_ephemeral"
+	oldRunPayload, err := json.MarshalIndent(oldRecord, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldRunPayload = append(oldRunPayload, '\n')
+	writeFile(t, filepath.Join(runDir, "run.json"), string(oldRunPayload))
+	oldDigest := readTestFile(t, filepath.Join(runDir, "digest.json"))
+	oldEvents := readTestFile(t, filepath.Join(runDir, actaevents.Filename))
+	oldEvents = strings.Replace(oldEvents, `"agent":"codex"`, `"agent":"codex","agent_version":"test","agent_config_mode":"ambient_ephemeral"`, 1)
+	writeFile(t, filepath.Join(runDir, actaevents.Filename), oldEvents)
+
+	for _, artifact := range []struct {
+		name    string
+		payload string
+	}{
+		{name: "run.json", payload: string(oldRunPayload)},
+		{name: "digest.json", payload: oldDigest},
+		{name: actaevents.Filename, payload: oldEvents},
+	} {
+		writeFile(t, filepath.Join(runDir, "."+artifact.name+".backup-200"), artifact.payload)
+	}
+	newRecord := *oldRecord
+	newRecord.Model = "new-model"
+	newRunPayload, err := json.MarshalIndent(&newRecord, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(runDir, "run.json"), string(append(newRunPayload, '\n')))
+	for _, name := range []string{"digest.json", actaevents.Filename, "projection.json"} {
+		writeFile(t, filepath.Join(runDir, "."+name+".staged-200"), "interrupted generation\n")
+	}
+
+	var uploadedModels []string
+	var uploadedDigests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.URL.Path == "/api/ingest/runs":
+			var body createRunRequest
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			uploadedModels = append(uploadedModels, body.Model)
+		case request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == "digest.json":
+			payload, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Error(err)
+			}
+			uploadedDigests = append(uploadedDigests, string(payload))
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	config := Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+		AllowUnredactedRemoteReasoning: true,
+	}
+	if err := UploadRun(context.Background(), config, &newRecord); err != nil {
+		t.Fatalf("UploadRun() after interrupted first commit: %v", err)
+	}
+	if got := readTestFile(t, filepath.Join(runDir, "run.json")); got != string(oldRunPayload) {
+		t.Fatalf("recovered run.json = %q, want old generation %q", got, oldRunPayload)
+	}
+	pending, err := actaevents.ProjectionCommitRecoveryPending(runDir)
+	if err != nil || pending {
+		t.Fatalf("projection recovery pending = %v, %v; want clean bundle", pending, err)
+	}
+	if err := UploadRun(context.Background(), config, oldRecord); err != nil {
+		t.Fatalf("post-recovery UploadRun(): %v", err)
+	}
+	if len(uploadedModels) != 2 || uploadedModels[0] != oldRecord.Model || uploadedModels[1] != oldRecord.Model {
+		t.Fatalf("uploaded models = %v, want recovered model %q twice", uploadedModels, oldRecord.Model)
+	}
+	if len(uploadedDigests) != 2 || uploadedDigests[0] != oldDigest || uploadedDigests[1] != oldDigest {
+		t.Fatalf("uploaded digests = %q, want old generation twice", uploadedDigests)
+	}
+}
+
 func TestUploadRunLegacyProjectionReadOnlyBundleUsesLockFreeSnapshot(t *testing.T) {
 	runDir := writeBundle(t)
 	makeBundleDirectoryReadOnly(t, runDir)
@@ -469,6 +560,29 @@ func TestUploadRunLegacyProjectionReadOnlyBundleUsesLockFreeSnapshot(t *testing.
 	}
 	if _, err := os.Stat(filepath.Join(runDir, ".projection.lock")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("read-only legacy upload created projection lock, stat error = %v", err)
+	}
+}
+
+func TestUploadRunLegacyProjectionReadOnlyDebrisIsTorn(t *testing.T) {
+	runDir := writeBundle(t)
+	writeFile(t, filepath.Join(runDir, ".digest.json.staged-200"), "interrupted generation\n")
+	makeBundleDirectoryReadOnly(t, runDir)
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	err := UploadRun(context.Background(), Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+		AllowUnredactedRemoteReasoning: true,
+	}, testRecord(runDir))
+	if err == nil || !strings.Contains(err.Error(), "torn bundle") || !strings.Contains(err.Error(), "requires recovery") {
+		t.Fatalf("UploadRun() error = %v, want clear torn-bundle recovery error", err)
+	}
+	if requests != 0 {
+		t.Fatalf("torn legacy bundle issued %d upload requests, want none", requests)
 	}
 }
 

@@ -778,6 +778,81 @@ func TestProjectionCommitCrashAfterBackupPreservesRunAndRecovers(t *testing.T) {
 	assertNoProjectionScratch(t, runDir)
 }
 
+func TestProjectionCommitFallsBackToCopiedBackupsAndRecovers(t *testing.T) {
+	runDir := t.TempDir()
+	finals, oldPayloads := projectionRecordCommitFixture(t, "100", `{"id":"old"}`+"\n", "old digest\n", "old events\n")
+	_, committedPayloads := projectionRecordCommitFixture(t, "200", `{"id":"committed"}`+"\n", "committed digest\n", "committed events\n")
+	_, interruptedPayloads := projectionRecordCommitFixture(t, "300", `{"id":"interrupted"}`+"\n", "interrupted digest\n", "interrupted events\n")
+	if err := commitProjection(runDir, "100", finals, oldPayloads, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	originalLink := projectionLink
+	projectionLink = func(string, string) error { return errors.New("hardlinks unsupported") }
+	t.Cleanup(func() { projectionLink = originalLink })
+	originalAfterBackup := projectionAfterBackup
+	projectionAfterBackup = func() error {
+		for index, name := range finals {
+			backupPath := filepath.Join(runDir, "."+name+".backup-200")
+			backupPayload, err := os.ReadFile(backupPath)
+			if err != nil {
+				return fmt.Errorf("read copied backup %s: %w", name, err)
+			}
+			if string(backupPayload) != string(oldPayloads[index]) {
+				return fmt.Errorf("copied backup %s = %q, want %q", name, backupPayload, oldPayloads[index])
+			}
+			targetInfo, err := os.Stat(filepath.Join(runDir, name))
+			if err != nil {
+				return err
+			}
+			backupInfo, err := os.Stat(backupPath)
+			if err != nil {
+				return err
+			}
+			if os.SameFile(targetInfo, backupInfo) {
+				return fmt.Errorf("backup %s unexpectedly used a hardlink", name)
+			}
+		}
+		return nil
+	}
+	t.Cleanup(func() { projectionAfterBackup = originalAfterBackup })
+	if err := commitProjection(runDir, "200", finals, committedPayloads, nil); err != nil {
+		t.Fatalf("projection commit with copied backups: %v", err)
+	}
+	projectionAfterBackup = originalAfterBackup
+	assertProjectionFiles(t, runDir, finals, committedPayloads)
+	assertNoProjectionScratch(t, runDir)
+
+	originalAfterPublish := projectionAfterPublish
+	projectionAfterPublish = func(name string) error {
+		if name == "run.json" {
+			return errors.New("simulated kill with copied backups")
+		}
+		return nil
+	}
+	t.Cleanup(func() { projectionAfterPublish = originalAfterPublish })
+	err := commitProjection(runDir, "300", finals, interruptedPayloads, nil)
+	projectionAfterPublish = originalAfterPublish
+	if err == nil || !strings.Contains(err.Error(), "simulated kill with copied backups") {
+		t.Fatalf("commit error = %v, want simulated kill", err)
+	}
+
+	lock, err := AcquireProjectionLock(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, recoverErr := RecoverProjectionCommit(runDir)
+	closeErr := lock.Close()
+	if recoverErr != nil || closeErr != nil {
+		t.Fatalf("recover copied backups: %v", errors.Join(recoverErr, closeErr))
+	}
+	if !recovered {
+		t.Fatal("RecoverProjectionCommit() did not report copied backup debris")
+	}
+	assertProjectionFiles(t, runDir, finals, committedPayloads)
+	assertNoProjectionScratch(t, runDir)
+}
+
 func TestProjectionCommitCrashBeforeManifestRecoversPinnedGeneration(t *testing.T) {
 	runDir := t.TempDir()
 	finals, oldPayloads := projectionRecordCommitFixture(t, "100", `{"id":"old"}`+"\n", "old digest\n", "old events\n")
