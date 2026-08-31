@@ -1193,9 +1193,13 @@ func rewriteOpaqueTextSnapshot(ctx context.Context, file *os.File, maxLineBytes 
 		}
 		output := line
 		if len(trimmed) > 0 && looksLikeJSON(trimmed[0]) {
-			output, err = redactProviderReasoningLine(line)
+			var verified bool
+			output, verified, err = redactProviderReasoningLineVerified(line)
 			if err != nil {
 				return false, err
+			}
+			if !verified {
+				return false, nil
 			}
 		}
 		if len(output) > 0 {
@@ -1690,28 +1694,39 @@ func readBoundedJSONLLine(reader *bufio.Reader, maxLineBytes int) ([]byte, error
 }
 
 func redactProviderReasoningLine(line []byte) ([]byte, error) {
+	redacted, verified, err := redactProviderReasoningLineVerified(line)
+	if err != nil {
+		return nil, err
+	}
+	if !verified {
+		return nil, errors.New("provider event reasoning redaction could not be verified")
+	}
+	return redacted, nil
+}
+
+func redactProviderReasoningLineVerified(line []byte) ([]byte, bool, error) {
 	prefix, payload, suffix := jsonLineParts(line)
 	if len(payload) == 0 {
-		return line, nil
+		return line, true, nil
 	}
 	var value any
 	if err := decodeJSONUseNumber(payload, &value); err != nil {
-		return nil, fmt.Errorf("parse provider event for remote reasoning redaction: %w", err)
+		return nil, false, fmt.Errorf("parse provider event for remote reasoning redaction: %w", err)
 	}
 	changed := setReasoningRedactionState(value)
 	reasoningChanged, verified := reasoning.RedactValue(value)
 	if !verified {
-		return nil, errors.New("provider event reasoning redaction could not be verified")
+		return line, false, nil
 	}
 	changed = reasoningChanged || changed
 	if !changed {
-		return line, nil
+		return line, true, nil
 	}
 	encoded, err := json.Marshal(value)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return wrapJSONLine(prefix, encoded, suffix), nil
+	return wrapJSONLine(prefix, encoded, suffix), true, nil
 }
 
 func redactActaReasoningEventLine(line []byte) ([]byte, error) {
@@ -2102,13 +2117,16 @@ func redactRunRecordSnapshot(ctx context.Context, file *os.File) error {
 		if encoded, ok := record["schema_version"].(json.Number); ok {
 			schemaVersion, _ = encoded.Int64()
 		}
-		if schemaVersion < runrecord.SchemaVersion && !contentChanged {
+		changed, err := stampRewrittenDocumentSchemaVersion(schemaversion.RunRecord, record, contentChanged)
+		if err != nil {
+			return false, err
+		}
+		if schemaVersion < runrecord.SchemaVersion && !changed {
 			// Legacy schemas do not define reasoning_redaction_state. Keep a
 			// content-safe record byte-for-byte intact and carry the result only
 			// in the artifact upload metadata.
 			return false, nil
 		}
-		changed := contentChanged
 		if record["reasoning_redaction_state"] != "redacted" {
 			record["reasoning_redaction_state"] = "redacted"
 			changed = true

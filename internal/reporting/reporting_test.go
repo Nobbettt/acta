@@ -312,14 +312,17 @@ func TestUploadRunLegacyRecordUsesMetadataOrExplicitSchemaUpgrade(t *testing.T) 
 	const secret = "legacy-run-record-reasoning-6204"
 	legacyWithReasoning := strings.TrimSuffix(strings.TrimSpace(legacyBody), "}") +
 		`,"reasoning":"` + secret + `"}` + "\n"
+	legacyWithPublishedBundle := strings.TrimSuffix(strings.TrimSpace(legacyBody), "}") +
+		`,"published_bundle":{"artifact_id":"bundle-1","sha256":"` + strings.Repeat("a", 64) + `"}}` + "\n"
 
 	tests := []struct {
-		name          string
-		body          string
-		wantByteExact bool
-		wantSchema    float64
-		wantReasoning any
-		wantBodyState any
+		name                string
+		body                string
+		wantByteExact       bool
+		wantSchema          float64
+		wantReasoning       any
+		wantBodyState       any
+		wantPublishedBundle bool
 	}{
 		{
 			name:          "metadata only when body needs no content redaction",
@@ -332,6 +335,13 @@ func TestUploadRunLegacyRecordUsesMetadataOrExplicitSchemaUpgrade(t *testing.T) 
 			wantSchema:    runrecord.SchemaVersion,
 			wantReasoning: reasoningRedactionMarker,
 			wantBodyState: "redacted",
+		},
+		{
+			name:                "upgrade v2 label when a v3-only field is already present",
+			body:                legacyWithPublishedBundle,
+			wantSchema:          runrecord.SchemaVersion,
+			wantBodyState:       "redacted",
+			wantPublishedBundle: true,
 		},
 	}
 	for _, test := range tests {
@@ -380,6 +390,9 @@ func TestUploadRunLegacyRecordUsesMetadataOrExplicitSchemaUpgrade(t *testing.T) 
 			}
 			if uploaded["schema_version"] != test.wantSchema || uploaded["reasoning"] != test.wantReasoning || uploaded["reasoning_redaction_state"] != test.wantBodyState {
 				t.Fatalf("rewritten legacy run record = %#v", uploaded)
+			}
+			if _, present := uploaded["published_bundle"]; present != test.wantPublishedBundle {
+				t.Fatalf("rewritten legacy run record published_bundle presence = %v, want %v", present, test.wantPublishedBundle)
 			}
 		})
 	}
@@ -652,6 +665,51 @@ func TestUploadRunConservativelyRedactsValidUnknownStderrJSON(t *testing.T) {
 	if !ok || metadata["label"] != "kept" || metadata["reasoning"] != reasoningRedactionMarker {
 		t.Fatalf("valid unknown JSON did not receive conservative redaction: %#v", value)
 	}
+}
+
+func TestUploadRunWithholdsUnverifiableOpaqueJSONLine(t *testing.T) {
+	runDir := writeBundle(t)
+	const stderrName = "agent.stderr.log"
+	writeFile(t, filepath.Join(runDir, stderrName), `{"kind":"unsupported","details":"diagnostic"}`+"\n")
+	addArtifactRef(t, runDir, `{"kind":"raw_stderr","path":"`+stderrName+`"}`)
+
+	uploaded := map[string]bool{}
+	var remoteEvents []actaevents.Event
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/ingest/runs/run-1/events":
+			var body eventsRequest
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			remoteEvents = append(remoteEvents, body.Events...)
+		case "/api/ingest/runs/run-1/artifacts":
+			uploaded[request.URL.Query().Get("filename")] = true
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	if err := UploadRun(context.Background(), Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+	}, testRecord(runDir)); err != nil {
+		t.Fatalf("UploadRun() rejected an unverifiable opaque JSON line: %v", err)
+	}
+	if uploaded[stderrName] {
+		t.Fatal("unverifiable opaque JSON artifact was uploaded")
+	}
+	for _, event := range remoteEvents {
+		if event.Type != actaevents.TypeRunCompleted {
+			continue
+		}
+		for _, ref := range event.ArtifactRefs {
+			if ref.Path == stderrName && ref.Status == actaevents.ArtifactStatusWithheld &&
+				ref.Reason == withheldArtifactReason && ref.RedactionState == actaevents.ArtifactRedactionStateUnverified {
+				return
+			}
+		}
+	}
+	t.Fatalf("remote terminal manifest did not mark opaque JSON artifact withheld/unverified: %#v", remoteEvents)
 }
 
 func TestRedactArtifactSnapshotWithholdsTruncatedOpaqueReasoningMember(t *testing.T) {
