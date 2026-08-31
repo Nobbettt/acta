@@ -25,6 +25,28 @@ func TestCodexTurnFailedOverridesZeroExit(t *testing.T) {
 	}
 }
 
+func TestReconcileRecordCopiesFinalOTLPResultAndStampsCurrentSchema(t *testing.T) {
+	record := &runrecord.Record{
+		OK:                true,
+		TerminationReason: OutcomeCompleted,
+		OTLPStatus:        "failed",
+		OTLPError:         "flush failed",
+	}
+	d := &Digest{
+		SchemaVersion: MinSchemaVersion,
+		Status:        StatusOK,
+		OTLPStatus:    "exported",
+		Termination:   Termination{Outcome: OutcomeCompleted},
+	}
+
+	ReconcileRecord(record, d)
+
+	if d.SchemaVersion != SchemaVersion || d.OTLPStatus != record.OTLPStatus || d.OTLPError != record.OTLPError {
+		t.Fatalf("reconciled digest = schema %d, OTLP %q/%q; want schema %d, OTLP %q/%q",
+			d.SchemaVersion, d.OTLPStatus, d.OTLPError, SchemaVersion, record.OTLPStatus, record.OTLPError)
+	}
+}
+
 func TestClaudeUnderspecifiedResultIsProviderError(t *testing.T) {
 	d, err := parseClaude(strings.NewReader(`{"type":"result","session_id":"s-1"}`+"\n"), newWorkspace(""))
 	if err == nil || !strings.Contains(err.Error(), "recognized subtype") {

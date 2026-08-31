@@ -646,8 +646,8 @@ func ResolveOutcome(record *runrecord.Record, d *Digest) OutcomeResolution {
 	return result
 }
 
-// ReconcileRecord applies ResolveOutcome to the record before run.json and
-// terminal Acta events are written.
+// ReconcileRecord applies ResolveOutcome and settled record metadata before
+// digest.json, run.json, and terminal Acta events are written.
 func ReconcileRecord(record *runrecord.Record, d *Digest) {
 	if record == nil {
 		return
@@ -657,6 +657,9 @@ func ReconcileRecord(record *runrecord.Record, d *Digest) {
 	record.TerminationReason = resolved.TerminationReason
 	record.Error = resolved.Error
 	if d != nil {
+		d.SchemaVersion = SchemaVersion
+		d.OTLPStatus = record.OTLPStatus
+		d.OTLPError = record.OTLPError
 		d.Status = resolved.Status
 		d.Error = resolved.Error
 		d.Termination.RunnerReason = resolved.TerminationReason

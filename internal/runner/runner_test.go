@@ -1310,12 +1310,28 @@ func TestRunBestEffortOTLPExportFailureIsDefault(t *testing.T) {
 	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
 		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("OTEL_TRACES_SAMPLER", "always_on")
+	stderr := bytes.NewBuffer(nil)
 	record, err := runForTest(context.Background(), Options{
 		Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test",
 		OTLPEndpoint: "http://127.0.0.1:1/v1/traces",
-	}, io.Discard, io.Discard)
+	}, io.Discard, stderr)
 	if err != nil || record == nil || !record.OK || record.OTLPStatus != "failed" {
 		t.Fatalf("default best-effort run = record %#v, err %v", record, err)
+	}
+	if !strings.Contains(stderr.String(), "OTLP flush failed") {
+		t.Fatalf("stderr = %q, want Finish flush failure", stderr.String())
+	}
+	persistedDigest := assertTelemetryArtifactsMatchRecord(t, record)
+	redigested, err := digest.FromRunDir(record.RunDir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if redigested.SchemaVersion != persistedDigest.SchemaVersion ||
+		redigested.OTLPStatus != persistedDigest.OTLPStatus || redigested.OTLPError != persistedDigest.OTLPError {
+		t.Fatalf("re-digested OTLP = schema %d, %q/%q; persisted digest = schema %d, %q/%q",
+			redigested.SchemaVersion, redigested.OTLPStatus, redigested.OTLPError,
+			persistedDigest.SchemaVersion, persistedDigest.OTLPStatus, persistedDigest.OTLPError)
 	}
 }
 
@@ -1462,6 +1478,7 @@ printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n
 	if !record.OK || record.OTLPStatus != "exported" || record.TraceID == "" {
 		t.Fatalf("record = %#v, want successful exported trace", record)
 	}
+	assertTelemetryArtifactsMatchRecord(t, record)
 	select {
 	case authorization := <-requests:
 		if authorization != "Bearer secret-otlp-token" {
@@ -2288,6 +2305,65 @@ func assertFileContains(t *testing.T, path string, want string) {
 	if !strings.Contains(string(data), want) {
 		t.Fatalf("%s does not contain %q; contents:\n%s", path, want, string(data))
 	}
+}
+
+func assertTelemetryArtifactsMatchRecord(t *testing.T, record *runrecord.Record) *digest.Digest {
+	t.Helper()
+	persistedRecord, err := ReadRecord(record.RunDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persistedRecord.OTLPStatus != record.OTLPStatus || persistedRecord.OTLPError != record.OTLPError {
+		t.Fatalf("run.json OTLP = %q/%q, returned record = %q/%q",
+			persistedRecord.OTLPStatus, persistedRecord.OTLPError, record.OTLPStatus, record.OTLPError)
+	}
+
+	payload, err := os.ReadFile(filepath.Join(record.RunDir, "digest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persistedDigest digest.Digest
+	if err := json.Unmarshal(payload, &persistedDigest); err != nil {
+		t.Fatal(err)
+	}
+	if err := persistedDigest.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if persistedDigest.SchemaVersion != digest.SchemaVersion ||
+		persistedDigest.OTLPStatus != persistedRecord.OTLPStatus || persistedDigest.OTLPError != persistedRecord.OTLPError {
+		t.Fatalf("digest.json = schema %d, OTLP %q/%q; run.json = OTLP %q/%q",
+			persistedDigest.SchemaVersion, persistedDigest.OTLPStatus, persistedDigest.OTLPError,
+			persistedRecord.OTLPStatus, persistedRecord.OTLPError)
+	}
+
+	eventStatus, eventError := readRunStartedOTLP(t, filepath.Join(record.RunDir, actaevents.Filename))
+	if eventStatus != persistedRecord.OTLPStatus || eventError != persistedRecord.OTLPError {
+		t.Fatalf("run.started OTLP = %q/%q, run.json = %q/%q",
+			eventStatus, eventError, persistedRecord.OTLPStatus, persistedRecord.OTLPError)
+	}
+	return &persistedDigest
+}
+
+func readRunStartedOTLP(t *testing.T, path string) (string, string) {
+	t.Helper()
+	for lineNumber, line := range strings.Split(strings.TrimSpace(readFile(t, path)), "\n") {
+		var event actaevents.Event
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("decode event line %d: %v", lineNumber+1, err)
+		}
+		if event.Type == actaevents.TypeRunStarted {
+			var payload struct {
+				OTLPStatus string `json:"otlp_status"`
+				OTLPError  string `json:"otlp_error"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode run.started payload: %v", err)
+			}
+			return payload.OTLPStatus, payload.OTLPError
+		}
+	}
+	t.Fatalf("run.started event missing from %s", path)
+	return "", ""
 }
 
 func readFile(t *testing.T, path string) string {
