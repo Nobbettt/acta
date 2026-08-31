@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -1013,6 +1014,130 @@ func gitCmd(t *testing.T, dir string, args ...string) {
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %v: %v: %s", args, err, out)
+	}
+}
+
+func TestRunOTLPSetupFailurePolicy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	certificateServer := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer certificateServer.Close()
+	certificate := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificateServer.Certificate().Raw})
+	if certificate == nil {
+		t.Fatal("encode test certificate")
+	}
+	certificatePath := filepath.Join(t.TempDir(), "collector.pem")
+	if err := os.WriteFile(certificatePath, certificate, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name             string
+		policy           string
+		withCertificate  bool
+		wantSetupFailure bool
+		wantAgentStarted bool
+		wantStatus       string
+		wantExport       bool
+	}{
+		{
+			name:             "required setup failure aborts before agent start",
+			policy:           OTLPExportFailurePolicyRequired,
+			withCertificate:  true,
+			wantSetupFailure: true,
+		},
+		{
+			name:             "best effort setup failure runs with degradation",
+			policy:           OTLPExportFailurePolicyBestEffort,
+			withCertificate:  true,
+			wantAgentStarted: true,
+			wantStatus:       "failed",
+		},
+		{
+			name:             "required healthy setup runs and exports",
+			policy:           OTLPExportFailurePolicyRequired,
+			wantAgentStarted: true,
+			wantStatus:       "exported",
+			wantExport:       true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			for _, name := range []string{
+				"OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG",
+				"OTEL_EXPORTER_OTLP_CERTIFICATE", "OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE",
+				"OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE", "OTEL_EXPORTER_OTLP_CLIENT_KEY",
+				"OTEL_EXPORTER_OTLP_TRACES_CLIENT_CERTIFICATE", "OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY",
+				"TRACEPARENT", "TRACESTATE",
+			} {
+				t.Setenv(name, "")
+			}
+			if test.withCertificate {
+				t.Setenv("OTEL_EXPORTER_OTLP_CERTIFICATE", certificatePath)
+			}
+
+			requests := make(chan struct{}, 1)
+			collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				select {
+				case requests <- struct{}{}:
+				default:
+				}
+				w.Header().Set("Content-Type", "application/x-protobuf")
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer collector.Close()
+
+			cwd := t.TempDir()
+			fakeBin := t.TempDir()
+			agentMarker := filepath.Join(t.TempDir(), "agent-started")
+			writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\nprintf started > \"$ACTA_TEST_AGENT_MARKER\"\ncat >/dev/null\n"+
+				`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
+			t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("ACTA_TEST_AGENT_MARKER", agentMarker)
+			stderr := bytes.NewBuffer(nil)
+
+			record, err := runForTest(context.Background(), Options{
+				Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test", OTLPEndpoint: collector.URL,
+				OTLPExportFailurePolicy: test.policy,
+			}, io.Discard, stderr)
+			_, markerErr := os.Stat(agentMarker)
+			if markerErr != nil && !os.IsNotExist(markerErr) {
+				t.Fatal(markerErr)
+			}
+			if agentStarted := markerErr == nil; agentStarted != test.wantAgentStarted {
+				t.Fatalf("agent started = %v, want %v", agentStarted, test.wantAgentStarted)
+			}
+
+			if test.wantSetupFailure {
+				if record != nil || err == nil || !errors.Is(err, ErrTelemetryOnlyFailure) ||
+					!strings.Contains(err.Error(), "during OTLP exporter setup") ||
+					!strings.Contains(err.Error(), "insecure HTTP endpoint cannot use TLS client configuration") {
+					t.Fatalf("required setup failure = record %#v, error %v", record, err)
+				}
+				return
+			}
+			if err != nil || record == nil || !record.OK || record.OTLPStatus != test.wantStatus {
+				t.Fatalf("run result = record %#v, error %v", record, err)
+			}
+			if test.wantStatus == "failed" {
+				if !strings.Contains(record.OTLPError, "insecure HTTP endpoint cannot use TLS client configuration") ||
+					!strings.Contains(stderr.String(), "acta: OTLP export disabled") {
+					t.Fatalf("best-effort degradation = OTLP error %q, stderr %q", record.OTLPError, stderr.String())
+				}
+				assertFileContains(t, filepath.Join(record.RunDir, "run.json"), `"otlp_status": "failed"`)
+			}
+			select {
+			case <-requests:
+				if !test.wantExport {
+					t.Fatal("unexpected OTLP export request")
+				}
+			default:
+				if test.wantExport {
+					t.Fatal("missing OTLP export request")
+				}
+			}
+		})
 	}
 }
 

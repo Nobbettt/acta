@@ -54,14 +54,15 @@ const DefaultUploadTimeout = 2 * time.Minute
 const (
 	OTLPExportFailurePolicyBestEffort = "best-effort"
 	OTLPExportFailurePolicyRequired   = "required"
-	// TelemetryOnlyFailureExitCode is returned by the CLI only when the agent
-	// run and its durable bundle succeeded but required OTLP delivery failed.
-	// Launchers must also validate run.json before treating this code as a
-	// warning, because an agent process may independently use the same code.
+	// TelemetryOnlyFailureExitCode is returned by the CLI when required OTLP
+	// setup or delivery fails. A setup failure can occur before an agent run or
+	// run record exists; otherwise launchers must also validate run.json before
+	// treating this code as a warning, because an agent process may
+	// independently use the same code.
 	TelemetryOnlyFailureExitCode = 86
 )
 
-var ErrTelemetryOnlyFailure = errors.New("required telemetry export failed after a successful run")
+var ErrTelemetryOnlyFailure = errors.New("required telemetry export failed")
 
 // DefaultRunsDir is the workspace-relative bundle root shared by every
 // command that resolves a runs directory.
@@ -328,11 +329,11 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 			StartedAt:     traceStartedAt,
 		})
 		if err != nil {
+			if otlpFailurePolicy == OTLPExportFailurePolicyRequired {
+				return nil, fmt.Errorf("%w during OTLP exporter setup: %w", ErrTelemetryOnlyFailure, err)
+			}
 			otlpStatus = "failed"
 			otlpError = err.Error()
-			if otlpFailurePolicy == OTLPExportFailurePolicyRequired {
-				telemetryErr = fmt.Errorf("required OTLP export failed during setup: %w", err)
-			}
 			fmt.Fprintf(stderr, "acta: OTLP export disabled: %v\n", err)
 			tr = nil
 		}
