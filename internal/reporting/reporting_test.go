@@ -857,6 +857,46 @@ func TestUploadRunRedactsReasoningKindDespiteFutureType(t *testing.T) {
 	}
 }
 
+func TestUploadRunRedactsFutureOutputArray(t *testing.T) {
+	const (
+		rawName = "codex-events.jsonl"
+		secret  = "private-remote-future-output-reasoning-6452"
+	)
+	runDir := writeBundle(t)
+	original := `{"type":"future.event","output":[{"type":"reasoning","text":"` + secret + `"}]}` + "\n"
+	writeFile(t, filepath.Join(runDir, rawName), original)
+	addArtifactRef(t, runDir, `{"kind":"raw_stdout","path":"`+rawName+`"}`)
+
+	var remoteRaw, remoteState string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == rawName {
+			payload, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Error(err)
+			}
+			remoteRaw = string(payload)
+			remoteState = request.URL.Query().Get("redaction_state")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	if err := UploadRun(context.Background(), Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+	}, testRecord(runDir)); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(remoteRaw, secret) ||
+		!strings.Contains(remoteRaw, `"type":"future.event"`) ||
+		!strings.Contains(remoteRaw, `"type":"reasoning"`) ||
+		!strings.Contains(remoteRaw, `"redacted":true`) || remoteState != "redacted" {
+		t.Fatalf("remote future output body/state = %q / %q", remoteRaw, remoteState)
+	}
+	if local := readTestFile(t, filepath.Join(runDir, rawName)); local != original {
+		t.Fatalf("remote redaction changed local raw stream:\n got %s\nwant %s", local, original)
+	}
+}
+
 func TestUploadRunRemoteSnapshotPreservesProviderShapedToolResult(t *testing.T) {
 	const (
 		rawName     = "codex-events.jsonl"
@@ -1545,7 +1585,8 @@ func TestRedactProviderReasoningMasksMalformedStructuralMetadata(t *testing.T) {
 
 func TestRedactProviderReasoningPreservesUserPayloadFields(t *testing.T) {
 	tests := map[string][]byte{
-		"provider tool payload":        []byte(`{"type":"item.completed","item":{"type":"mcp_tool_call","arguments":{"reasoning":"input explanation"},"result":{"thinking":"output explanation"}},"structured_output":{"reasoning":"final explanation"}}` + "\n"),
+		"provider tool payload":        []byte(`{"type":"item.completed","item":{"type":"mcp_tool_call","arguments":{"reasoning":"input explanation"},"result":{"thinking":"output explanation"}}}` + "\n"),
+		"Claude structured output":     []byte(`{"type":"result","structured_output":{"reasoning":"final explanation"}}` + "\n"),
 		"Acta structured output":       []byte(`{"type":"agent.output.structured","payload":{"kind":"structured_output","details":{"reasoning":"final explanation"}}}` + "\n"),
 		"non-provider discriminator":   []byte(`{"type":"reasoning_result","text":"visible user data"}` + "\n"),
 		"substring-only discriminator": []byte(`{"kind":"rethinking","text":"visible user data"}` + "\n"),

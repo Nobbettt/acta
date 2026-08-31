@@ -535,21 +535,44 @@ func containsRedactedProviderBlock(ctx context.Context, value any) (bool, error)
 }
 
 // IsUserDataPayloadKey reports whether key names a container whose contents
-// belong to the user or a tool. Provider-shaped objects inside these values
-// are content, not provider envelopes.
+// belong to the user or a tool in a recognized provider or normalized event
+// envelope. Bare payload-like keys on unknown envelopes are not exempt: future
+// provider shapes must remain inspectable by the generic reasoning pass.
 func IsUserDataPayloadKey(parent map[string]any, key string) bool {
+	typeDiscriminator, _ := parent["type"].(string)
+	kindDiscriminator, _ := parent["kind"].(string)
+	role, _ := parent["role"].(string)
+	typeDiscriminator = strings.ToLower(strings.TrimSpace(typeDiscriminator))
+	kindDiscriminator = strings.ToLower(strings.TrimSpace(kindDiscriminator))
+	role = strings.ToLower(strings.TrimSpace(role))
+
 	switch strings.ToLower(strings.TrimSpace(key)) {
-	case "input", "arguments", "result", "output", "structured_output", "tool_use_result":
-		return true
+	case "input":
+		return typeDiscriminator == "tool_use" || normalizedToolDataKind(kindDiscriminator)
+	case "arguments":
+		return typeDiscriminator == "mcp_tool_call" || typeDiscriminator == "collab_tool_call"
+	case "result":
+		return typeDiscriminator == "mcp_tool_call" || typeDiscriminator == "collab_tool_call" ||
+			normalizedToolDataKind(kindDiscriminator)
+	case "output":
+		return typeDiscriminator == "tool_result" || normalizedToolDataKind(kindDiscriminator)
+	case "structured_output":
+		return typeDiscriminator == "result"
+	case "tool_use_result":
+		return typeDiscriminator == "user"
 	case "details":
-		kind, _ := parent["kind"].(string)
-		return strings.EqualFold(strings.TrimSpace(kind), "structured_output")
+		return kindDiscriminator == "structured_output"
 	case "content":
-		kind, _ := parent["type"].(string)
-		role, _ := parent["role"].(string)
-		kind = strings.ToLower(strings.TrimSpace(kind))
-		role = strings.ToLower(strings.TrimSpace(role))
-		return kind == "tool_result" || kind == "user" || role == "user"
+		return typeDiscriminator == "tool_result" || typeDiscriminator == "user" || role == "user"
+	default:
+		return false
+	}
+}
+
+func normalizedToolDataKind(kind string) bool {
+	switch kind {
+	case "tool_call", "tool_result", "command", "file_edit", "todo", "web_search", "task", "permission":
+		return true
 	default:
 		return false
 	}

@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -172,6 +173,7 @@ func inboundParentSpanContext() trace.SpanContext {
 type Run struct {
 	provider      *sdktrace.TracerProvider
 	exportErrors  *errorCapturingExporter
+	spanDelivery  *dropCountingSpanProcessor
 	tracer        trace.Tracer
 	rootCtx       context.Context
 	root          trace.Span
@@ -184,12 +186,14 @@ type Run struct {
 // processor's background worker. The SDK reports those failures to its global
 // error handler instead of returning them from a later ForceFlush.
 type errorCapturingExporter struct {
-	exporter sdktrace.SpanExporter
-	mu       sync.Mutex
-	err      error
+	exporter  sdktrace.SpanExporter
+	mu        sync.Mutex
+	err       error
+	forwarded atomic.Uint64
 }
 
 func (e *errorCapturingExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
+	e.forwarded.Add(uint64(len(spans)))
 	err := e.exporter.ExportSpans(ctx, spans)
 	if err != nil {
 		e.mu.Lock()
@@ -197,6 +201,45 @@ func (e *errorCapturingExporter) ExportSpans(ctx context.Context, spans []sdktra
 		e.mu.Unlock()
 	}
 	return err
+}
+
+// dropCountingSpanProcessor compares every sampled span handed to the batch
+// processor with the spans that reach its exporter. The SDK's non-blocking
+// queue otherwise discards overflow without returning an error from OnEnd or
+// a later ForceFlush.
+type dropCountingSpanProcessor struct {
+	processor sdktrace.SpanProcessor
+	exporter  *errorCapturingExporter
+	ended     atomic.Uint64
+}
+
+func (p *dropCountingSpanProcessor) OnStart(ctx context.Context, span sdktrace.ReadWriteSpan) {
+	p.processor.OnStart(ctx, span)
+}
+
+func (p *dropCountingSpanProcessor) OnEnd(span sdktrace.ReadOnlySpan) {
+	p.ended.Add(1)
+	p.processor.OnEnd(span)
+}
+
+func (p *dropCountingSpanProcessor) Shutdown(ctx context.Context) error {
+	return p.processor.Shutdown(ctx)
+}
+
+func (p *dropCountingSpanProcessor) ForceFlush(ctx context.Context) error {
+	return p.processor.ForceFlush(ctx)
+}
+
+func (p *dropCountingSpanProcessor) DropError() error {
+	if p == nil || p.exporter == nil {
+		return nil
+	}
+	ended := p.ended.Load()
+	forwarded := p.exporter.forwarded.Load()
+	if ended <= forwarded {
+		return nil
+	}
+	return fmt.Errorf("batch span processor dropped %d of %d ended spans", ended-forwarded, ended)
 }
 
 func (e *errorCapturingExporter) Shutdown(ctx context.Context) error {
@@ -239,8 +282,13 @@ func Setup(ctx context.Context, cfg Config) (*Run, error) {
 		res = resource.Default()
 	}
 	capturingExporter := &errorCapturingExporter{exporter: exporter}
+	batchProcessor := sdktrace.NewBatchSpanProcessor(capturingExporter)
+	dropCountingProcessor := &dropCountingSpanProcessor{
+		processor: batchProcessor,
+		exporter:  capturingExporter,
+	}
 	provider := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(capturingExporter),
+		sdktrace.WithSpanProcessor(dropCountingProcessor),
 		sdktrace.WithResource(res),
 		sdktrace.WithSampler(samplerFromEnvironment()),
 	)
@@ -250,6 +298,7 @@ func Setup(ctx context.Context, cfg Config) (*Run, error) {
 		return nil, err
 	}
 	run.exportErrors = capturingExporter
+	run.spanDelivery = dropCountingProcessor
 	return run, nil
 }
 
@@ -386,12 +435,14 @@ func (r *Run) Finish(record *runrecord.Record, completedAt time.Time) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	// The wrapper retains errors from batches already handled by the background
-	// worker; ForceFlush and Shutdown cover the final batch and teardown. The run
-	// recorded a trace_id, so any dropped batch must be surfaced.
+	// The wrappers retain errors from batches already handled by the background
+	// worker and detect spans discarded before reaching the exporter. ForceFlush
+	// and Shutdown cover the final batch and teardown. The run recorded a
+	// trace_id, so any lost span must be surfaced.
 	flushErr := r.provider.ForceFlush(ctx)
 	shutdownErr := r.provider.Shutdown(ctx)
-	if err := errors.Join(r.exportErrors.Err(), flushErr, shutdownErr); err != nil {
+	dropErr := r.spanDelivery.DropError()
+	if err := errors.Join(r.exportErrors.Err(), dropErr, flushErr, shutdownErr); err != nil {
 		return fmt.Errorf("flush traces: %w", err)
 	}
 	return nil

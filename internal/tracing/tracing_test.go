@@ -253,6 +253,67 @@ func TestFinishSurfacesEarlierAsynchronousBatchError(t *testing.T) {
 	}
 }
 
+type blockingFirstExporter struct {
+	firstExport chan struct{}
+	release     chan struct{}
+	once        sync.Once
+}
+
+func (e *blockingFirstExporter) ExportSpans(context.Context, []sdktrace.ReadOnlySpan) error {
+	e.once.Do(func() {
+		close(e.firstExport)
+		<-e.release
+	})
+	return nil
+}
+
+func (*blockingFirstExporter) Shutdown(context.Context) error { return nil }
+
+func TestFinishSurfacesSaturatedBatchQueueDrop(t *testing.T) {
+	exporter := &blockingFirstExporter{
+		firstExport: make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+	capturingExporter := &errorCapturingExporter{exporter: exporter}
+	batchProcessor := sdktrace.NewBatchSpanProcessor(
+		capturingExporter,
+		sdktrace.WithMaxQueueSize(1),
+		sdktrace.WithMaxExportBatchSize(1),
+		sdktrace.WithBatchTimeout(time.Hour),
+	)
+	dropCountingProcessor := &dropCountingSpanProcessor{
+		processor: batchProcessor,
+		exporter:  capturingExporter,
+	}
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(dropCountingProcessor))
+	r, err := newRun(context.Background(), provider, Config{Agent: "codex", RunID: "t", StartedAt: testStart})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.exportErrors = capturingExporter
+	r.spanDelivery = dropCountingProcessor
+
+	first := r.startToolSpan("first", testStart.Add(time.Millisecond))
+	first.End(trace.WithTimestamp(testStart.Add(2 * time.Millisecond)))
+	select {
+	case <-exporter.firstExport:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the blocked export")
+	}
+
+	second := r.startToolSpan("second", testStart.Add(3*time.Millisecond))
+	second.End(trace.WithTimestamp(testStart.Add(4 * time.Millisecond)))
+	third := r.startToolSpan("third", testStart.Add(5*time.Millisecond))
+	third.End(trace.WithTimestamp(testStart.Add(6 * time.Millisecond)))
+	close(exporter.release)
+
+	exit := 0
+	err = r.Finish(&runrecord.Record{OK: true, ExitCode: &exit}, testStart.Add(time.Second))
+	if err == nil || !strings.Contains(err.Error(), "batch span processor dropped") {
+		t.Fatalf("Finish error = %v, want saturated queue drop", err)
+	}
+}
+
 func TestEnabledHonorsStandardDisableControls(t *testing.T) {
 	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://collector.test/v1/traces")
 	t.Setenv("OTEL_SDK_DISABLED", "true")

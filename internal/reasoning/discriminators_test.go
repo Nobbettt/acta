@@ -2,6 +2,7 @@ package reasoning
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -98,12 +99,12 @@ func TestRedactProviderBlocksRequiresExactDiscriminatorAndPosition(t *testing.T)
 func TestRedactProviderBlocksPreservesProviderShapesInsideUserData(t *testing.T) {
 	const fixture = `{"type":"item.completed","item":{"type":"reasoning","text":"fixture"}}`
 	tests := map[string]string{
-		"result":                    `{"result":` + fixture + `}`,
-		"arguments":                 `{"arguments":` + fixture + `}`,
-		"input":                     `{"input":` + fixture + `}`,
-		"output":                    `{"output":` + fixture + `}`,
-		"structured output":         `{"structured_output":` + fixture + `}`,
-		"tool use result":           `{"tool_use_result":` + fixture + `}`,
+		"result":                    `{"type":"mcp_tool_call","result":` + fixture + `}`,
+		"arguments":                 `{"type":"mcp_tool_call","arguments":` + fixture + `}`,
+		"input":                     `{"type":"tool_use","input":` + fixture + `}`,
+		"output":                    `{"kind":"tool_result","output":` + fixture + `}`,
+		"structured output":         `{"type":"result","structured_output":` + fixture + `}`,
+		"tool use result":           `{"type":"user","tool_use_result":` + fixture + `}`,
 		"structured output details": `{"kind":"structured_output","details":` + fixture + `}`,
 		"user content by type":      `{"type":"user","content":[` + fixture + `]}`,
 		"user content by role":      `{"role":"user","content":[` + fixture + `]}`,
@@ -135,10 +136,29 @@ func TestRedactProviderBlocksPreservesProviderShapesInsideUserData(t *testing.T)
 
 func TestContainsRedactedProviderBlockIgnoresUserData(t *testing.T) {
 	var payload any
-	if err := json.Unmarshal([]byte(`{"result":{"type":"item.completed","item":{"type":"reasoning","redacted":true}}}`), &payload); err != nil {
+	if err := json.Unmarshal([]byte(`{"type":"mcp_tool_call","result":{"type":"item.completed","item":{"type":"reasoning","redacted":true}}}`), &payload); err != nil {
 		t.Fatal(err)
 	}
 	if ContainsRedactedProviderBlock(payload) {
 		t.Fatal("redacted provider-shaped user data was classified as a provider envelope")
+	}
+}
+
+func TestRedactValueTraversesPayloadKeysOnUnknownEnvelopes(t *testing.T) {
+	const secret = "future-output-reasoning-7421"
+	var payload any
+	if err := json.Unmarshal([]byte(`{"type":"future.event","output":[{"type":"reasoning","text":"`+secret+`"}]}`), &payload); err != nil {
+		t.Fatal(err)
+	}
+	changed, verified := RedactValue(payload)
+	if !changed || !verified {
+		t.Fatalf("future output redaction = changed %v, verified %v", changed, verified)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), secret) || !strings.Contains(string(encoded), `"redacted":true`) {
+		t.Fatalf("future output reasoning was not redacted: %s", encoded)
 	}
 }
