@@ -615,6 +615,34 @@ func TestProjectionDirectoryWritableProbe(t *testing.T) {
 		}
 	})
 
+	t.Run("wrapped permission error probes read-only directory", func(t *testing.T) {
+		lockErr := fmt.Errorf("create projection lock: %w", os.ErrPermission)
+		probeCalls := 0
+		allowed, err := legacyProjectionLockFreeAllowedWithProbe("unused", lockErr, func(string) (bool, error) {
+			probeCalls++
+			return false, nil
+		})
+		if err != nil || !allowed || probeCalls != 1 {
+			t.Fatalf("lock-free decision = %v, %v with %d probes; want allowed after one probe", allowed, err, probeCalls)
+		}
+	})
+
+	t.Run("wrapped permission error on writable directory is preserved", func(t *testing.T) {
+		lockErr := fmt.Errorf("create projection lock: %w", os.ErrPermission)
+		probeCalls := 0
+		allowed, err := legacyProjectionLockFreeAllowedWithProbe("unused", lockErr, func(string) (bool, error) {
+			probeCalls++
+			return true, nil
+		})
+		if err != nil || allowed || probeCalls != 1 {
+			t.Fatalf("lock-free decision = %v, %v with %d probes; want original lock failure after one probe", allowed, err, probeCalls)
+		}
+		preserved := fmt.Errorf("lock legacy projection snapshot: %w", lockErr)
+		if !errors.Is(preserved, lockErr) {
+			t.Fatalf("wrapped lock error %v does not preserve %v", preserved, lockErr)
+		}
+	})
+
 	t.Run("unexpected probe error propagates", func(t *testing.T) {
 		unexpected := errors.New("unexpected probe failure")
 		allowed, err := legacyProjectionLockFreeAllowedWithProbe("unused", syscall.EACCES, func(string) (bool, error) {

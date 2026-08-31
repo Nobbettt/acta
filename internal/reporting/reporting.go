@@ -1021,7 +1021,7 @@ func legacyProjectionLockFreeAllowedWithProbe(runDir string, lockErr error, writ
 	if errors.Is(lockErr, syscall.EROFS) {
 		return true, nil
 	}
-	if !errors.Is(lockErr, syscall.EACCES) {
+	if !errors.Is(lockErr, os.ErrPermission) {
 		return false, nil
 	}
 	writable, err := writableProbe(runDir)

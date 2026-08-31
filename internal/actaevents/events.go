@@ -644,10 +644,13 @@ func marshalProjectionManifest(producer runrecord.Producer, generation string, r
 
 // Fault-injection seams; after-hook errors bypass rollback to model process death.
 var (
-	projectionReplace      = securefile.ReplaceFile
-	projectionLink         = os.Link
-	projectionAfterBackup  = func() error { return nil }
-	projectionAfterPublish = func(string) error { return nil }
+	projectionReplace             = securefile.ReplaceFile
+	projectionLink                = os.Link
+	projectionAfterBackup         = func() error { return nil }
+	projectionAfterPublish        = func(string) error { return nil }
+	projectionAfterDataSync       = func() error { return nil }
+	projectionAfterManifestSync   = func() error { return nil }
+	projectionAfterCopyBackupOpen = func(*os.File) error { return nil }
 )
 
 type projectionScratchFile struct {
@@ -657,6 +660,8 @@ type projectionScratchFile struct {
 }
 
 var projectionArtifactNames = []string{"run.json", "digest.json", Filename, "projection.json"}
+
+const projectionCopyBackupTemporaryPrefix = ".projection-copy-backup-"
 
 func commitProjection(runDir, generation string, finals []string, payloads [][]byte, afterLock func() error) (returnErr error) {
 	return commitProjectionContext(context.Background(), runDir, generation, finals, payloads, afterLock)
@@ -723,7 +728,10 @@ func commitProjectionContext(ctx context.Context, runDir, generation string, fin
 	if err := projectionAfterBackup(); err != nil {
 		return fmt.Errorf("projection commit interrupted after backup: %w", err)
 	}
-	for index, name := range finals {
+	manifestIndex := len(finals) - 1
+	// Publish and sync every data replacement before the commit-point manifest:
+	// manifest durable ⇒ its data durable.
+	for index, name := range finals[:manifestIndex] {
 		if err := projectionReplace(staged[index], filepath.Join(runDir, name)); err != nil {
 			return errors.Join(fmt.Errorf("publish projection %s: %w", name, err), rollback(index))
 		}
@@ -732,9 +740,27 @@ func commitProjectionContext(ctx context.Context, runDir, generation string, fin
 		}
 	}
 	if err := securefile.SyncDirectory(runDir); err != nil {
+		rollbackErr := rollback(manifestIndex)
+		_ = securefile.SyncDirectory(runDir)
+		return errors.Join(fmt.Errorf("sync published projection data directory: %w", err), rollbackErr)
+	}
+	if err := projectionAfterDataSync(); err != nil {
+		return fmt.Errorf("projection commit interrupted after syncing data: %w", err)
+	}
+	manifestName := finals[manifestIndex]
+	if err := projectionReplace(staged[manifestIndex], filepath.Join(runDir, manifestName)); err != nil {
+		return errors.Join(fmt.Errorf("publish projection %s: %w", manifestName, err), rollback(manifestIndex))
+	}
+	if err := projectionAfterPublish(manifestName); err != nil {
+		return fmt.Errorf("projection commit interrupted after publishing %s: %w", manifestName, err)
+	}
+	if err := securefile.SyncDirectory(runDir); err != nil {
 		rollbackErr := rollback(len(finals))
 		_ = securefile.SyncDirectory(runDir)
-		return errors.Join(fmt.Errorf("sync published projection directory: %w", err), rollbackErr)
+		return errors.Join(fmt.Errorf("sync published projection manifest directory: %w", err), rollbackErr)
+	}
+	if err := projectionAfterManifestSync(); err != nil {
+		return fmt.Errorf("projection commit interrupted after syncing manifest: %w", err)
 	}
 	// The projection generation is already durable. Backup cleanup is
 	// validated but best-effort and does not invalidate the committed manifest.
@@ -755,8 +781,8 @@ func commitProjectionContext(ctx context.Context, runDir, generation string, fin
 }
 
 // backupProjectionArtifact first tries a hardlink backup. Filesystems which do
-// not support links fall back to an exclusive byte-for-byte copy that is
-// fsynced before publication; the source remains in place in either case.
+// not support links fall back to a byte-for-byte copy that is fsynced and
+// atomically published; the source remains in place in either case.
 // EEXIST remains an error because it indicates an unexpected backup collision.
 func backupProjectionArtifact(runDir, sourcePath, backupPath string) error {
 	if err := projectionLink(sourcePath, backupPath); err == nil {
@@ -770,17 +796,24 @@ func backupProjectionArtifact(runDir, sourcePath, backupPath string) error {
 		return fmt.Errorf("open projection backup source: %w", err)
 	}
 	defer source.Close()
-	backup, err := securefile.CreateExclusive(backupPath)
+	backup, err := securefile.CreateTemp(runDir, projectionCopyBackupTemporaryPrefix+"*")
 	if err != nil {
-		return fmt.Errorf("create projection copy backup: %w", err)
+		return fmt.Errorf("create projection copy backup temporary: %w", err)
 	}
-	complete := false
+	temporaryPath := backup.Name()
+	removeTemporary := true
 	defer func() {
 		_ = backup.Close()
-		if !complete {
-			_ = os.Remove(backupPath)
+		if removeTemporary {
+			_ = os.Remove(temporaryPath)
 		}
 	}()
+	if err := projectionAfterCopyBackupOpen(backup); err != nil {
+		// Fault-injection errors model process death and deliberately preserve
+		// the unrecognized partial temporary for recovery cleanup.
+		removeTemporary = false
+		return fmt.Errorf("projection copy backup interrupted: %w", err)
+	}
 	if _, err := io.Copy(backup, source); err != nil {
 		return fmt.Errorf("copy projection backup: %w", err)
 	}
@@ -790,14 +823,23 @@ func backupProjectionArtifact(runDir, sourcePath, backupPath string) error {
 	if err := backup.Close(); err != nil {
 		return fmt.Errorf("close projection copy backup: %w", err)
 	}
-	complete = true
+	if _, err := os.Lstat(backupPath); err == nil {
+		return fmt.Errorf("publish projection copy backup: %w", os.ErrExist)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect projection copy backup destination: %w", err)
+	}
+	if err := projectionReplace(temporaryPath, backupPath); err != nil {
+		return fmt.Errorf("publish projection copy backup: %w", err)
+	}
+	removeTemporary = false
 	return nil
 }
 
 // RecoverProjectionCommit runs only while the bundle projection lock is held.
-// Staged files never define a generation and are always discarded. The current
-// manifest is the generation pointer: targets which do not match it are
-// restored from a matching hardlink or copied backup. A backup is removed only
+// Staged files and incomplete copied-backup temporaries never define a
+// generation and are always discarded. The current manifest is the generation
+// pointer: targets which do not match it are restored from a matching hardlink
+// or copied backup. A backup is removed only
 // after its target exists as a regular file and, when the manifest supplies a
 // digest, matches that digest. If no manifest exists, the newest backup set is
 // rolled back deterministically before unmanifested backups are cleaned. The
@@ -930,6 +972,10 @@ func projectionScratchFiles(runDir string) ([]projectionScratchFile, []projectio
 	}
 	var staged, backups []projectionScratchFile
 	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), projectionCopyBackupTemporaryPrefix) {
+			staged = append(staged, projectionScratchFile{path: filepath.Join(runDir, entry.Name()), name: "copy backup temporary"})
+			continue
+		}
 		for _, artifact := range projectionArtifactNames {
 			temporaryPrefix := ".." + artifact + ".staged-"
 			if strings.HasPrefix(entry.Name(), temporaryPrefix) {
