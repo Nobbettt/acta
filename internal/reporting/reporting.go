@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"mime"
 	"net"
@@ -18,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 	"unicode"
 
@@ -887,13 +889,25 @@ func snapshotProjectionArtifactsContext(ctx context.Context, runDir string, maxB
 }
 
 func snapshotLegacyProjectionArtifactsContext(ctx context.Context, resolvedRunDir, runDir, manifestPath string, maxBytes int64) (snapshots map[string]artifactSnapshot, retry bool, returnErr error) {
-	lock, err := actaevents.AcquireProjectionLock(runDir)
+	lock, err := actaevents.AcquireProjectionLockContext(ctx, runDir)
 	if err != nil {
-		return nil, false, fmt.Errorf("lock legacy projection snapshot: %w", err)
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, false, fmt.Errorf("projection lock held; upload cancelled/timed out: %w", err)
+		}
+		lockFree, probeErr := legacyProjectionLockFreeAllowed(runDir, err)
+		if probeErr != nil {
+			return nil, false, probeErr
+		}
+		if !lockFree {
+			return nil, false, fmt.Errorf("lock legacy projection snapshot: %w", err)
+		}
+		slog.DebugContext(ctx, "uploading legacy projection without lock because bundle is not writable", "run_dir", runDir, "error", err)
 	}
-	defer func() {
-		returnErr = errors.Join(returnErr, lock.Close())
-	}()
+	if lock != nil {
+		defer func() {
+			returnErr = errors.Join(returnErr, lock.Close())
+		}()
+	}
 	if _, err := os.Stat(manifestPath); err == nil {
 		return nil, true, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -939,6 +953,20 @@ func snapshotLegacyProjectionArtifactsContext(ctx context.Context, resolvedRunDi
 		return nil, false, fmt.Errorf("re-stat projection manifest: %w", err)
 	}
 	return snapshots, false, nil
+}
+
+func legacyProjectionLockFreeAllowed(runDir string, lockErr error) (bool, error) {
+	if errors.Is(lockErr, syscall.EROFS) {
+		return true, nil
+	}
+	if !errors.Is(lockErr, syscall.EACCES) {
+		return false, nil
+	}
+	writable, err := projectionDirectoryWritable(runDir)
+	if err != nil {
+		return false, fmt.Errorf("probe bundle directory writability after projection lock permission error: %w", err)
+	}
+	return !writable, nil
 }
 
 func projectionManifestUnchanged(root, path string, firstInfo os.FileInfo, firstHash [sha256.Size]byte) (bool, error) {

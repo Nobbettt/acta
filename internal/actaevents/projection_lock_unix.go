@@ -13,16 +13,19 @@ type projectionLock struct {
 	file *os.File
 }
 
-func lockProjection(path string) (*projectionLock, error) {
+func tryLockProjection(path string) (*projectionLock, bool, error) {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX); err != nil {
-		_ = file.Close()
-		return nil, err
+	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		closeErr := file.Close()
+		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+			return nil, false, closeErr
+		}
+		return nil, false, errors.Join(err, closeErr)
 	}
-	return &projectionLock{file: file}, nil
+	return &projectionLock{file: file}, true, nil
 }
 
 func (lock *projectionLock) close() error {

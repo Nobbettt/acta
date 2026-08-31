@@ -14,17 +14,21 @@ type projectionLock struct {
 	overlapped windows.Overlapped
 }
 
-func lockProjection(path string) (*projectionLock, error) {
+func tryLockProjection(path string) (*projectionLock, bool, error) {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	lock := &projectionLock{file: file}
-	if err := windows.LockFileEx(windows.Handle(file.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &lock.overlapped); err != nil {
-		_ = file.Close()
-		return nil, err
+	flags := uint32(windows.LOCKFILE_EXCLUSIVE_LOCK | windows.LOCKFILE_FAIL_IMMEDIATELY)
+	if err := windows.LockFileEx(windows.Handle(file.Fd()), flags, 0, 1, 0, &lock.overlapped); err != nil {
+		closeErr := file.Close()
+		if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+			return nil, false, closeErr
+		}
+		return nil, false, errors.Join(err, closeErr)
 	}
-	return lock, nil
+	return lock, true, nil
 }
 
 func (lock *projectionLock) close() error {

@@ -327,6 +327,9 @@ func TestUploadRunLegacyProjectionUsesSingleLockedSnapshot(t *testing.T) {
 	runDir := writeBundle(t)
 	attempts := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := os.Stat(filepath.Join(runDir, ".projection.lock")); err != nil {
+			t.Errorf("writable legacy upload did not create projection lock: %v", err)
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
@@ -343,6 +346,94 @@ func TestUploadRunLegacyProjectionUsesSingleLockedSnapshot(t *testing.T) {
 	}
 	if attempts != 1 {
 		t.Fatalf("legacy projection snapshot passes = %d, want 1", attempts)
+	}
+}
+
+func TestUploadRunLegacyProjectionReadOnlyBundleUsesLockFreeSnapshot(t *testing.T) {
+	runDir := writeBundle(t)
+	makeBundleDirectoryReadOnly(t, runDir)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	err := UploadRun(context.Background(), Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+		AllowUnredactedRemoteReasoning: true,
+	}, testRecord(runDir))
+	if err != nil {
+		t.Fatalf("UploadRun() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(runDir, ".projection.lock")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read-only legacy upload created projection lock, stat error = %v", err)
+	}
+}
+
+func TestUploadRunLegacyProjectionLockFreeSnapshotStillDetectsTornGeneration(t *testing.T) {
+	runDir := writeBundle(t)
+	events := readTestFile(t, filepath.Join(runDir, actaevents.Filename))
+	originalMode := makeBundleDirectoryReadOnly(t, runDir)
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	err := UploadRun(context.Background(), Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+		AllowUnredactedRemoteReasoning: true,
+		projectionSnapshotHook: func(attempt int) {
+			if err := os.Chmod(runDir, originalMode); err != nil {
+				t.Fatal(err)
+			}
+			digestPayload := fmt.Sprintf("{\"run_id\":\"run-1\",\"attempt\":%d}\n", attempt)
+			writeProjectionGeneration(t, runDir, strconv.Itoa(100+attempt), digestPayload, events)
+			if err := os.Chmod(runDir, 0o555); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}, testRecord(runDir))
+	if err == nil || !strings.Contains(err.Error(), "torn bundle") || !strings.Contains(err.Error(), "after 3 attempts") {
+		t.Fatalf("UploadRun() error = %v, want bounded torn-bundle error", err)
+	}
+	if requests != 0 {
+		t.Fatalf("torn lock-free bundle issued %d upload requests, want none", requests)
+	}
+	if _, err := os.Stat(filepath.Join(runDir, ".projection.lock")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lock-free torn-generation check created projection lock, stat error = %v", err)
+	}
+}
+
+func TestUploadRunProjectionLockWaitHonorsContext(t *testing.T) {
+	runDir := writeBundle(t)
+	lock, err := actaevents.AcquireProjectionLock(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	err = UploadRun(ctx, Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+		AllowUnredactedRemoteReasoning: true,
+	}, testRecord(runDir))
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "projection lock held; upload cancelled/timed out") {
+		t.Fatalf("UploadRun() error = %v, want projection-lock upload timeout", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 2*time.Second {
+		t.Fatalf("UploadRun() returned after %s, want under 2s", elapsed)
+	}
+	if requests != 0 {
+		t.Fatalf("timed-out lock wait issued %d upload requests, want none", requests)
 	}
 }
 
@@ -2784,6 +2875,27 @@ func writeBundle(t *testing.T) string {
 		"",
 	}, "\n"))
 	return runDir
+}
+
+func makeBundleDirectoryReadOnly(t *testing.T, runDir string) os.FileMode {
+	t.Helper()
+	info, err := os.Stat(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalMode := info.Mode().Perm()
+	if err := os.Chmod(runDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(runDir, originalMode) })
+	writable, err := projectionDirectoryWritable(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writable {
+		t.Skip("test environment does not enforce read-only directory permissions")
+	}
+	return originalMode
 }
 
 func writeProjectionGeneration(t *testing.T, runDir, generation, digestPayload, eventsPayload string) {

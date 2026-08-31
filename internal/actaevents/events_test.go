@@ -2,6 +2,7 @@ package actaevents
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -558,6 +559,147 @@ func TestConcurrentProjectionCommitsSerializeGenerations(t *testing.T) {
 		t.Fatalf("second projection commit: %v", err)
 	}
 	assertProjectionGeneration(t, runDir, secondPayloads)
+}
+
+func TestProjectionCommitsForDifferentBundlesDoNotSerialize(t *testing.T) {
+	firstRunDir := t.TempDir()
+	secondRunDir := t.TempDir()
+	firstFinals, firstPayloads := projectionCommitFixture(t, "100", "first digest\n", "first events\n")
+	secondFinals, secondPayloads := projectionCommitFixture(t, "200", "second digest\n", "second events\n")
+
+	firstLocked := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- commitProjection(firstRunDir, "100", firstFinals, firstPayloads, func() error {
+			close(firstLocked)
+			<-releaseFirst
+			return nil
+		})
+	}()
+	<-firstLocked
+
+	secondLocked := make(chan struct{})
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- commitProjection(secondRunDir, "200", secondFinals, secondPayloads, func() error {
+			close(secondLocked)
+			return nil
+		})
+	}()
+	serialized := false
+	select {
+	case <-secondLocked:
+	case <-time.After(2 * time.Second):
+		serialized = true
+	}
+	close(releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first projection commit: %v", err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second projection commit: %v", err)
+	}
+	if serialized {
+		t.Fatal("projection commits for different bundles serialized against each other")
+	}
+}
+
+func TestAcquireProjectionLockContextTimesOutWhileHeld(t *testing.T) {
+	runDir := t.TempDir()
+	held, err := AcquireProjectionLock(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err = AcquireProjectionLockContext(ctx, runDir)
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "projection lock held") {
+		t.Fatalf("AcquireProjectionLockContext() error = %v, want held-lock timeout", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 2*time.Second {
+		t.Fatalf("AcquireProjectionLockContext() returned after %s, want under 2s", elapsed)
+	}
+}
+
+func TestProjectionCommitContextTimesOutWhileHeld(t *testing.T) {
+	runDir := t.TempDir()
+	held, err := AcquireProjectionLock(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	finals, payloads := projectionCommitFixture(t, "100", "digest\n", "events\n")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	err = commitProjectionContext(ctx, runDir, "100", finals, payloads, nil)
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "lock projection commit") {
+		t.Fatalf("commitProjectionContext() error = %v, want projection-lock timeout", err)
+	}
+	for _, name := range finals {
+		if _, statErr := os.Stat(filepath.Join(runDir, name)); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("timed-out projection commit wrote %s, stat error = %v", name, statErr)
+		}
+	}
+}
+
+func TestAcquireProjectionLockContextSucceedsAfterRelease(t *testing.T) {
+	runDir := t.TempDir()
+	held, err := AcquireProjectionLock(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	acquired := make(chan *ProjectionLock, 1)
+	errs := make(chan error, 1)
+	go func() {
+		lock, err := AcquireProjectionLockContext(ctx, runDir)
+		if err != nil {
+			errs <- err
+			return
+		}
+		acquired <- lock
+	}()
+	select {
+	case lock := <-acquired:
+		_ = lock.Close()
+		t.Fatal("second handle acquired the projection lock before release")
+	case err := <-errs:
+		t.Fatalf("wait for held projection lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := held.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case lock := <-acquired:
+		if err := lock.Close(); err != nil {
+			t.Fatal(err)
+		}
+	case err := <-errs:
+		t.Fatalf("acquire released projection lock: %v", err)
+	case <-ctx.Done():
+		t.Fatal("projection lock was not acquired after release")
+	}
+}
+
+func TestAcquireProjectionLockContextUncontended(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	lock, err := AcquireProjectionLockContext(ctx, t.TempDir())
+	if err != nil {
+		t.Fatalf("AcquireProjectionLockContext() error = %v", err)
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestProjectionCommitLockReleasedAfterFailure(t *testing.T) {

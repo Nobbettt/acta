@@ -347,7 +347,7 @@ func digestCommand(ctx context.Context, args []string, stdout io.Writer, stderr 
 		fmt.Fprintln(stderr, "digest: existing derived artifacts were left unchanged; pass --allow-partial to replace them with a degraded projection")
 		return 1
 	}
-	if err := actaevents.WriteProjectionForRunDir(runDir, d); err != nil {
+	if err := actaevents.WriteProjectionForRunDirContext(ctx, runDir, d); err != nil {
 		fmt.Fprintf(stderr, "digest: %v\n", err)
 		return 1
 	}

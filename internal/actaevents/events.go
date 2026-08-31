@@ -6,6 +6,7 @@ package actaevents
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -513,6 +514,12 @@ func buildEventsForRunDir(runDir string, d *digest.Digest) ([]Event, error) {
 // rollback-protected generation. projection.json is committed last and is the
 // completion marker for consumers that require pair consistency.
 func WriteProjectionForRunDir(runDir string, d *digest.Digest) error {
+	return WriteProjectionForRunDirContext(context.Background(), runDir, d)
+}
+
+// WriteProjectionForRunDirContext is WriteProjectionForRunDir with
+// cancellation support while waiting to publish the new generation.
+func WriteProjectionForRunDirContext(ctx context.Context, runDir string, d *digest.Digest) error {
 	events, err := buildEventsForRunDir(runDir, d)
 	if err != nil {
 		return err
@@ -544,36 +551,15 @@ func WriteProjectionForRunDir(runDir string, d *digest.Digest) error {
 	manifestPayload = append(manifestPayload, '\n')
 	finals := []string{"digest.json", Filename, "projection.json"}
 	payloads := [][]byte{digestPayload, eventPayload, manifestPayload}
-	return commitProjection(runDir, generation, finals, payloads, nil)
-}
-
-// ProjectionLock serializes projection publication and legacy projection
-// snapshots for one run bundle.
-type ProjectionLock struct {
-	lock *projectionLock
-}
-
-// AcquireProjectionLock blocks until the per-bundle projection lock is held.
-func AcquireProjectionLock(runDir string) (*ProjectionLock, error) {
-	lock, err := lockProjection(filepath.Join(runDir, ".projection.lock"))
-	if err != nil {
-		return nil, err
-	}
-	return &ProjectionLock{lock: lock}, nil
-}
-
-// Close releases the per-bundle projection lock.
-func (lock *ProjectionLock) Close() error {
-	if lock == nil || lock.lock == nil {
-		return nil
-	}
-	projectionLock := lock.lock
-	lock.lock = nil
-	return projectionLock.close()
+	return commitProjectionContext(ctx, runDir, generation, finals, payloads, nil)
 }
 
 func commitProjection(runDir, generation string, finals []string, payloads [][]byte, afterLock func() error) (returnErr error) {
-	lock, err := AcquireProjectionLock(runDir)
+	return commitProjectionContext(context.Background(), runDir, generation, finals, payloads, afterLock)
+}
+
+func commitProjectionContext(ctx context.Context, runDir, generation string, finals []string, payloads [][]byte, afterLock func() error) (returnErr error) {
+	lock, err := AcquireProjectionLockContext(ctx, runDir)
 	if err != nil {
 		return fmt.Errorf("lock projection commit: %w", err)
 	}
