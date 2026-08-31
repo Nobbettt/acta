@@ -641,8 +641,20 @@ func marshalProjectionManifest(producer runrecord.Producer, generation string, r
 	return append(payload, '\n'), nil
 }
 
-// projectionRename is a fault-injection seam for rollback tests.
-var projectionRename = os.Rename
+// Fault-injection seams; after-hook errors bypass rollback to model process death.
+var (
+	projectionReplace      = securefile.ReplaceFile
+	projectionAfterBackup  = func() error { return nil }
+	projectionAfterPublish = func(string) error { return nil }
+)
+
+type projectionScratchFile struct {
+	path       string
+	name       string
+	generation string
+}
+
+var projectionArtifactNames = []string{"run.json", "digest.json", Filename, "projection.json"}
 
 func commitProjection(runDir, generation string, finals []string, payloads [][]byte, afterLock func() error) (returnErr error) {
 	return commitProjectionContext(context.Background(), runDir, generation, finals, payloads, afterLock)
@@ -656,6 +668,9 @@ func commitProjectionContext(ctx context.Context, runDir, generation string, fin
 	defer func() {
 		returnErr = errors.Join(returnErr, lock.Close())
 	}()
+	if err := recoverProjectionCommit(runDir); err != nil {
+		return fmt.Errorf("recover projection commit: %w", err)
+	}
 	if afterLock != nil {
 		if err := afterLock(); err != nil {
 			return fmt.Errorf("prepare projection commit: %w", err)
@@ -676,12 +691,15 @@ func commitProjectionContext(ctx context.Context, runDir, generation string, fin
 	}
 	rollback := func(published int) error {
 		var rollbackErr error
-		for index := 0; index < published; index++ {
-			_ = os.Remove(filepath.Join(runDir, finals[index]))
-		}
 		for index := range finals {
 			if _, err := os.Stat(backups[index]); err == nil {
-				rollbackErr = errors.Join(rollbackErr, projectionRename(backups[index], filepath.Join(runDir, finals[index])))
+				if index < published {
+					rollbackErr = errors.Join(rollbackErr, projectionReplace(backups[index], filepath.Join(runDir, finals[index])))
+				} else {
+					rollbackErr = errors.Join(rollbackErr, os.Remove(backups[index]))
+				}
+			} else if index < published {
+				rollbackErr = errors.Join(rollbackErr, os.Remove(filepath.Join(runDir, finals[index])))
 			}
 			_ = os.Remove(staged[index])
 		}
@@ -690,14 +708,25 @@ func commitProjectionContext(ctx context.Context, runDir, generation string, fin
 	for index, name := range finals {
 		finalPath := filepath.Join(runDir, name)
 		if _, err := os.Stat(finalPath); err == nil {
-			if err := projectionRename(finalPath, backups[index]); err != nil {
+			if err := os.Link(finalPath, backups[index]); err != nil {
 				return errors.Join(fmt.Errorf("backup projection %s: %w", name, err), rollback(0))
 			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return errors.Join(fmt.Errorf("stat projection %s for backup: %w", name, err), rollback(0))
 		}
 	}
+	if err := securefile.SyncDirectory(runDir); err != nil {
+		return errors.Join(fmt.Errorf("sync projection backups: %w", err), rollback(0))
+	}
+	if err := projectionAfterBackup(); err != nil {
+		return fmt.Errorf("projection commit interrupted after backup: %w", err)
+	}
 	for index, name := range finals {
-		if err := projectionRename(staged[index], filepath.Join(runDir, name)); err != nil {
+		if err := projectionReplace(staged[index], filepath.Join(runDir, name)); err != nil {
 			return errors.Join(fmt.Errorf("publish projection %s: %w", name, err), rollback(index))
+		}
+		if err := projectionAfterPublish(name); err != nil {
+			return fmt.Errorf("projection commit interrupted after publishing %s: %w", name, err)
 		}
 	}
 	if err := securefile.SyncDirectory(runDir); err != nil {
@@ -705,13 +734,247 @@ func commitProjectionContext(ctx context.Context, runDir, generation string, fin
 		_ = securefile.SyncDirectory(runDir)
 		return errors.Join(fmt.Errorf("sync published projection directory: %w", err), rollbackErr)
 	}
-	for _, backup := range backups {
-		_ = os.Remove(backup)
-	}
 	// The projection generation is already durable. Backup cleanup is
-	// best-effort and does not invalidate the committed manifest.
-	_ = securefile.SyncDirectory(runDir)
+	// validated but best-effort and does not invalidate the committed manifest.
+	removedBackup := false
+	for index, backup := range backups {
+		wantHash := fmt.Sprintf("%x", sha256.Sum256(payloads[index]))
+		intact, _ := projectionArtifactIntact(runDir, filepath.Join(runDir, finals[index]), wantHash)
+		if intact {
+			if err := os.Remove(backup); err == nil {
+				removedBackup = true
+			}
+		}
+	}
+	if removedBackup {
+		_ = securefile.SyncDirectory(runDir)
+	}
 	return nil
+}
+
+// recoverProjectionCommit runs only while the bundle projection lock is held.
+// Staged files never define a generation and are always discarded. The current
+// manifest is the generation pointer: targets which do not match it are
+// restored from a matching hardlink backup. A backup is removed only after its
+// target exists as a regular file and, when the manifest supplies a digest,
+// matches that digest. If no manifest exists, the newest backup set is rolled
+// back deterministically before unmanifested backups are cleaned.
+func recoverProjectionCommit(runDir string) error {
+	staged, backups, err := projectionScratchFiles(runDir)
+	if err != nil {
+		return err
+	}
+	changed := false
+	for _, scratch := range staged {
+		if err := os.Remove(scratch.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("discard staged projection %s: %w", scratch.name, err)
+		}
+		changed = true
+	}
+	if len(backups) == 0 {
+		if changed {
+			return securefile.SyncDirectory(runDir)
+		}
+		return nil
+	}
+
+	manifest, manifestErr := readProjectionManifest(runDir, filepath.Join(runDir, "projection.json"))
+	if manifestErr != nil {
+		generation := projectionBackupGeneration(runDir, backups)
+		for _, name := range projectionArtifactNames {
+			for _, backup := range backups {
+				if backup.generation != generation || backup.name != name {
+					continue
+				}
+				targetPath := filepath.Join(runDir, name)
+				targetInfo, targetErr := os.Stat(targetPath)
+				backupInfo, backupErr := os.Stat(backup.path)
+				if targetErr == nil && backupErr == nil && os.SameFile(targetInfo, backupInfo) {
+					break
+				}
+				if err := projectionReplace(backup.path, targetPath); err != nil {
+					return fmt.Errorf("restore interrupted projection %s: %w", name, err)
+				}
+				changed = true
+				break
+			}
+		}
+		manifest, manifestErr = readProjectionManifest(runDir, filepath.Join(runDir, "projection.json"))
+	}
+
+	expected := map[string]string{}
+	if manifestErr == nil {
+		expected["run.json"] = manifest.RunSHA256
+		expected["digest.json"] = manifest.DigestSHA256
+		expected[Filename] = manifest.EventsSHA256
+		for _, name := range []string{"run.json", "digest.json", Filename} {
+			wantHash := expected[name]
+			if wantHash == "" && name == "run.json" {
+				continue
+			}
+			intact, targetErr := projectionArtifactIntact(runDir, filepath.Join(runDir, name), wantHash)
+			if intact {
+				continue
+			}
+			restored := false
+			for index := len(backups) - 1; index >= 0; index-- {
+				backup := backups[index]
+				if backup.name != name {
+					continue
+				}
+				matches, _ := projectionArtifactIntact(runDir, backup.path, wantHash)
+				if !matches {
+					continue
+				}
+				if err := projectionReplace(backup.path, filepath.Join(runDir, name)); err != nil {
+					return fmt.Errorf("restore manifested projection %s: %w", name, err)
+				}
+				changed = true
+				restored = true
+				break
+			}
+			if !restored {
+				if targetErr != nil {
+					return fmt.Errorf("validate manifested projection %s: %w", name, targetErr)
+				}
+				return fmt.Errorf("manifested projection %s has no intact target or backup", name)
+			}
+		}
+	}
+
+	for _, backup := range backups {
+		if _, err := os.Stat(backup.path); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return fmt.Errorf("stat projection backup %s: %w", backup.name, err)
+		}
+		intact := false
+		if backup.name == "projection.json" && manifestErr == nil {
+			_, err = readProjectionManifest(runDir, filepath.Join(runDir, backup.name))
+			intact = err == nil
+		} else {
+			intact, err = projectionArtifactIntact(runDir, filepath.Join(runDir, backup.name), expected[backup.name])
+		}
+		if !intact {
+			if err != nil {
+				return fmt.Errorf("validate projection target %s before backup cleanup: %w", backup.name, err)
+			}
+			return fmt.Errorf("projection target %s is not intact; preserving backup", backup.name)
+		}
+		if err := os.Remove(backup.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove projection backup %s: %w", backup.name, err)
+		}
+		changed = true
+	}
+	if changed {
+		return securefile.SyncDirectory(runDir)
+	}
+	return nil
+}
+
+func projectionScratchFiles(runDir string) ([]projectionScratchFile, []projectionScratchFile, error) {
+	entries, err := os.ReadDir(runDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	var staged, backups []projectionScratchFile
+	for _, entry := range entries {
+		for _, artifact := range projectionArtifactNames {
+			temporaryPrefix := ".." + artifact + ".staged-"
+			if strings.HasPrefix(entry.Name(), temporaryPrefix) {
+				generation, _, found := strings.Cut(strings.TrimPrefix(entry.Name(), temporaryPrefix), ".tmp-")
+				if found && generation != "" && strings.Trim(generation, "0123456789") == "" {
+					staged = append(staged, projectionScratchFile{path: filepath.Join(runDir, entry.Name()), name: artifact, generation: generation})
+				}
+			}
+			for _, kind := range []string{"staged", "backup"} {
+				prefix := "." + artifact + "." + kind + "-"
+				if !strings.HasPrefix(entry.Name(), prefix) {
+					continue
+				}
+				generation := strings.TrimPrefix(entry.Name(), prefix)
+				if generation == "" || strings.Trim(generation, "0123456789") != "" {
+					continue
+				}
+				scratch := projectionScratchFile{path: filepath.Join(runDir, entry.Name()), name: artifact, generation: generation}
+				if kind == "staged" {
+					staged = append(staged, scratch)
+				} else {
+					backups = append(backups, scratch)
+				}
+			}
+		}
+	}
+	return staged, backups, nil
+}
+
+func projectionBackupGeneration(runDir string, backups []projectionScratchFile) string {
+	newest := ""
+	newestManifest := ""
+	for _, backup := range backups {
+		if len(backup.generation) > len(newest) || len(backup.generation) == len(newest) && backup.generation > newest {
+			newest = backup.generation
+		}
+		if backup.name == "projection.json" {
+			if _, err := readProjectionManifest(runDir, backup.path); err == nil &&
+				(len(backup.generation) > len(newestManifest) || len(backup.generation) == len(newestManifest) && backup.generation > newestManifest) {
+				newestManifest = backup.generation
+			}
+		}
+	}
+	if newestManifest != "" {
+		return newestManifest
+	}
+	return newest
+}
+
+func readProjectionManifest(runDir, path string) (projectionManifest, error) {
+	payload, err := securefile.ReadRegularFile(runDir, path, 64<<10)
+	if err != nil {
+		return projectionManifest{}, err
+	}
+	var manifest projectionManifest
+	if err := json.Unmarshal(payload, &manifest); err != nil {
+		return projectionManifest{}, err
+	}
+	if manifest.SchemaVersion < MinProjectionSchemaVersion || manifest.SchemaVersion > ProjectionSchemaVersion {
+		return projectionManifest{}, fmt.Errorf("unsupported projection schema_version %d", manifest.SchemaVersion)
+	}
+	if manifest.Generation == "" || strings.Trim(manifest.Generation, "0123456789") != "" {
+		return projectionManifest{}, errors.New("projection generation must contain only digits")
+	}
+	if !validProjectionHash(manifest.DigestSHA256) || !validProjectionHash(manifest.EventsSHA256) {
+		return projectionManifest{}, errors.New("projection manifest contains an invalid artifact digest")
+	}
+	if manifest.SchemaVersion == ProjectionSchemaVersion && !validProjectionHash(manifest.RunSHA256) {
+		return projectionManifest{}, errors.New("projection manifest contains an invalid run digest")
+	}
+	return manifest, nil
+}
+
+func validProjectionHash(value string) bool {
+	return len(value) == sha256.Size*2 && strings.Trim(value, "0123456789abcdef") == ""
+}
+
+func projectionArtifactIntact(runDir, path, expectedHash string) (bool, error) {
+	limit := int64(MaxStreamBytes)
+	base := filepath.Base(path)
+	switch {
+	case base == "run.json" || strings.HasPrefix(base, ".run.json."):
+		limit = runrecord.MaxRecordBytes
+	case base == "digest.json" || strings.HasPrefix(base, ".digest.json."):
+		limit = int64(digest.MaxDigestBytes)
+	case base == "projection.json" || strings.HasPrefix(base, ".projection.json."):
+		limit = 64 << 10
+	}
+	payload, err := securefile.ReadRegularFile(runDir, path, limit)
+	if err != nil {
+		return false, err
+	}
+	if expectedHash == "" {
+		return true, nil
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(payload)) == expectedHash, nil
 }
 
 func capturedPromptFromEventStream(runDir, runID string) (string, error) {

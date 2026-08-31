@@ -110,6 +110,13 @@ func WriteFile(path string, data []byte) error {
 	return writer.Commit()
 }
 
+// ReplaceFile atomically moves source over target, including when target
+// already exists. On Windows the replacement is requested with write-through
+// semantics.
+func ReplaceFile(source, target string) error {
+	return replaceFile(source, target)
+}
+
 // SyncDirectory makes a successful atomic replacement durable at the
 // directory-entry level on platforms which require an explicit directory
 // fsync. Windows replaceFile already requests write-through semantics.

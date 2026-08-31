@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/nobbettt/acta/internal/digest"
 	"github.com/nobbettt/acta/internal/runrecord"
+	"github.com/nobbettt/acta/internal/securefile"
 )
 
 func TestBuildMapsDigestToProductEvents(t *testing.T) {
@@ -728,6 +730,117 @@ func TestProjectionCommitLockReleasedAfterFailure(t *testing.T) {
 	assertProjectionGeneration(t, runDir, goodPayloads)
 }
 
+func TestProjectionCommitCrashAfterBackupPreservesRunAndRecovers(t *testing.T) {
+	runDir := t.TempDir()
+	finals, oldPayloads := projectionRecordCommitFixture(t, "100", `{"id":"old"}`+"\n", "old digest\n", "old events\n")
+	_, interruptedPayloads := projectionRecordCommitFixture(t, "200", `{"id":"interrupted"}`+"\n", "interrupted digest\n", "interrupted events\n")
+	_, recoveredPayloads := projectionRecordCommitFixture(t, "300", `{"id":"recovered"}`+"\n", "recovered digest\n", "recovered events\n")
+	if err := commitProjection(runDir, "100", finals, oldPayloads, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	originalAfterBackup := projectionAfterBackup
+	projectionAfterBackup = func() error {
+		for _, name := range finals {
+			targetInfo, err := os.Stat(filepath.Join(runDir, name))
+			if err != nil {
+				return fmt.Errorf("stat target %s after backup: %w", name, err)
+			}
+			backupInfo, err := os.Stat(filepath.Join(runDir, "."+name+".backup-200"))
+			if err != nil {
+				return fmt.Errorf("stat backup %s: %w", name, err)
+			}
+			if !os.SameFile(targetInfo, backupInfo) {
+				return fmt.Errorf("backup %s is not a hardlink", name)
+			}
+		}
+		return errors.New("simulated kill")
+	}
+	t.Cleanup(func() { projectionAfterBackup = originalAfterBackup })
+	err := commitProjection(runDir, "200", finals, interruptedPayloads, nil)
+	projectionAfterBackup = originalAfterBackup
+	if err == nil || !strings.Contains(err.Error(), "simulated kill") {
+		t.Fatalf("commit error = %v, want simulated kill", err)
+	}
+	runPayload, err := os.ReadFile(filepath.Join(runDir, "run.json"))
+	if err != nil {
+		t.Fatalf("run.json missing after backup interruption: %v", err)
+	}
+	if !json.Valid(runPayload) || string(runPayload) != string(oldPayloads[0]) {
+		t.Fatalf("run.json = %q, want intact old generation %q", runPayload, oldPayloads[0])
+	}
+	assertProjectionFiles(t, runDir, finals, oldPayloads)
+
+	if err := commitProjection(runDir, "300", finals, recoveredPayloads, nil); err != nil {
+		t.Fatalf("projection commit after interrupted backup: %v", err)
+	}
+	assertProjectionFiles(t, runDir, finals, recoveredPayloads)
+	assertNoProjectionScratch(t, runDir)
+}
+
+func TestProjectionCommitCrashBeforeManifestRecoversPinnedGeneration(t *testing.T) {
+	runDir := t.TempDir()
+	finals, oldPayloads := projectionRecordCommitFixture(t, "100", `{"id":"old"}`+"\n", "old digest\n", "old events\n")
+	_, interruptedPayloads := projectionRecordCommitFixture(t, "200", `{"id":"interrupted"}`+"\n", "interrupted digest\n", "interrupted events\n")
+	_, recoveredPayloads := projectionRecordCommitFixture(t, "300", `{"id":"recovered"}`+"\n", "recovered digest\n", "recovered events\n")
+	if err := commitProjection(runDir, "100", finals, oldPayloads, nil); err != nil {
+		t.Fatal(err)
+	}
+	pinned := make([]*os.File, len(finals))
+	var err error
+	for index, name := range finals {
+		pinned[index], err = securefile.OpenRegular(runDir, filepath.Join(runDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer pinned[index].Close()
+	}
+
+	originalAfterPublish := projectionAfterPublish
+	projectionAfterPublish = func(name string) error {
+		if name == Filename {
+			return errors.New("simulated kill")
+		}
+		return nil
+	}
+	t.Cleanup(func() { projectionAfterPublish = originalAfterPublish })
+	err = commitProjection(runDir, "200", finals, interruptedPayloads, nil)
+	projectionAfterPublish = originalAfterPublish
+	if err == nil || !strings.Contains(err.Error(), "simulated kill") {
+		t.Fatalf("commit error = %v, want simulated kill", err)
+	}
+	for index, file := range pinned {
+		payload, readErr := io.ReadAll(file)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if string(payload) != string(oldPayloads[index]) {
+			t.Fatalf("pinned %s = %q, want old generation %q", finals[index], payload, oldPayloads[index])
+		}
+	}
+	manifestPayload, err := os.ReadFile(filepath.Join(runDir, "projection.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(manifestPayload) != string(oldPayloads[3]) {
+		t.Fatalf("projection.json published before artifacts: %q", manifestPayload)
+	}
+
+	checkedRecovery := false
+	if err := commitProjection(runDir, "300", finals, recoveredPayloads, func() error {
+		checkedRecovery = true
+		assertProjectionFiles(t, runDir, finals, oldPayloads)
+		return nil
+	}); err != nil {
+		t.Fatalf("projection commit after partial publication: %v", err)
+	}
+	if !checkedRecovery {
+		t.Fatal("next projection commit did not reach preparation after recovery")
+	}
+	assertProjectionFiles(t, runDir, finals, recoveredPayloads)
+	assertNoProjectionScratch(t, runDir)
+}
+
 func TestProjectionCommitMidPublishFailureRestoresWholeGeneration(t *testing.T) {
 	runDir := t.TempDir()
 	finals := []string{"run.json", "digest.json", Filename, "projection.json"}
@@ -737,33 +850,24 @@ func TestProjectionCommitMidPublishFailureRestoresWholeGeneration(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	originalRename := projectionRename
-	renames := 0
-	projectionRename = func(oldPath, newPath string) error {
-		renames++
-		// Four backups and the first published artifact have completed. Fail
-		// while publishing digest.json, after run.json is already replaced.
-		if renames == 6 {
+	originalReplace := projectionReplace
+	replacements := 0
+	projectionReplace = func(oldPath, newPath string) error {
+		replacements++
+		// Fail while publishing digest.json, after run.json is replaced.
+		if replacements == 2 {
 			return errors.New("injected mid-rename failure")
 		}
-		return os.Rename(oldPath, newPath)
+		return originalReplace(oldPath, newPath)
 	}
-	t.Cleanup(func() { projectionRename = originalRename })
+	t.Cleanup(func() { projectionReplace = originalReplace })
 
 	err := commitProjection(runDir, "200", finals, newPayloads, nil)
 	if err == nil || !strings.Contains(err.Error(), "injected mid-rename failure") {
 		t.Fatalf("commit error = %v, want injected mid-rename failure", err)
 	}
 	assertProjectionFiles(t, runDir, finals, oldPayloads)
-	entries, err := os.ReadDir(runDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range entries {
-		if strings.Contains(entry.Name(), ".staged-") || strings.Contains(entry.Name(), ".backup-") {
-			t.Fatalf("failed commit left scratch artifact %s", entry.Name())
-		}
-	}
+	assertNoProjectionScratch(t, runDir)
 }
 
 func assertProjectionFiles(t *testing.T, runDir string, finals []string, wantPayloads [][]byte) {
@@ -799,6 +903,33 @@ func projectionCommitFixture(t *testing.T, generation, digestPayload, eventsPayl
 	}
 	return []string{"digest.json", Filename, "projection.json"}, [][]byte{
 		[]byte(digestPayload), []byte(eventsPayload), append(manifestPayload, '\n'),
+	}
+}
+
+func projectionRecordCommitFixture(t *testing.T, generation, runPayload, digestPayload, eventsPayload string) ([]string, [][]byte) {
+	t.Helper()
+	manifestPayload, err := marshalProjectionManifest(
+		runrecord.Producer{Name: "acta", Version: "test"}, generation,
+		[]byte(runPayload), []byte(digestPayload), []byte(eventsPayload),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return []string{"run.json", "digest.json", Filename, "projection.json"}, [][]byte{
+		[]byte(runPayload), []byte(digestPayload), []byte(eventsPayload), manifestPayload,
+	}
+}
+
+func assertNoProjectionScratch(t *testing.T, runDir string) {
+	t.Helper()
+	entries, err := os.ReadDir(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".staged-") || strings.Contains(entry.Name(), ".backup-") {
+			t.Fatalf("projection commit left scratch artifact %s", entry.Name())
+		}
 	}
 }
 
