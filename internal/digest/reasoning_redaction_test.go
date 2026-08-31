@@ -111,6 +111,32 @@ func TestRedactReasoningScrubsUnsupportedFutureThinking(t *testing.T) {
 	}
 }
 
+func TestRedactReasoningScrubsKnownItemUpdatedDetails(t *testing.T) {
+	const secret = "private-item-update-reasoning-6241"
+	raw := strings.Join([]string{
+		`{"type":"thread.started","thread_id":"thread-1"}`,
+		`{"type":"turn.started"}`,
+		`{"type":"item.updated","item":{"id":"command-1","type":"command_execution","status":"in_progress","reasoning":"` + secret + `"}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`,
+	}, "\n") + "\n"
+	d, err := parseCodex(strings.NewReader(raw), newWorkspace(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := findTimelineProviderEvent(d.Timeline, "item.updated.command_execution")
+	if event == nil || event.Kind != KindLifecycle {
+		t.Fatalf("known item.updated event missing: %+v", d.Timeline)
+	}
+
+	if verified := RedactReasoning(d); !verified {
+		t.Fatal("known item.updated details redaction was not verified")
+	}
+	if !event.Redacted || bytes.Contains(event.Details, []byte(secret)) ||
+		!bytes.Contains(event.Details, []byte(`"reasoning":"[REDACTED]"`)) {
+		t.Fatalf("known item.updated details retained reasoning: %+v / %s", event, event.Details)
+	}
+}
+
 func TestRedactReasoningScrubsIDLessUnsupportedCodexReasoning(t *testing.T) {
 	const secret = "private-idless-reasoning-9137"
 	raw := strings.Join([]string{

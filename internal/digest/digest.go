@@ -184,8 +184,8 @@ func RedactReasoning(d *Digest) bool {
 			redactEventPayload(event)
 			continue
 		}
-		if event.Kind == KindUnsupported {
-			details, changed, detailsVerified := redactUnsupportedDetails(event.ProviderEvent, event.Details)
+		if isKnownEventKind(event.Kind) {
+			details, changed, detailsVerified := redactEventDetails(event.Kind, event.ProviderEvent, event.Details)
 			verified = detailsVerified && verified
 			if changed {
 				event.Details = details
@@ -193,10 +193,8 @@ func RedactReasoning(d *Digest) bool {
 			}
 			continue
 		}
-		if !isKnownEventKind(event.Kind) {
-			redactEventPayload(event)
-			event.Details = json.RawMessage(`"` + reasoning.RedactedMarker + `"`)
-		}
+		redactEventPayload(event)
+		event.Details = json.RawMessage(`"` + reasoning.RedactedMarker + `"`)
 	}
 	return verified
 }
@@ -216,10 +214,16 @@ func redactEventPayload(event *Event) {
 }
 
 func isReasoningEvent(event Event) bool {
+	if event.Kind == KindReasoning {
+		return true
+	}
 	var details struct {
 		Type string `json:"type"`
 	}
 	if len(event.Details) > 0 {
+		if err := reasoning.ValidateUniqueObjectKeys(event.Details); err != nil {
+			return false
+		}
 		_ = json.Unmarshal(event.Details, &details)
 	}
 	return reasoning.IsNormalizedEvent(event.Kind, event.ProviderEvent, details.Type)
@@ -237,13 +241,16 @@ func isKnownEventKind(kind string) bool {
 	}
 }
 
-// redactUnsupportedDetails retains inspectable diagnostics while applying the
-// shared exact and generic reasoning passes. Unverifiable details are replaced
-// with an explicit marker, and verified reports the uncertainty to the caller
-// so a local bundle is never labeled successfully redacted on that basis.
-func redactUnsupportedDetails(providerEvent string, raw json.RawMessage) (json.RawMessage, bool, bool) {
+// redactEventDetails retains inspectable normalized details while applying the
+// shared exact and generic reasoning passes to raw-backed payloads regardless
+// of whether their event kind is known. Unverifiable details are replaced with
+// an explicit marker and reported to the caller.
+func redactEventDetails(kind, providerEvent string, raw json.RawMessage) (json.RawMessage, bool, bool) {
 	if len(raw) == 0 {
 		return raw, false, true
+	}
+	if err := reasoning.ValidateUniqueObjectKeys(raw); err != nil {
+		return json.RawMessage(`"` + reasoning.RedactedMarker + `"`), true, false
 	}
 	var value any
 	decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -256,11 +263,16 @@ func redactUnsupportedDetails(providerEvent string, raw json.RawMessage) (json.R
 		return json.RawMessage(`"` + reasoning.RedactedMarker + `"`), true, false
 	}
 	payload := map[string]any{
-		"kind":           KindUnsupported,
+		"kind":           kind,
 		"provider_event": providerEvent,
 		"details":        value,
 	}
-	_, changed, verified := reasoning.RedactUnsupportedPayload(payload)
+	var changed, verified bool
+	if kind == KindUnsupported {
+		_, changed, verified = reasoning.RedactUnsupportedPayload(payload)
+	} else {
+		changed, verified = reasoning.RedactValue(payload)
+	}
 	if !verified {
 		return json.RawMessage(`"` + reasoning.RedactedMarker + `"`), true, false
 	}

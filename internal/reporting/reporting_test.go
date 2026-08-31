@@ -1425,6 +1425,14 @@ func TestRedactProviderReasoningLinePreservesLargeInteger(t *testing.T) {
 	}
 }
 
+func TestRedactProviderReasoningLineRejectsDuplicateReasoningKey(t *testing.T) {
+	original := []byte(`{"reasoning":"private","reasoning":0}` + "\n")
+	redacted, err := redactProviderReasoningLine(original)
+	if err == nil || !strings.Contains(err.Error(), `duplicate JSON object key "reasoning"`) {
+		t.Fatalf("duplicate-key redaction = %q, error = %v", redacted, err)
+	}
+}
+
 func TestRedactProviderReasoningMasksMalformedStructuralMetadata(t *testing.T) {
 	const secret = "private-content-in-text-chars"
 	original := []byte(`{"type":"item.completed","item":{"type":"reasoning","text":"[REDACTED]","text_chars":"` + secret + `","text_truncated":false,"redacted":true}}` + "\n")

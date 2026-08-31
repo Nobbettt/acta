@@ -152,6 +152,9 @@ func redactReasoningLine(line []byte) ([]byte, error) {
 	if len(payload) == 0 {
 		return line, nil
 	}
+	if err := reasoning.ValidateUniqueObjectKeys(payload); err != nil {
+		return nil, fmt.Errorf("parse raw provider event for reasoning redaction: %w", err)
+	}
 	var value any
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.UseNumber()

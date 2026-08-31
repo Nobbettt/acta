@@ -2208,6 +2208,9 @@ func (r contextReader) Read(payload []byte) (int, error) {
 }
 
 func decodeJSONUseNumberContext(ctx context.Context, payload []byte, value any) error {
+	if err := reasoning.ValidateUniqueObjectKeysContext(ctx, payload); err != nil {
+		return err
+	}
 	decoder := json.NewDecoder(contextReader{ctx: ctx, reader: bytes.NewReader(payload)})
 	decoder.UseNumber()
 	if err := decoder.Decode(value); err != nil {
