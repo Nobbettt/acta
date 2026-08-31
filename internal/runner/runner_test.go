@@ -3,6 +3,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -1335,6 +1336,270 @@ func TestRunBestEffortOTLPExportFailureIsDefault(t *testing.T) {
 	}
 }
 
+type telemetryGeneration struct {
+	recordStatus string
+	recordError  string
+	digestStatus string
+	digestError  string
+	eventStatus  string
+	eventError   string
+	runHash      [sha256.Size]byte
+	digestHash   [sha256.Size]byte
+	eventsHash   [sha256.Size]byte
+}
+
+func readTelemetryGeneration(runDir string) (telemetryGeneration, error) {
+	var generation telemetryGeneration
+	runPayload, err := os.ReadFile(filepath.Join(runDir, "run.json"))
+	if err != nil {
+		return generation, err
+	}
+	var record runrecord.Record
+	if err := json.Unmarshal(runPayload, &record); err != nil {
+		return generation, err
+	}
+	digestPayload, err := os.ReadFile(filepath.Join(runDir, "digest.json"))
+	if err != nil {
+		return generation, err
+	}
+	var d digest.Digest
+	if err := json.Unmarshal(digestPayload, &d); err != nil {
+		return generation, err
+	}
+	eventsPayload, err := os.ReadFile(filepath.Join(runDir, actaevents.Filename))
+	if err != nil {
+		return generation, err
+	}
+	eventStatus, eventError, err := telemetryFromEvents(eventsPayload)
+	if err != nil {
+		return generation, err
+	}
+	return telemetryGeneration{
+		recordStatus: record.OTLPStatus,
+		recordError:  record.OTLPError,
+		digestStatus: d.OTLPStatus,
+		digestError:  d.OTLPError,
+		eventStatus:  eventStatus,
+		eventError:   eventError,
+		runHash:      sha256.Sum256(runPayload),
+		digestHash:   sha256.Sum256(digestPayload),
+		eventsHash:   sha256.Sum256(eventsPayload),
+	}, nil
+}
+
+func telemetryFromEvents(payload []byte) (string, string, error) {
+	for _, line := range bytes.Split(bytes.TrimSpace(payload), []byte("\n")) {
+		var event actaevents.Event
+		if err := json.Unmarshal(line, &event); err != nil {
+			return "", "", err
+		}
+		if event.Type == actaevents.TypeRunStarted {
+			return telemetryFromStartedEvent(event)
+		}
+	}
+	return "", "", errors.New("run.started event missing")
+}
+
+func telemetryFromStartedEvent(event actaevents.Event) (string, string, error) {
+	var started struct {
+		OTLPStatus string `json:"otlp_status"`
+		OTLPError  string `json:"otlp_error"`
+	}
+	if err := json.Unmarshal(event.Payload, &started); err != nil {
+		return "", "", err
+	}
+	return started.OTLPStatus, started.OTLPError, nil
+}
+
+func TestRunPublishesFailedTelemetryAsOneImmutableGeneration(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	for _, name := range []string{
+		"OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG",
+		"OTEL_EXPORTER_OTLP_COMPRESSION", "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION", "TRACEPARENT", "TRACESTATE",
+	} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("OTEL_TRACES_SAMPLER", "always_on")
+
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "injected export failure", http.StatusBadRequest)
+	}))
+	defer collector.Close()
+
+	type uploadedTelemetry struct {
+		status string
+		err    string
+	}
+	uploadedEvents := make(chan uploadedTelemetry, 1)
+	uploadedDigest := make(chan uploadedTelemetry, 1)
+	uploadHandlerErr := make(chan error, 1)
+	reportHandlerErr := func(err error) {
+		select {
+		case uploadHandlerErr <- err:
+		default:
+		}
+	}
+	uploadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		payload, err := io.ReadAll(request.Body)
+		if err != nil {
+			reportHandlerErr(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/events"):
+			var batch struct {
+				Events []actaevents.Event `json:"events"`
+			}
+			if err := json.Unmarshal(payload, &batch); err != nil {
+				reportHandlerErr(err)
+				break
+			}
+			for _, event := range batch.Events {
+				if event.Type != actaevents.TypeRunStarted {
+					continue
+				}
+				status, telemetryErr, err := telemetryFromStartedEvent(event)
+				if err != nil {
+					reportHandlerErr(err)
+				} else {
+					uploadedEvents <- uploadedTelemetry{status: status, err: telemetryErr}
+				}
+			}
+		case strings.HasSuffix(request.URL.Path, "/artifacts") && request.URL.Query().Get("filename") == "digest.json":
+			var d digest.Digest
+			if err := json.Unmarshal(payload, &d); err != nil {
+				reportHandlerErr(err)
+			} else {
+				uploadedDigest <- uploadedTelemetry{status: d.OTLPStatus, err: d.OTLPError}
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer uploadServer.Close()
+
+	cwd := t.TempDir()
+	const runID = "telemetry-publication-boundary"
+	runDir := filepath.Join(cwd, ".acta", "runs", runID)
+	fakeBin := t.TempDir()
+	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
+		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	withPublicationHooks(t)
+	originalRename := publishRename
+	uploadDone := make(chan struct{})
+	publishRename = func(oldPath, newPath string) error {
+		err := originalRename(oldPath, newPath)
+		if err == nil && filepath.Clean(newPath) == filepath.Clean(runDir) {
+			select {
+			case <-uploadDone:
+			case <-time.After(10 * time.Second):
+			}
+		}
+		return err
+	}
+
+	type visibilityObservation struct {
+		generation telemetryGeneration
+		err        error
+	}
+	observed := make(chan visibilityObservation, 1)
+	go func() {
+		defer close(uploadDone)
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			if _, err := os.Stat(runDir); err == nil {
+				break
+			} else if !errors.Is(err, os.ErrNotExist) {
+				observed <- visibilityObservation{err: err}
+				return
+			}
+			if time.Now().After(deadline) {
+				observed <- visibilityObservation{err: errors.New("published bundle did not become visible")}
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		generation, err := readTelemetryGeneration(runDir)
+		if err == nil {
+			persisted, readErr := ReadRecord(runDir)
+			if readErr != nil {
+				err = readErr
+			} else {
+				err = reporting.UploadRun(context.Background(), reporting.Config{
+					BackendURL: uploadServer.URL, ReportToken: "token", HTTPClient: uploadServer.Client(), RetryDelays: []time.Duration{},
+				}, persisted)
+			}
+		}
+		select {
+		case handlerErr := <-uploadHandlerErr:
+			err = errors.Join(err, handlerErr)
+		default:
+		}
+		observed <- visibilityObservation{generation: generation, err: err}
+	}()
+
+	type runResult struct {
+		record *runrecord.Record
+		err    error
+	}
+	runDone := make(chan runResult, 1)
+	go func() {
+		record, err := runForTest(context.Background(), Options{
+			Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test", RunID: runID,
+			OTLPEndpoint: collector.URL, OTLPExportFailurePolicy: OTLPExportFailurePolicyRequired,
+		}, io.Discard, io.Discard)
+		runDone <- runResult{record: record, err: err}
+	}()
+
+	observation := <-observed
+	if observation.err != nil {
+		t.Fatal(observation.err)
+	}
+	result := <-runDone
+	if result.err == nil || !errors.Is(result.err, ErrTelemetryOnlyFailure) {
+		t.Fatalf("Run() error = %v, want required telemetry-only failure", result.err)
+	}
+	if result.record == nil || result.record.OTLPStatus != "failed" || !result.record.OK {
+		t.Fatalf("Run() record = %#v, want successful outcome with failed telemetry", result.record)
+	}
+
+	wantError := observation.generation.recordError
+	for source, telemetry := range map[string]uploadedTelemetry{
+		"visible run.json": {status: observation.generation.recordStatus, err: observation.generation.recordError},
+		"visible digest":   {status: observation.generation.digestStatus, err: observation.generation.digestError},
+		"visible events":   {status: observation.generation.eventStatus, err: observation.generation.eventError},
+		"returned record":  {status: result.record.OTLPStatus, err: result.record.OTLPError},
+	} {
+		if telemetry.status != "failed" || telemetry.err != wantError || telemetry.err == "" {
+			t.Errorf("%s telemetry = %q/%q, want failed/%q", source, telemetry.status, telemetry.err, wantError)
+		}
+	}
+	for source, uploaded := range map[string]<-chan uploadedTelemetry{
+		"events request":  uploadedEvents,
+		"digest artifact": uploadedDigest,
+	} {
+		select {
+		case telemetry := <-uploaded:
+			if telemetry.status != "failed" || telemetry.err != wantError {
+				t.Errorf("uploaded %s telemetry = %q/%q, want failed/%q", source, telemetry.status, telemetry.err, wantError)
+			}
+		default:
+			t.Errorf("concurrent upload did not capture %s", source)
+		}
+	}
+	finalGeneration, err := readTelemetryGeneration(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalGeneration != observation.generation {
+		t.Fatal("published telemetry artifacts changed after the bundle became visible")
+	}
+}
+
 func TestRunBestEffortSkipsInvalidOTLPEndpointWithoutAmbientFallback(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake shell agents require /bin/sh")
@@ -1773,8 +2038,8 @@ func TestRunFinishesRootTraceAfterLocalBundleFinalization(t *testing.T) {
 			}
 			select {
 			case outcome := <-outcomes:
-				if !outcome.bundlePublished || !outcome.foundOK || outcome.ok != persisted.OK || outcome.status != wantStatus {
-					t.Fatalf("root outcome = %+v, run.json OK=%v; want status=%v after publication", outcome, persisted.OK, wantStatus)
+				if outcome.bundlePublished || !outcome.foundOK || outcome.ok != persisted.OK || outcome.status != wantStatus {
+					t.Fatalf("root outcome = %+v, run.json OK=%v; want status=%v before publication", outcome, persisted.OK, wantStatus)
 				}
 			case <-time.After(time.Second):
 				t.Fatal("root span was not exported")

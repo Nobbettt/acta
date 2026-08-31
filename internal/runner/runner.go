@@ -517,7 +517,7 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 
 	// Project the status known before the root is finished so the local bundle
 	// can settle first. A sampled trace is expected to export; Finish reconciles
-	// the exceptional flush-failure result after publication without changing
+	// the exceptional flush-failure result before publication without changing
 	// the already-settled run outcome.
 	traceSampled := tr != nil && tr.Sampled()
 	if tr != nil {
@@ -546,7 +546,7 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 	if postErr != nil {
 		runErr = errors.Join(runErr, postErr)
 	}
-	finishTrace := func(bundleDir string) {
+	finishTrace := func() {
 		statusBeforeFinish := record.OTLPStatus
 		if err := tr.Finish(record, completedAt); err != nil {
 			fmt.Fprintf(stderr, "acta: OTLP flush failed: %v\n", err)
@@ -567,7 +567,7 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 		// root. Persisting that operational result cannot affect record.OK; doing
 		// so would make telemetry delivery recursively change the settled outcome
 		// which the root span just exported.
-		if err := rewriteTelemetryArtifacts(bundleDir, record, finalDigest, capturedPrompt); err != nil {
+		if err := rewriteTelemetryArtifacts(stagingDir, record, finalDigest, capturedPrompt); err != nil {
 			fmt.Fprintf(stderr, "acta: record OTLP flush result failed: %v\n", err)
 			if otlpFailurePolicy == OTLPExportFailurePolicyRequired {
 				telemetryErr = errors.Join(telemetryErr, fmt.Errorf("required OTLP flush result could not be fully recorded: %w", err))
@@ -590,7 +590,7 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 			record.RecoveryDir = stagingDir
 			_ = WriteRecord(stagingDir, record)
 			stagingPublished = true
-			finishTrace(stagingDir)
+			finishTrace()
 			return record, fmt.Errorf("%w; incomplete bundle retained for recovery at %s", runErr, stagingDir)
 		}
 	}
@@ -602,32 +602,29 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 			runErr = errors.Join(runErr, rewriteErr)
 		}
 		stagingPublished = true // retain the protected, recoverable staging bundle
-		finishTrace(stagingDir)
+		finishTrace()
 		return record, fmt.Errorf("%w; completed bundle retained at %s", runErr, stagingDir)
 	}
+	finishTrace()
 	published, publishErr := publishBundle(stagingDir, runDir)
 	if publishErr != nil {
 		runErr = errors.Join(runErr, fmt.Errorf("publish run bundle: %w", publishErr))
-		FinalizeRecordOutcome(record, runErr)
 		if published {
-			record.RecoveryDir = ""
-			if rewriteErr := rewriteRecoveryArtifacts(runDir, record, finalDigest, capturedPrompt, stderr); rewriteErr != nil {
-				runErr = errors.Join(runErr, rewriteErr)
-			}
+			// Parent-directory durability can fail only after the atomic rename.
+			// Return that operational failure without mutating the settled bundle
+			// after it has crossed the publication boundary.
 			stagingPublished = true
-			finishTrace(runDir)
 			return record, fmt.Errorf("%w; bundle was published at %s but durability confirmation failed", runErr, runDir)
 		}
+		FinalizeRecordOutcome(record, runErr)
 		record.RecoveryDir = stagingDir
 		if rewriteErr := rewriteRecoveryArtifacts(stagingDir, record, finalDigest, capturedPrompt, stderr); rewriteErr != nil {
 			runErr = errors.Join(runErr, rewriteErr)
 		}
 		stagingPublished = true // publication leaves staging intact on failure
-		finishTrace(stagingDir)
 		return record, fmt.Errorf("%w; completed bundle retained at %s", runErr, stagingDir)
 	}
 	stagingPublished = true
-	finishTrace(runDir)
 	if reportMode(opts) == "hybrid" {
 		reportCtx := ctx
 		cancel := func() {}
