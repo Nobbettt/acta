@@ -105,6 +105,11 @@ type artifactSnapshot struct {
 	TempPath string
 }
 
+// Manifested projection sources use the securefile opener whose Windows
+// backend grants delete sharing. Keeping this seam here makes that snapshot
+// contract independently testable on every host platform.
+var openManifestedProjectionRegular = securefile.OpenRegular
+
 type projectionManifest struct {
 	SchemaVersion int                `json:"schema_version"`
 	Producer      runrecord.Producer `json:"producer"`
@@ -816,7 +821,7 @@ func snapshotProjectionArtifactsContext(ctx context.Context, runDir string, maxB
 		return nil, false, false, fmt.Errorf("resolve run directory: %w", err)
 	}
 	manifestPath := filepath.Join(runDir, "projection.json")
-	manifestFile, err := securefile.OpenRegular(resolvedRunDir, manifestPath)
+	manifestFile, err := openManifestedProjectionRegular(resolvedRunDir, manifestPath)
 	if errors.Is(err, os.ErrNotExist) {
 		if hook != nil {
 			hook(attempt)
@@ -856,7 +861,7 @@ func snapshotProjectionArtifactsContext(ctx context.Context, runDir string, maxB
 		}
 	}()
 	for _, name := range []string{"digest.json", actaevents.Filename} {
-		source, openErr := securefile.OpenRegular(resolvedRunDir, filepath.Join(runDir, name))
+		source, openErr := openManifestedProjectionRegular(resolvedRunDir, filepath.Join(runDir, name))
 		if openErr != nil {
 			if err := ctx.Err(); err != nil {
 				return nil, false, false, err
@@ -956,13 +961,17 @@ func snapshotLegacyProjectionArtifactsContext(ctx context.Context, resolvedRunDi
 }
 
 func legacyProjectionLockFreeAllowed(runDir string, lockErr error) (bool, error) {
+	return legacyProjectionLockFreeAllowedWithProbe(runDir, lockErr, projectionDirectoryWritable)
+}
+
+func legacyProjectionLockFreeAllowedWithProbe(runDir string, lockErr error, writableProbe func(string) (bool, error)) (bool, error) {
 	if errors.Is(lockErr, syscall.EROFS) {
 		return true, nil
 	}
 	if !errors.Is(lockErr, syscall.EACCES) {
 		return false, nil
 	}
-	writable, err := projectionDirectoryWritable(runDir)
+	writable, err := writableProbe(runDir)
 	if err != nil {
 		return false, fmt.Errorf("probe bundle directory writability after projection lock permission error: %w", err)
 	}
@@ -970,7 +979,7 @@ func legacyProjectionLockFreeAllowed(runDir string, lockErr error) (bool, error)
 }
 
 func projectionManifestUnchanged(root, path string, firstInfo os.FileInfo, firstHash [sha256.Size]byte) (bool, error) {
-	current, err := securefile.OpenRegular(root, path)
+	current, err := openManifestedProjectionRegular(root, path)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}

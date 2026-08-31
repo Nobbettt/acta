@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -265,6 +266,31 @@ func TestUploadRunRetriesChangedProjectionGeneration(t *testing.T) {
 	}
 }
 
+func TestManifestedProjectionUsesDeleteSharedOpenSeam(t *testing.T) {
+	runDir := writeBundle(t)
+	digestPayload := readTestFile(t, filepath.Join(runDir, "digest.json"))
+	eventsPayload := readTestFile(t, filepath.Join(runDir, actaevents.Filename))
+	writeProjectionGeneration(t, runDir, "100", digestPayload, eventsPayload)
+
+	originalOpen := openManifestedProjectionRegular
+	opened := make(map[string]int)
+	openManifestedProjectionRegular = func(root, path string) (*os.File, error) {
+		opened[filepath.Base(path)]++
+		return originalOpen(root, path)
+	}
+	t.Cleanup(func() { openManifestedProjectionRegular = originalOpen })
+
+	snapshots, manifested, retry, err := snapshotProjectionArtifactsContext(context.Background(), runDir, DefaultMaxUploadBytes, 1, nil)
+	if err != nil || !manifested || retry {
+		closeArtifactSnapshots(snapshots)
+		t.Fatalf("manifested snapshot = manifested %v, retry %v, error %v", manifested, retry, err)
+	}
+	closeArtifactSnapshots(snapshots)
+	if opened["projection.json"] != 2 || opened["digest.json"] != 1 || opened[actaevents.Filename] != 1 {
+		t.Fatalf("delete-shared secure opens = %v, want manifest twice and each projection source once", opened)
+	}
+}
+
 func TestUploadRunRejectsRepeatedlyChangingProjectionBeforeUpload(t *testing.T) {
 	runDir := writeBundle(t)
 	events := readTestFile(t, filepath.Join(runDir, actaevents.Filename))
@@ -367,6 +393,46 @@ func TestUploadRunLegacyProjectionReadOnlyBundleUsesLockFreeSnapshot(t *testing.
 	if _, err := os.Stat(filepath.Join(runDir, ".projection.lock")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("read-only legacy upload created projection lock, stat error = %v", err)
 	}
+}
+
+func TestProjectionDirectoryWritableProbe(t *testing.T) {
+	t.Run("writable directory", func(t *testing.T) {
+		dir := t.TempDir()
+		writable, err := probeProjectionDirectoryWritable(dir, securefile.CreateTemp, os.Remove, func(error) bool { return false })
+		if err != nil || !writable {
+			t.Fatalf("writability probe = %v, %v; want writable", writable, err)
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("writability probe left files behind: %v", entries)
+		}
+	})
+
+	t.Run("access denied selects read-only path", func(t *testing.T) {
+		accessDenied := errors.New("simulated access denied")
+		probe := func(path string) (bool, error) {
+			return probeProjectionDirectoryWritable(path, func(string, string) (*os.File, error) {
+				return nil, accessDenied
+			}, os.Remove, func(err error) bool { return errors.Is(err, accessDenied) })
+		}
+		allowed, err := legacyProjectionLockFreeAllowedWithProbe("unused", syscall.EACCES, probe)
+		if err != nil || !allowed {
+			t.Fatalf("lock-free decision = %v, %v; want allowed for read-only bundle", allowed, err)
+		}
+	})
+
+	t.Run("unexpected probe error propagates", func(t *testing.T) {
+		unexpected := errors.New("unexpected probe failure")
+		allowed, err := legacyProjectionLockFreeAllowedWithProbe("unused", syscall.EACCES, func(string) (bool, error) {
+			return false, unexpected
+		})
+		if allowed || !errors.Is(err, unexpected) {
+			t.Fatalf("lock-free decision = %v, %v; want unexpected error", allowed, err)
+		}
+	})
 }
 
 func TestUploadRunLegacyProjectionLockFreeSnapshotStillDetectsTornGeneration(t *testing.T) {

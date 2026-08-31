@@ -19,6 +19,10 @@ import (
 	"time"
 	"unicode/utf8"
 
+	collectortracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"google.golang.org/protobuf/proto"
+
 	"github.com/nobbettt/acta/internal/actaevents"
 	"github.com/nobbettt/acta/internal/agents"
 	"github.com/nobbettt/acta/internal/digest"
@@ -1541,6 +1545,105 @@ func TestRunRedactReasoningRemovesTextFromEntireBundle(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRunFinishesRootTraceAfterReasoningRedaction(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	for _, name := range []string{
+		"OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG",
+		"OTEL_EXPORTER_OTLP_COMPRESSION", "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION", "TRACEPARENT", "TRACESTATE",
+	} {
+		t.Setenv(name, "")
+	}
+	tests := []struct {
+		name       string
+		provider   string
+		wantOK     bool
+		wantStatus tracepb.Status_StatusCode
+	}{
+		{
+			name:       "failed redaction",
+			provider:   `printf '"private reasoning"\n'`,
+			wantStatus: tracepb.Status_STATUS_CODE_ERROR,
+		},
+		{
+			name:       "successful redaction",
+			provider:   `printf '{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","text":"private reasoning"}}\n'`,
+			wantOK:     true,
+			wantStatus: tracepb.Status_STATUS_CODE_OK,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			type rootOutcome struct {
+				ok      bool
+				foundOK bool
+				status  tracepb.Status_StatusCode
+			}
+			outcomes := make(chan rootOutcome, 1)
+			collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				payload, err := io.ReadAll(request.Body)
+				if err != nil {
+					t.Error(err)
+				} else {
+					var exported collectortracepb.ExportTraceServiceRequest
+					if err := proto.Unmarshal(payload, &exported); err != nil {
+						t.Error(err)
+					} else {
+						for _, resource := range exported.ResourceSpans {
+							for _, scope := range resource.ScopeSpans {
+								for _, span := range scope.Spans {
+									if span.Name != "invoke_agent codex" {
+										continue
+									}
+									outcome := rootOutcome{status: span.Status.GetCode()}
+									for _, attr := range span.Attributes {
+										if attr.Key == "acta.run.ok" {
+											outcome.ok = attr.Value.GetBoolValue()
+											outcome.foundOK = true
+										}
+									}
+									outcomes <- outcome
+								}
+							}
+						}
+					}
+				}
+				w.Header().Set("Content-Type", "application/x-protobuf")
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer collector.Close()
+
+			cwd := t.TempDir()
+			fakeBin := t.TempDir()
+			writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+test.provider+"\n"+
+				`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
+			t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			record, err := runForTest(context.Background(), Options{
+				Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test", RedactReasoning: true,
+				OTLPEndpoint: collector.URL,
+			}, io.Discard, io.Discard)
+			if test.wantOK && err != nil {
+				t.Fatal(err)
+			}
+			if !test.wantOK && (err == nil || !strings.Contains(err.Error(), "reasoning redaction failed")) {
+				t.Fatalf("failed-redaction error = %v", err)
+			}
+			if record == nil || record.OK != test.wantOK {
+				t.Fatalf("record outcome = %#v, want OK=%v", record, test.wantOK)
+			}
+			select {
+			case outcome := <-outcomes:
+				if !outcome.foundOK || outcome.ok != record.OK || outcome.status != test.wantStatus {
+					t.Fatalf("root outcome = %+v, record OK=%v; want status=%v", outcome, record.OK, test.wantStatus)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("root span was not exported")
+			}
+		})
 	}
 }
 

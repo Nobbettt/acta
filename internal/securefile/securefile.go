@@ -37,6 +37,12 @@ func CreateExclusive(path string) (*os.File, error) {
 	return createPrivateExclusive(path)
 }
 
+// CreateTemp creates a uniquely named owner-only file in dir. The pattern must
+// contain one '*', which is replaced with random text.
+func CreateTemp(dir, pattern string) (*os.File, error) {
+	return createPrivateTemp(dir, pattern)
+}
+
 func (writer *AtomicWriter) Write(data []byte) (int, error) {
 	return writer.file.Write(data)
 }

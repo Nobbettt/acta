@@ -481,29 +481,6 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 	record.OK = preview.OK
 	record.TerminationReason = preview.TerminationReason
 	record.Error = preview.Error
-	traceSampled := tr != nil && tr.Sampled()
-	if err := tr.Finish(record, completedAt); err != nil {
-		fmt.Fprintf(stderr, "acta: OTLP flush failed: %v\n", err)
-		otlpStatus = "failed"
-		otlpError = err.Error()
-		record.TraceID = ""
-		if otlpFailurePolicy == OTLPExportFailurePolicyRequired {
-			telemetryErr = errors.Join(telemetryErr, fmt.Errorf("required OTLP export failed during flush: %w", err))
-		}
-	} else if tr != nil {
-		if traceSampled {
-			otlpStatus = "exported"
-		} else {
-			otlpStatus = "not_sampled"
-			record.TraceID = ""
-			if otlpFailurePolicy == OTLPExportFailurePolicyRequired {
-				telemetryErr = errors.Join(telemetryErr, errors.New("required OTLP export did not deliver a trace because the root span was not sampled"))
-			}
-		}
-	}
-	record.OTLPStatus = otlpStatus
-	record.OTLPError = otlpError
-	FinalizeRecordOutcome(record, runErr)
 
 	reasoningRedacted := false
 	if opts.RedactReasoning {
@@ -530,6 +507,33 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 			reasoningRedacted = true
 		}
 	}
+
+	// Redaction can turn an otherwise successful provider record into a failed
+	// Acta run, so derive and export the root span only after that final outcome
+	// is known.
+	traceSampled := tr != nil && tr.Sampled()
+	if err := tr.Finish(record, completedAt); err != nil {
+		fmt.Fprintf(stderr, "acta: OTLP flush failed: %v\n", err)
+		otlpStatus = "failed"
+		otlpError = err.Error()
+		record.TraceID = ""
+		if otlpFailurePolicy == OTLPExportFailurePolicyRequired {
+			telemetryErr = errors.Join(telemetryErr, fmt.Errorf("required OTLP export failed during flush: %w", err))
+		}
+	} else if tr != nil {
+		if traceSampled {
+			otlpStatus = "exported"
+		} else {
+			otlpStatus = "not_sampled"
+			record.TraceID = ""
+			if otlpFailurePolicy == OTLPExportFailurePolicyRequired {
+				telemetryErr = errors.Join(telemetryErr, errors.New("required OTLP export did not deliver a trace because the root span was not sampled"))
+			}
+		}
+	}
+	record.OTLPStatus = otlpStatus
+	record.OTLPError = otlpError
+	FinalizeRecordOutcome(record, runErr)
 
 	if writeErr := WriteRecord(stagingDir, record); writeErr != nil {
 		runErr = errors.Join(runErr, writeErr)

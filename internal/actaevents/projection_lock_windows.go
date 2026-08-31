@@ -4,8 +4,11 @@ package actaevents
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 
+	"github.com/nobbettt/acta/internal/securefile"
 	"golang.org/x/sys/windows"
 )
 
@@ -15,9 +18,9 @@ type projectionLock struct {
 }
 
 func tryLockProjection(path string) (*projectionLock, bool, error) {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	file, err := securefile.OpenOrCreateRegular(filepath.Dir(path), path)
 	if err != nil {
-		return nil, false, err
+		return nil, false, fmt.Errorf("open projection lock securely: %w", err)
 	}
 	lock := &projectionLock{file: file}
 	flags := uint32(windows.LOCKFILE_EXCLUSIVE_LOCK | windows.LOCKFILE_FAIL_IMMEDIATELY)

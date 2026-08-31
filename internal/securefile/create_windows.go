@@ -37,6 +37,10 @@ func createPrivateTemp(dir, pattern string) (*os.File, error) {
 }
 
 func createPrivateExclusive(path string) (*os.File, error) {
+	return createPrivateFile(path, windows.CREATE_NEW, 0)
+}
+
+func createPrivateFile(path string, disposition uint32, flags uint32) (*os.File, error) {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		return nil, fmt.Errorf("read current user for private file: %w", err)
@@ -58,10 +62,10 @@ func createPrivateExclusive(path string) (*os.File, error) {
 	handle, err := windows.CreateFile(
 		name,
 		windows.GENERIC_READ|windows.GENERIC_WRITE,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		regularFileShareMode,
 		&attributes,
-		windows.CREATE_NEW,
-		windows.FILE_ATTRIBUTE_NORMAL,
+		disposition,
+		windows.FILE_ATTRIBUTE_NORMAL|flags,
 		0,
 	)
 	if err != nil {
