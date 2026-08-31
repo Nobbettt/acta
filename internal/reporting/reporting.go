@@ -1372,7 +1372,7 @@ func inspectOpaqueTextSnapshot(ctx context.Context, file *os.File, maxLineBytes 
 				inspection.Verified = false
 				return inspection, nil
 			}
-			containsReasoning, verified := reasoning.RedactValue(value)
+			containsReasoning, verified := reasoning.RedactValue(value, reasoning.ProviderTraversal())
 			inspection.ContainsReasoning = containsReasoning || inspection.ContainsReasoning
 			inspection.Verified = verified && inspection.Verified
 		}
@@ -1427,7 +1427,7 @@ func inspectJSONLinesSnapshot(ctx context.Context, file *os.File, maxLineBytes i
 }
 
 func inspectProviderValue(value any) (bool, bool) {
-	return reasoning.RedactValue(value)
+	return reasoning.RedactValue(value, reasoning.ProviderTraversal())
 }
 
 func inspectActaEventValue(value any) (bool, bool) {
@@ -1454,7 +1454,7 @@ func inspectActaEventValue(value any) (bool, bool) {
 	if !hasPayload {
 		return false, true
 	}
-	return reasoning.RedactValue(payload)
+	return reasoning.RedactValue(payload, reasoning.NormalizedTraversal(typ))
 }
 
 func inspectJSONDocumentSnapshot(ctx context.Context, file *os.File, path string, maxBytes int64) (artifactInspection, error) {
@@ -1485,7 +1485,13 @@ func inspectJSONDocumentSnapshot(ctx context.Context, file *os.File, path string
 			return artifactInspection{}, err
 		}
 	}
-	containsReasoning, verified := reasoning.RedactValue(value)
+	traversal := reasoning.ProviderTraversal()
+	if isRunRecordArtifact(path) {
+		traversal = reasoning.NormalizedTraversal("run_record")
+	} else if isDigestArtifact(path) {
+		traversal = reasoning.NormalizedTraversal("digest")
+	}
+	containsReasoning, verified := reasoning.RedactValue(value, traversal)
 	return artifactInspection{ContainsReasoning: containsReasoning, Verified: verified}, nil
 }
 
@@ -1713,8 +1719,9 @@ func redactProviderReasoningLineVerified(line []byte) ([]byte, bool, error) {
 	if err := decodeJSONUseNumber(payload, &value); err != nil {
 		return nil, false, fmt.Errorf("parse provider event for remote reasoning redaction: %w", err)
 	}
-	changed := setReasoningRedactionState(value)
-	reasoningChanged, verified := reasoning.RedactValue(value)
+	traversal := reasoning.ProviderTraversal()
+	changed := setReasoningRedactionState(value, traversal)
+	reasoningChanged, verified := reasoning.RedactValue(value, traversal)
 	if !verified {
 		return line, false, nil
 	}
@@ -1741,8 +1748,9 @@ func redactActaReasoningEventLine(line []byte) ([]byte, error) {
 	if err := rejectUnsupportedFutureDocumentVersion(schemaversion.Event, event); err != nil {
 		return nil, err
 	}
-	changed := setReasoningRedactionState(event)
 	typ, _ := event["type"].(string)
+	traversal := reasoning.NormalizedTraversal(typ)
+	changed := setReasoningRedactionState(event, reasoning.NormalizedTraversal(""))
 	if payload, ok := event["payload"]; ok {
 		switch {
 		case typ == actaevents.TypeAgentReasoning:
@@ -1763,7 +1771,7 @@ func redactActaReasoningEventLine(line []byte) ([]byte, error) {
 		default:
 			// Known reasoning-free payloads retain their documented content, but
 			// still receive a defensive recursive pass for nested provider blocks.
-			reasoningChanged, verified := reasoning.RedactValue(payload)
+			reasoningChanged, verified := reasoning.RedactValue(payload, traversal)
 			if !verified {
 				return nil, errors.New("acta event reasoning redaction could not be verified")
 			}
@@ -1892,31 +1900,25 @@ func reasoningRedactionMask(value any) (any, bool) {
 	return reasoning.MaskValue(value)
 }
 
-func redactReasoningValueContext(ctx context.Context, value any) (bool, error) {
-	changed, verified, err := reasoning.RedactValueContext(ctx, value)
+func redactReasoningValueContext(ctx context.Context, value any, traversal reasoning.TraversalContext) (bool, error) {
+	changed, verified, err := reasoning.RedactValueContext(ctx, value, traversal)
 	if err == nil && !verified {
 		err = errors.New("reasoning redaction could not verify provider payload")
 	}
 	return changed, err
 }
 
-// userDataPayloadKey identifies containers whose contents belong to the user
-// or a tool. Reasoning-shaped field names inside these values are data unless
-// the surrounding provider event itself is an exact reasoning block.
-func userDataPayloadKey(parent map[string]any, key string) bool {
-	return reasoning.IsUserDataPayloadKey(parent, key)
-}
-
-func setReasoningRedactionState(value any) bool {
+func setReasoningRedactionState(value any, traversal reasoning.TraversalContext) bool {
 	changed := false
 	switch typed := value.(type) {
 	case []any:
 		for _, item := range typed {
-			changed = setReasoningRedactionState(item) || changed
+			changed = setReasoningRedactionState(item, traversal) || changed
 		}
 	case map[string]any:
 		for key, item := range typed {
-			if userDataPayloadKey(typed, key) {
+			childTraversal, exempt := traversal.Enter(typed, key)
+			if exempt {
 				continue
 			}
 			if key == "reasoning_redaction_state" {
@@ -1926,13 +1928,13 @@ func setReasoningRedactionState(value any) bool {
 				}
 				continue
 			}
-			changed = setReasoningRedactionState(item) || changed
+			changed = setReasoningRedactionState(item, childTraversal) || changed
 		}
 	}
 	return changed
 }
 
-func setReasoningRedactionStateContext(ctx context.Context, value any) (bool, error) {
+func setReasoningRedactionStateContext(ctx context.Context, value any, traversal reasoning.TraversalContext) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
@@ -1940,7 +1942,7 @@ func setReasoningRedactionStateContext(ctx context.Context, value any) (bool, er
 	switch typed := value.(type) {
 	case []any:
 		for _, item := range typed {
-			itemChanged, err := setReasoningRedactionStateContext(ctx, item)
+			itemChanged, err := setReasoningRedactionStateContext(ctx, item, traversal)
 			if err != nil {
 				return false, err
 			}
@@ -1951,7 +1953,8 @@ func setReasoningRedactionStateContext(ctx context.Context, value any) (bool, er
 			if err := ctx.Err(); err != nil {
 				return false, err
 			}
-			if userDataPayloadKey(typed, key) {
+			childTraversal, exempt := traversal.Enter(typed, key)
+			if exempt {
 				continue
 			}
 			if key == "reasoning_redaction_state" {
@@ -1961,7 +1964,7 @@ func setReasoningRedactionStateContext(ctx context.Context, value any) (bool, er
 				}
 				continue
 			}
-			itemChanged, err := setReasoningRedactionStateContext(ctx, item)
+			itemChanged, err := setReasoningRedactionStateContext(ctx, item, childTraversal)
 			if err != nil {
 				return false, err
 			}
@@ -2103,13 +2106,13 @@ func redactRunRecordSnapshot(ctx context.Context, file *os.File) error {
 		}
 		record, ok := value.(map[string]any)
 		if !ok {
-			changed, err := redactReasoningValueContext(ctx, value)
+			changed, err := redactReasoningValueContext(ctx, value, reasoning.NormalizedTraversal("run_record"))
 			if err != nil {
 				return false, err
 			}
 			return stampRewrittenDocumentSchemaVersion(schemaversion.RunRecord, value, changed)
 		}
-		contentChanged, err := redactReasoningValueContext(ctx, record)
+		contentChanged, err := redactReasoningValueContext(ctx, record, reasoning.NormalizedTraversal("run_record"))
 		if err != nil {
 			return false, err
 		}
@@ -2145,11 +2148,12 @@ func redactDigestSnapshot(ctx context.Context, file *os.File) error {
 		if err := rejectUnsupportedFutureDocumentVersion(schemaversion.Digest, value); err != nil {
 			return false, err
 		}
-		changed, err := setReasoningRedactionStateContext(ctx, value)
+		traversal := reasoning.NormalizedTraversal("digest")
+		changed, err := setReasoningRedactionStateContext(ctx, value, traversal)
 		if err != nil {
 			return false, err
 		}
-		reasoningChanged, err := redactReasoningValueContext(ctx, value)
+		reasoningChanged, err := redactReasoningValueContext(ctx, value, traversal)
 		if err != nil {
 			return false, err
 		}
@@ -2159,11 +2163,12 @@ func redactDigestSnapshot(ctx context.Context, file *os.File) error {
 
 func redactJSONDocumentSnapshot(ctx context.Context, file *os.File) error {
 	return rewriteJSONDocumentSnapshot(ctx, file, maxRedactionJSONDocumentBytes, func(ctx context.Context, value any) (bool, error) {
-		changed, err := setReasoningRedactionStateContext(ctx, value)
+		traversal := reasoning.ProviderTraversal()
+		changed, err := setReasoningRedactionStateContext(ctx, value, traversal)
 		if err != nil {
 			return false, err
 		}
-		reasoningChanged, err := redactReasoningValueContext(ctx, value)
+		reasoningChanged, err := redactReasoningValueContext(ctx, value, traversal)
 		return reasoningChanged || changed, err
 	})
 }

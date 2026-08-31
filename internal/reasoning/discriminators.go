@@ -28,6 +28,57 @@ const (
 	MaxTextBytes = 64 << 10
 )
 
+type traversalProvenance uint8
+
+const (
+	providerData traversalProvenance = iota
+	actaNormalizedData
+)
+
+// TraversalContext records who wrote the value being inspected. Envelope
+// exemptions are available only to Acta-normalized values; provider data is
+// always traversed conservatively.
+type TraversalContext struct {
+	provenance   traversalProvenance
+	envelopeType string
+}
+
+// ProviderTraversal returns the conservative context for raw or opaque
+// provider data.
+func ProviderTraversal() TraversalContext {
+	return TraversalContext{provenance: providerData}
+}
+
+// NormalizedTraversal returns the context for an Acta-written value.
+// envelopeType identifies the containing Acta envelope when the value itself
+// is its payload, or "digest" for a digest root.
+func NormalizedTraversal(envelopeType string) TraversalContext {
+	return TraversalContext{provenance: actaNormalizedData, envelopeType: envelopeType}
+}
+
+// Enter returns the context for a child field and whether that field is an
+// exempt surfaced-data value. This is the single envelope-exemption decision
+// point shared by all reasoning-boundary traversals.
+func (traversal TraversalContext) Enter(parent map[string]any, key string) (TraversalContext, bool) {
+	if traversal.provenance != actaNormalizedData {
+		return ProviderTraversal(), false
+	}
+	if normalizedEnvelopePayloadKey(parent, traversal.envelopeType, key) {
+		return ProviderTraversal(), true
+	}
+
+	child := ProviderTraversal()
+	if traversal.envelopeType == "digest" && key == "timeline" {
+		child = NormalizedTraversal("")
+	} else if key == "payload" {
+		typ, _ := parent["type"].(string)
+		if strings.TrimSpace(typ) != "" {
+			child = NormalizedTraversal(typ)
+		}
+	}
+	return child, false
+}
+
 // IsRedactedBlock reports whether a reasoning block was previously redacted.
 // The explicit flag is provenance; marker text alone may be genuine content.
 func IsRedactedBlock(redacted bool) bool {
@@ -93,33 +144,33 @@ func IsNormalizedEvent(kind, providerEvent, detailType string) bool {
 // deliberately does not classify arbitrary objects with a reasoning-shaped
 // type as provider output.
 func RedactProviderBlocks(value any) bool {
-	changed, _ := redactProviderBlocks(context.Background(), value)
+	changed, _ := redactProviderBlocks(context.Background(), value, ProviderTraversal())
 	return changed
 }
 
 // RedactProviderBlocksContext is RedactProviderBlocks with cancellation checks
 // while traversing potentially large upload artifacts.
 func RedactProviderBlocksContext(ctx context.Context, value any) (bool, error) {
-	return redactProviderBlocks(ctx, value)
+	return redactProviderBlocks(ctx, value, ProviderTraversal())
 }
 
 // RedactValue applies both the exact provider-envelope pass and a defensive
 // generic pass for future provider events. The generic pass masks
 // reasoning-shaped fields while preserving their JSON types. verified is
 // false when the value contains a shape that cannot be inspected safely.
-func RedactValue(value any) (changed, verified bool) {
-	changed, verified, _ = RedactValueContext(context.Background(), value)
+func RedactValue(value any, traversal TraversalContext) (changed, verified bool) {
+	changed, verified, _ = RedactValueContext(context.Background(), value, traversal)
 	return changed, verified
 }
 
 // RedactValueContext is RedactValue with cancellation checks while traversing
 // potentially large artifacts.
-func RedactValueContext(ctx context.Context, value any) (changed, verified bool, err error) {
-	changed, err = RedactProviderBlocksContext(ctx, value)
+func RedactValueContext(ctx context.Context, value any, traversal TraversalContext) (changed, verified bool, err error) {
+	changed, err = redactProviderBlocks(ctx, value, traversal)
 	if err != nil {
 		return false, false, err
 	}
-	genericChanged, verified, err := redactReasoningFieldsContext(ctx, value)
+	genericChanged, verified, err := redactReasoningFieldsContext(ctx, value, traversal)
 	return genericChanged || changed, verified, err
 }
 
@@ -157,7 +208,7 @@ func RedactUnsupportedPayloadContext(ctx context.Context, value any) (redacted a
 			detailsChanged, detailsVerified, err = redactUnsupportedDetailsArrayContext(ctx, typed)
 		case map[string]any:
 			detailsType, _ = typed["type"].(string)
-			detailsChanged, detailsVerified, err = RedactValueContext(ctx, typed)
+			detailsChanged, detailsVerified, err = RedactValueContext(ctx, typed, ProviderTraversal())
 		default:
 			return payload, false, false, nil
 		}
@@ -169,11 +220,11 @@ func RedactUnsupportedPayloadContext(ctx context.Context, value any) (redacted a
 		changed, verified, err := redactToStructuralReferencesContext(ctx, payload)
 		return payload, changed, verified, err
 	}
-	providerChanged, err := RedactProviderBlocksContext(ctx, payload)
+	providerChanged, err := redactProviderBlocks(ctx, payload, ProviderTraversal())
 	if err != nil {
 		return payload, false, false, err
 	}
-	containsRedacted, err := ContainsRedactedProviderBlockContext(ctx, payload)
+	containsRedacted, err := containsRedactedProviderBlock(ctx, payload, ProviderTraversal())
 	if err != nil {
 		return payload, false, false, err
 	}
@@ -196,7 +247,7 @@ func redactUnsupportedDetailsArrayContext(ctx context.Context, details []any) (c
 		switch typed := detail.(type) {
 		case nil:
 		case map[string]any:
-			itemChanged, itemVerified, err := RedactValueContext(ctx, typed)
+			itemChanged, itemVerified, err := RedactValueContext(ctx, typed, ProviderTraversal())
 			if err != nil {
 				return false, false, err
 			}
@@ -216,7 +267,7 @@ func redactUnsupportedDetailsArrayContext(ctx context.Context, details []any) (c
 	return changed, verified, nil
 }
 
-func redactReasoningFieldsContext(ctx context.Context, value any) (changed, verified bool, err error) {
+func redactReasoningFieldsContext(ctx context.Context, value any, traversal TraversalContext) (changed, verified bool, err error) {
 	if err := ctx.Err(); err != nil {
 		return false, false, err
 	}
@@ -227,7 +278,7 @@ func redactReasoningFieldsContext(ctx context.Context, value any) (changed, veri
 	case []any:
 		verified = true
 		for _, item := range typed {
-			itemChanged, itemVerified, err := redactReasoningFieldsContext(ctx, item)
+			itemChanged, itemVerified, err := redactReasoningFieldsContext(ctx, item, traversal)
 			if err != nil {
 				return false, false, err
 			}
@@ -240,7 +291,7 @@ func redactReasoningFieldsContext(ctx context.Context, value any) (changed, veri
 		if IsBlockDiscriminator(typeDiscriminator) || IsBlockDiscriminator(kindDiscriminator) {
 			return redactToStructuralReferencesContext(ctx, typed)
 		}
-		if typeDiscriminator == "unsupported" || kindDiscriminator == "unsupported" {
+		if traversal.provenance == actaNormalizedData && (typeDiscriminator == "unsupported" || kindDiscriminator == "unsupported") {
 			_, changed, verified, err := RedactUnsupportedPayloadContext(ctx, typed)
 			return changed, verified, err
 		}
@@ -249,7 +300,8 @@ func redactReasoningFieldsContext(ctx context.Context, value any) (changed, veri
 			if err := ctx.Err(); err != nil {
 				return false, false, err
 			}
-			if IsUserDataPayloadKey(typed, key) {
+			childTraversal, exempt := traversal.Enter(typed, key)
+			if exempt {
 				continue
 			}
 			if isReasoningContentKey(key, item) {
@@ -260,7 +312,7 @@ func redactReasoningFieldsContext(ctx context.Context, value any) (changed, veri
 				}
 				continue
 			}
-			itemChanged, itemVerified, err := redactReasoningFieldsContext(ctx, item)
+			itemChanged, itemVerified, err := redactReasoningFieldsContext(ctx, item, childTraversal)
 			if err != nil {
 				return false, false, err
 			}
@@ -349,7 +401,7 @@ func maskableValue(value any) bool {
 	}
 }
 
-func redactProviderBlocks(ctx context.Context, value any) (bool, error) {
+func redactProviderBlocks(ctx context.Context, value any, traversal TraversalContext) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
@@ -357,7 +409,7 @@ func redactProviderBlocks(ctx context.Context, value any) (bool, error) {
 	case []any:
 		changed := false
 		for _, item := range typed {
-			itemChanged, err := redactProviderBlocks(ctx, item)
+			itemChanged, err := redactProviderBlocks(ctx, item, traversal)
 			if err != nil {
 				return false, err
 			}
@@ -368,10 +420,11 @@ func redactProviderBlocks(ctx context.Context, value any) (bool, error) {
 		changed := redactCodexBlock(typed)
 		changed = redactClaudeBlocks(typed) || changed
 		for key, item := range typed {
-			if IsUserDataPayloadKey(typed, key) {
+			childTraversal, exempt := traversal.Enter(typed, key)
+			if exempt {
 				continue
 			}
-			itemChanged, err := redactProviderBlocks(ctx, item)
+			itemChanged, err := redactProviderBlocks(ctx, item, childTraversal)
 			if err != nil {
 				return false, err
 			}
@@ -494,24 +547,24 @@ func structuralInteger(value any) bool {
 // wrappers preserve that provenance after an earlier exact pass has already
 // made a later redaction traversal idempotent.
 func ContainsRedactedProviderBlock(value any) bool {
-	contains, _ := containsRedactedProviderBlock(context.Background(), value)
+	contains, _ := containsRedactedProviderBlock(context.Background(), value, ProviderTraversal())
 	return contains
 }
 
 // ContainsRedactedProviderBlockContext is ContainsRedactedProviderBlock with
 // cancellation checks while traversing potentially large upload artifacts.
 func ContainsRedactedProviderBlockContext(ctx context.Context, value any) (bool, error) {
-	return containsRedactedProviderBlock(ctx, value)
+	return containsRedactedProviderBlock(ctx, value, ProviderTraversal())
 }
 
-func containsRedactedProviderBlock(ctx context.Context, value any) (bool, error) {
+func containsRedactedProviderBlock(ctx context.Context, value any, traversal TraversalContext) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
 	switch typed := value.(type) {
 	case []any:
 		for _, item := range typed {
-			contains, err := containsRedactedProviderBlock(ctx, item)
+			contains, err := containsRedactedProviderBlock(ctx, item, traversal)
 			if err != nil || contains {
 				return contains, err
 			}
@@ -521,10 +574,11 @@ func containsRedactedProviderBlock(ctx context.Context, value any) (bool, error)
 			return true, nil
 		}
 		for key, item := range typed {
-			if IsUserDataPayloadKey(typed, key) {
+			childTraversal, exempt := traversal.Enter(typed, key)
+			if exempt {
 				continue
 			}
-			contains, err := containsRedactedProviderBlock(ctx, item)
+			contains, err := containsRedactedProviderBlock(ctx, item, childTraversal)
 			if err != nil || contains {
 				return contains, err
 			}
@@ -533,21 +587,40 @@ func containsRedactedProviderBlock(ctx context.Context, value any) (bool, error)
 	return false, nil
 }
 
-// IsUserDataPayloadKey reports whether key names a container whose contents
-// belong to the user or a tool in a recognized provider or normalized event
-// envelope. Bare payload-like keys on unknown envelopes are not exempt: future
-// provider shapes must remain inspectable by the generic reasoning pass.
-func IsUserDataPayloadKey(parent map[string]any, key string) bool {
+// normalizedEnvelopePayloadKey reports whether a field is surfaced user or
+// tool data in an Acta-normalized envelope. Callers must first establish Acta
+// provenance; object shape alone never reaches this registry.
+func normalizedEnvelopePayloadKey(parent map[string]any, envelopeType, key string) bool {
 	typeDiscriminator, kindDiscriminator := objectDiscriminators(parent)
 	role, _ := parent["role"].(string)
 	typeDiscriminator = strings.ToLower(strings.TrimSpace(typeDiscriminator))
 	kindDiscriminator = strings.ToLower(strings.TrimSpace(kindDiscriminator))
 	role = strings.ToLower(strings.TrimSpace(role))
 	payloadKey := strings.ToLower(strings.TrimSpace(key))
+	envelopeType = strings.ToLower(strings.TrimSpace(envelopeType))
+
+	if key != payloadKey {
+		return false
+	}
+	value, exists := parent[key]
+	if !exists || !maskableValue(value) {
+		return false
+	}
+
+	switch envelopeType {
+	case "digest", "run.completed", "run.failed":
+		return key == "structured_output"
+	}
 
 	if normalizedDataKind(kindDiscriminator) {
 		kind, ok := normalizedEnvelopeKind(parent)
-		return ok && normalizedEnvelopePayloadKey(parent, kind, key)
+		if !ok {
+			return false
+		}
+		if expectedKind, hasExpectedKind := normalizedEnvelopeTypeKind(envelopeType); hasExpectedKind && expectedKind != kind {
+			return false
+		}
+		return normalizedKindPayloadKey(value, kind, key)
 	}
 
 	switch payloadKey {
@@ -631,14 +704,7 @@ func normalizedEnvelopeTypeKind(discriminator string) (string, bool) {
 	}
 }
 
-func normalizedEnvelopePayloadKey(parent map[string]any, kind, key string) bool {
-	if key != strings.ToLower(strings.TrimSpace(key)) {
-		return false
-	}
-	value, exists := parent[key]
-	if !exists || !maskableValue(value) {
-		return false
-	}
+func normalizedKindPayloadKey(value any, kind, key string) bool {
 	switch key {
 	case "input":
 		switch kind {

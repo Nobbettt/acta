@@ -96,13 +96,13 @@ func TestRedactProviderBlocksRequiresExactDiscriminatorAndPosition(t *testing.T)
 	}
 }
 
-func TestRedactProviderBlocksPreservesProviderShapesInsideUserData(t *testing.T) {
+func TestRedactProviderBlocksTraversesRawProviderData(t *testing.T) {
 	const fixture = `{"type":"item.completed","item":{"type":"reasoning","text":"fixture"}}`
 	tests := map[string]string{
 		"result":                    `{"type":"mcp_tool_call","result":` + fixture + `}`,
 		"arguments":                 `{"type":"mcp_tool_call","arguments":` + fixture + `}`,
 		"input":                     `{"type":"tool_use","input":` + fixture + `}`,
-		"normalized result":         `{"kind":"tool_result","provider_event":"user.tool_result","phase":"completed","status":"orphaned","result":` + fixture + `}`,
+		"normalized lookalike":      `{"kind":"tool_result","provider_event":"user.tool_result","phase":"completed","status":"orphaned","result":` + fixture + `}`,
 		"structured output":         `{"type":"result","structured_output":` + fixture + `}`,
 		"tool use result":           `{"type":"user","tool_use_result":` + fixture + `}`,
 		"structured output details": `{"kind":"structured_output","details":` + fixture + `}`,
@@ -116,31 +116,27 @@ func TestRedactProviderBlocksPreservesProviderShapesInsideUserData(t *testing.T)
 			if err := json.Unmarshal([]byte(raw), &payload); err != nil {
 				t.Fatal(err)
 			}
-			before, err := json.Marshal(payload)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if RedactProviderBlocks(payload) {
-				t.Fatalf("provider-shaped user data was redacted: %#v", payload)
+			if !RedactProviderBlocks(payload) {
+				t.Fatalf("raw provider data was not traversed: %#v", payload)
 			}
 			after, err := json.Marshal(payload)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if string(after) != string(before) {
-				t.Fatalf("provider-shaped user data changed:\n got %s\nwant %s", after, before)
+			if strings.Contains(string(after), `"text":"fixture"`) || !strings.Contains(string(after), `"redacted":true`) {
+				t.Fatalf("nested raw provider reasoning was not redacted: %s", after)
 			}
 		})
 	}
 }
 
-func TestContainsRedactedProviderBlockIgnoresUserData(t *testing.T) {
+func TestContainsRedactedProviderBlockTraversesRawProviderData(t *testing.T) {
 	var payload any
 	if err := json.Unmarshal([]byte(`{"type":"mcp_tool_call","result":{"type":"item.completed","item":{"type":"reasoning","redacted":true}}}`), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if ContainsRedactedProviderBlock(payload) {
-		t.Fatal("redacted provider-shaped user data was classified as a provider envelope")
+	if !ContainsRedactedProviderBlock(payload) {
+		t.Fatal("redacted block nested in raw provider data was not found")
 	}
 }
 
@@ -150,7 +146,7 @@ func TestRedactValueTraversesPayloadKeysOnUnknownEnvelopes(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"type":"future.event","output":[{"type":"reasoning","text":"`+secret+`"}]}`), &payload); err != nil {
 		t.Fatal(err)
 	}
-	changed, verified := RedactValue(payload)
+	changed, verified := RedactValue(payload, ProviderTraversal())
 	if !changed || !verified {
 		t.Fatalf("future output redaction = changed %v, verified %v", changed, verified)
 	}
@@ -171,6 +167,16 @@ func TestRedactValueRequiresPositiveNormalizedEnvelopeIdentification(t *testing.
 		wantChange bool
 		wantSecret bool
 	}{
+		{
+			name:       "bare kind in provider data",
+			raw:        `{"kind":"tool_call","input":{"thinking":"` + secret + `"}}`,
+			wantChange: true,
+		},
+		{
+			name:       "genuine normalized tool call",
+			raw:        `{"kind":"tool_call","input":{"thinking":"` + secret + `"}}`,
+			wantSecret: true,
+		},
 		{
 			name:       "foreign type",
 			raw:        `{"type":"future.event","kind":"tool_result","output":{"thinking":"` + secret + `"}}`,
@@ -198,7 +204,11 @@ func TestRedactValueRequiresPositiveNormalizedEnvelopeIdentification(t *testing.
 			if err := json.Unmarshal([]byte(test.raw), &payload); err != nil {
 				t.Fatal(err)
 			}
-			changed, verified := RedactValue(payload)
+			traversal := NormalizedTraversal("")
+			if test.name == "bare kind in provider data" {
+				traversal = ProviderTraversal()
+			}
+			changed, verified := RedactValue(payload, traversal)
 			if changed != test.wantChange || !verified {
 				t.Fatalf("redaction = changed %v, verified %v; want changed %v, verified true", changed, verified, test.wantChange)
 			}

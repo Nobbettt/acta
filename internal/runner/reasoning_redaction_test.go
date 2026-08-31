@@ -104,14 +104,14 @@ func TestRedactReasoningRawStreamVerifiesArrayWrappedProviderBlock(t *testing.T)
 	}
 }
 
-func TestRedactReasoningLinePreservesProviderShapedToolResult(t *testing.T) {
+func TestRedactReasoningLineTraversesProviderShapedToolResult(t *testing.T) {
 	original := []byte(`{"type":"item.completed","item":{"id":"mcp-1","type":"mcp_tool_call","result":{"type":"item.completed","item":{"type":"reasoning","text":"visible fixture"}}}}` + "\n")
 	redacted, err := redactReasoningLine(original)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(redacted, original) {
-		t.Fatalf("nested tool result changed:\n got %s\nwant %s", redacted, original)
+	if bytes.Contains(redacted, []byte("visible fixture")) || !bytes.Contains(redacted, []byte(`"redacted":true`)) {
+		t.Fatalf("nested raw provider reasoning was not redacted: %s", redacted)
 	}
 }
 
@@ -140,18 +140,17 @@ func TestRedactReasoningLineScrubsGenericReasoningFields(t *testing.T) {
 	}
 }
 
-func TestRedactReasoningLineRejectsForeignTypeForNormalizedKind(t *testing.T) {
-	const secret = "private-foreign-normalized-kind-reasoning-4187"
-	original := []byte(`{"type":"future.event","kind":"tool_result","output":{"thinking":"` + secret + `"}}` + "\n")
+func TestRedactReasoningLineDoesNotTrustBareNormalizedKind(t *testing.T) {
+	const secret = "private-bare-normalized-kind-reasoning-4187"
+	original := []byte(`{"kind":"tool_call","input":{"thinking":"` + secret + `"}}` + "\n")
 	redacted, err := redactReasoningLine(original)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if bytes.Contains(redacted, []byte(secret)) ||
-		!bytes.Contains(redacted, []byte(`"type":"future.event"`)) ||
-		!bytes.Contains(redacted, []byte(`"kind":"tool_result"`)) ||
+		!bytes.Contains(redacted, []byte(`"kind":"tool_call"`)) ||
 		!bytes.Contains(redacted, []byte(`"thinking":"[REDACTED]"`)) {
-		t.Fatalf("foreign normalized-kind output was not safely redacted: %s", redacted)
+		t.Fatalf("bare normalized-kind input was not safely redacted: %s", redacted)
 	}
 }
 

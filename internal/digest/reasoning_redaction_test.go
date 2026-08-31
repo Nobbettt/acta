@@ -111,6 +111,26 @@ func TestRedactReasoningScrubsUnsupportedFutureThinking(t *testing.T) {
 	}
 }
 
+func TestRedactReasoningPreservesStructuredOutput(t *testing.T) {
+	structured := json.RawMessage(`{"reasoning_redaction_state":"keep","thinking":"final explanation"}`)
+	d := &Digest{
+		StructuredOutput: append(json.RawMessage(nil), structured...),
+		Timeline: []Event{
+			{Kind: KindStructuredOutput, ProviderEvent: "result.structured_output", Details: append(json.RawMessage(nil), structured...)},
+			{Kind: KindLifecycle, ProviderEvent: "future.event", Details: json.RawMessage(`{"thinking":"private lifecycle reasoning"}`)},
+		},
+	}
+	if verified := RedactReasoning(d); !verified {
+		t.Fatal("structured output redaction was not verified")
+	}
+	if !bytes.Equal(d.StructuredOutput, structured) || !bytes.Equal(d.Timeline[0].Details, structured) || d.Timeline[0].Redacted {
+		t.Fatalf("structured output changed: top=%s event=%+v", d.StructuredOutput, d.Timeline[0])
+	}
+	if !d.Timeline[1].Redacted || bytes.Contains(d.Timeline[1].Details, []byte("private lifecycle reasoning")) {
+		t.Fatalf("reasoning outside structured output was retained: %+v", d.Timeline[1])
+	}
+}
+
 func TestRedactReasoningScrubsKnownItemUpdatedDetails(t *testing.T) {
 	const secret = "private-item-update-reasoning-6241"
 	raw := strings.Join([]string{

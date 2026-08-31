@@ -667,7 +667,7 @@ func TestUploadRunConservativelyRedactsValidUnknownStderrJSON(t *testing.T) {
 	}
 }
 
-func TestUploadRunWithholdsUnverifiableOpaqueJSONLine(t *testing.T) {
+func TestUploadRunDoesNotTrustBareUnsupportedKind(t *testing.T) {
 	runDir := writeBundle(t)
 	const stderrName = "agent.stderr.log"
 	writeFile(t, filepath.Join(runDir, stderrName), `{"kind":"unsupported","details":"diagnostic"}`+"\n")
@@ -695,21 +695,9 @@ func TestUploadRunWithholdsUnverifiableOpaqueJSONLine(t *testing.T) {
 	}, testRecord(runDir)); err != nil {
 		t.Fatalf("UploadRun() rejected an unverifiable opaque JSON line: %v", err)
 	}
-	if uploaded[stderrName] {
-		t.Fatal("unverifiable opaque JSON artifact was uploaded")
+	if !uploaded[stderrName] {
+		t.Fatalf("inspectable raw provider object was withheld based on its bare kind: %#v", remoteEvents)
 	}
-	for _, event := range remoteEvents {
-		if event.Type != actaevents.TypeRunCompleted {
-			continue
-		}
-		for _, ref := range event.ArtifactRefs {
-			if ref.Path == stderrName && ref.Status == actaevents.ArtifactStatusWithheld &&
-				ref.Reason == withheldArtifactReason && ref.RedactionState == actaevents.ArtifactRedactionStateUnverified {
-				return
-			}
-		}
-	}
-	t.Fatalf("remote terminal manifest did not mark opaque JSON artifact withheld/unverified: %#v", remoteEvents)
 }
 
 func TestRedactArtifactSnapshotWithholdsTruncatedOpaqueReasoningMember(t *testing.T) {
@@ -857,13 +845,13 @@ func TestUploadRunRedactsReasoningKindDespiteFutureType(t *testing.T) {
 	}
 }
 
-func TestUploadRunRejectsForeignTypeForNormalizedKind(t *testing.T) {
+func TestUploadRunDoesNotTrustBareNormalizedKind(t *testing.T) {
 	const (
 		rawName = "codex-events.jsonl"
-		secret  = "private-remote-foreign-normalized-kind-6452"
+		secret  = "private-remote-bare-normalized-kind-6452"
 	)
 	runDir := writeBundle(t)
-	original := `{"type":"future.event","kind":"tool_result","output":{"thinking":"` + secret + `"}}` + "\n"
+	original := `{"kind":"tool_call","input":{"thinking":"` + secret + `"}}` + "\n"
 	writeFile(t, filepath.Join(runDir, rawName), original)
 	addArtifactRef(t, runDir, `{"kind":"raw_stdout","path":"`+rawName+`"}`)
 
@@ -887,17 +875,16 @@ func TestUploadRunRejectsForeignTypeForNormalizedKind(t *testing.T) {
 		t.Fatal(err)
 	}
 	if strings.Contains(remoteRaw, secret) ||
-		!strings.Contains(remoteRaw, `"type":"future.event"`) ||
-		!strings.Contains(remoteRaw, `"kind":"tool_result"`) ||
+		!strings.Contains(remoteRaw, `"kind":"tool_call"`) ||
 		!strings.Contains(remoteRaw, `"thinking":"[REDACTED]"`) || remoteState != "redacted" {
-		t.Fatalf("remote foreign normalized-kind body/state = %q / %q", remoteRaw, remoteState)
+		t.Fatalf("remote bare normalized-kind body/state = %q / %q", remoteRaw, remoteState)
 	}
 	if local := readTestFile(t, filepath.Join(runDir, rawName)); local != original {
 		t.Fatalf("remote redaction changed local raw stream:\n got %s\nwant %s", local, original)
 	}
 }
 
-func TestUploadRunRemoteSnapshotPreservesProviderShapedToolResult(t *testing.T) {
+func TestUploadRunRemoteSnapshotTraversesProviderShapedToolResult(t *testing.T) {
 	const (
 		rawName     = "codex-events.jsonl"
 		fixtureText = "visible-provider-shaped-tool-fixture-9241"
@@ -932,11 +919,9 @@ func TestUploadRunRemoteSnapshotPreservesProviderShapedToolResult(t *testing.T) 
 	}, record); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(remoteRaw, fixtureText) {
-		t.Fatalf("remote snapshot redacted provider-shaped tool data: %s", remoteRaw)
-	}
-	if strings.Contains(remoteRaw, secret) || !strings.Contains(remoteRaw, `"redacted":true`) {
-		t.Fatalf("remote snapshot retained genuine top-level provider reasoning: %s", remoteRaw)
+	if strings.Contains(remoteRaw, fixtureText) || strings.Contains(remoteRaw, secret) ||
+		strings.Count(remoteRaw, `"redacted":true`) != 2 {
+		t.Fatalf("remote snapshot did not traverse all raw provider data: %s", remoteRaw)
 	}
 	if local := readTestFile(t, filepath.Join(runDir, rawName)); local != original {
 		t.Fatal("default remote redaction changed the local raw stream")
@@ -1583,32 +1568,156 @@ func TestRedactProviderReasoningMasksMalformedStructuralMetadata(t *testing.T) {
 	}
 }
 
-func TestRedactProviderReasoningPreservesUserPayloadFields(t *testing.T) {
-	tests := map[string][]byte{
-		"provider tool payload":        []byte(`{"type":"item.completed","item":{"type":"mcp_tool_call","arguments":{"reasoning":"input explanation"},"result":{"thinking":"output explanation"}}}` + "\n"),
-		"Claude structured output":     []byte(`{"type":"result","structured_output":{"reasoning":"final explanation"}}` + "\n"),
-		"Acta structured output":       []byte(`{"type":"agent.output.structured","payload":{"kind":"structured_output","details":{"reasoning":"final explanation"}}}` + "\n"),
-		"non-provider discriminator":   []byte(`{"type":"reasoning_result","text":"visible user data"}` + "\n"),
-		"substring-only discriminator": []byte(`{"kind":"rethinking","text":"visible user data"}` + "\n"),
+func TestRedactProviderReasoningUsesEnvelopeProvenance(t *testing.T) {
+	tests := map[string]struct {
+		original   []byte
+		acta       bool
+		wantChange bool
+	}{
+		"provider tool payload": {
+			original:   []byte(`{"type":"item.completed","item":{"type":"mcp_tool_call","arguments":{"reasoning":"input explanation"},"result":{"thinking":"output explanation"}}}` + "\n"),
+			wantChange: true,
+		},
+		"Claude structured output": {
+			original:   []byte(`{"type":"result","structured_output":{"reasoning":"final explanation"}}` + "\n"),
+			wantChange: true,
+		},
+		"Acta structured output": {
+			original: []byte(`{"type":"agent.output.structured","payload":{"kind":"structured_output","details":{"reasoning":"final explanation"}}}` + "\n"),
+			acta:     true,
+		},
+		"Acta normalized tool call": {
+			original: []byte(`{"schema_version":3,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":2,"timestamp":"2026-07-06T12:00:00.5Z","source":"acta","type":"tool.call.completed","payload":{"kind":"tool_call","input":{"thinking":"secret"}}}` + "\n"),
+			acta:     true,
+		},
+		"non-provider discriminator": {
+			original: []byte(`{"type":"reasoning_result","text":"visible user data"}` + "\n"),
+		},
+		"substring-only discriminator": {
+			original: []byte(`{"kind":"rethinking","text":"visible user data"}` + "\n"),
+		},
 	}
-	for name, original := range tests {
+	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
 			var (
 				redacted []byte
 				err      error
 			)
-			if name == "Acta structured output" {
-				redacted, err = redactActaReasoningEventLine(original)
+			if test.acta {
+				redacted, err = redactActaReasoningEventLine(test.original)
 			} else {
-				redacted, err = redactProviderReasoningLine(original)
+				redacted, err = redactProviderReasoningLine(test.original)
 			}
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !bytes.Equal(redacted, original) {
-				t.Fatalf("user payload changed:\n got %s\nwant %s", redacted, original)
+			changed := !bytes.Equal(redacted, test.original)
+			if changed != test.wantChange {
+				t.Fatalf("payload changed = %v, want %v:\n got %s\nwant %s", changed, test.wantChange, redacted, test.original)
+			}
+			if test.wantChange && (!bytes.Contains(redacted, []byte(reasoningRedactionMarker)) || bytes.Contains(redacted, []byte("explanation"))) {
+				t.Fatalf("raw provider payload was not conservatively redacted: %s", redacted)
 			}
 		})
+	}
+}
+
+func TestRedactNormalizedTerminalStructuredOutput(t *testing.T) {
+	const (
+		structured = `{"answer":"done","reasoning_redaction_state":"keep","thinking":"final explanation"}`
+		secret     = "private-terminal-model-reasoning"
+	)
+	for _, typ := range []string{actaevents.TypeRunCompleted, actaevents.TypeRunFailed} {
+		t.Run(typ, func(t *testing.T) {
+			original := []byte(`{"type":"` + typ + `","payload":{"structured_output":` + structured + `,"model_usage":{"thinking":"` + secret + `"}}}` + "\n")
+			redacted, err := redactActaReasoningEventLine(original)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(redacted, []byte(secret)) || !bytes.Contains(redacted, []byte(`"thinking":"[REDACTED]"`)) {
+				t.Fatalf("reasoning outside structured_output was not redacted: %s", redacted)
+			}
+			var event struct {
+				Payload struct {
+					StructuredOutput json.RawMessage `json:"structured_output"`
+				} `json:"payload"`
+			}
+			if err := json.Unmarshal(redacted, &event); err != nil {
+				t.Fatal(err)
+			}
+			if string(event.Payload.StructuredOutput) != structured {
+				t.Fatalf("structured_output = %s, want %s", event.Payload.StructuredOutput, structured)
+			}
+		})
+	}
+}
+
+func TestRedactDigestPreservesStructuredOutputConsistently(t *testing.T) {
+	const (
+		structured = `{"answer":"done","reasoning_redaction_state":"keep","thinking":"final explanation"}`
+		secret     = "private-digest-model-reasoning"
+	)
+	file := writeSnapshotFile(t, `{"schema_version":3,"structured_output":`+structured+`,"timeline":[{"kind":"structured_output","provider_event":"result.structured_output","details":`+structured+`}],"model_usage":{"thinking":"`+secret+`"}}`+"\n")
+	if err := redactDigestSnapshot(context.Background(), file); err != nil {
+		t.Fatal(err)
+	}
+	redacted := readOpenFile(t, file)
+	if strings.Contains(redacted, secret) || !strings.Contains(redacted, `"thinking":"[REDACTED]"`) {
+		t.Fatalf("reasoning outside digest structured_output was not redacted: %s", redacted)
+	}
+	var document struct {
+		StructuredOutput json.RawMessage `json:"structured_output"`
+		Timeline         []struct {
+			Details json.RawMessage `json:"details"`
+		} `json:"timeline"`
+	}
+	if err := json.Unmarshal([]byte(redacted), &document); err != nil {
+		t.Fatal(err)
+	}
+	if string(document.StructuredOutput) != structured || len(document.Timeline) != 1 ||
+		!bytes.Equal(document.StructuredOutput, document.Timeline[0].Details) {
+		t.Fatalf("digest structured outputs diverged: top=%s timeline=%v", document.StructuredOutput, document.Timeline)
+	}
+}
+
+func TestUploadRunPreservesNormalizedStructuredOutput(t *testing.T) {
+	const (
+		structured = `{"answer":"done","reasoning_redaction_state":"keep","thinking":"final explanation"}`
+		secret     = "private-upload-model-reasoning"
+	)
+	runDir := t.TempDir()
+	writeFile(t, filepath.Join(runDir, "run.json"), `{"id":"run-1"}`+"\n")
+	writeFile(t, filepath.Join(runDir, "digest.json"), `{"schema_version":3,"producer":{"name":"acta","version":"test"},"run_id":"run-1","agent":"codex","status":"ok","timeline":[{"kind":"structured_output","provider_event":"result.structured_output","details":`+structured+`}],"metrics":{"duration_ms":1000,"commands":0,"edits":0,"tokens":{"input":0,"output":0,"total":0}},"files":[],"structured_output":`+structured+`,"model_usage":{"thinking":"`+secret+`"},"has_workspace_diff":false}`+"\n")
+	writeFile(t, filepath.Join(runDir, actaevents.Filename), strings.Join([]string{
+		`{"schema_version":3,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":1,"timestamp":"2026-07-06T12:00:00Z","source":"acta","type":"run.started","payload":{"agent":"codex","cwd":"/workspace","run_dir":"/workspace/.acta/runs/run-1"}}`,
+		`{"schema_version":3,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":2,"timestamp":"2026-07-06T12:00:00.5Z","source":"acta","type":"agent.output.structured","payload":{"kind":"structured_output","provider_event":"result.structured_output","details":` + structured + `}}`,
+		`{"schema_version":3,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":3,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed","payload":{"status":"ok","ok":true,"timeout":false,"duration_ms":1000,"structured_output":` + structured + `,"model_usage":{"thinking":"` + secret + `"}},"artifact_refs":[{"kind":"run_record","path":"run.json"},{"kind":"digest","path":"digest.json"},{"kind":"event_stream","path":"acta-events.jsonl"}]}`,
+		"",
+	}, "\n"))
+
+	uploaded := map[string]string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" {
+			payload, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Error(err)
+			}
+			uploaded[request.URL.Query().Get("filename")] = string(payload)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	if err := UploadRun(context.Background(), Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+	}, testRecord(runDir)); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"digest.json", actaevents.Filename} {
+		body := uploaded[name]
+		if strings.Contains(body, secret) || !strings.Contains(body, structured) || !strings.Contains(body, `"thinking":"[REDACTED]"`) {
+			t.Fatalf("uploaded %s did not preserve structured output and redact outside reasoning: %s", name, body)
+		}
 	}
 }
 

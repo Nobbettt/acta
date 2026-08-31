@@ -168,7 +168,7 @@ func redactReasoningLine(line []byte) ([]byte, error) {
 		}
 		return nil, fmt.Errorf("parse raw provider event for reasoning redaction: %w", err)
 	}
-	changed, verified := reasoning.RedactValue(value)
+	changed, verified := reasoning.RedactValue(value, reasoning.ProviderTraversal())
 	if !verified {
 		return nil, fmt.Errorf("provider event reasoning redaction could not be verified")
 	}

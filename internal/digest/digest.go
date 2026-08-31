@@ -271,7 +271,7 @@ func redactEventDetails(kind, providerEvent string, raw json.RawMessage) (json.R
 	if kind == KindUnsupported {
 		_, changed, verified = reasoning.RedactUnsupportedPayload(payload)
 	} else {
-		changed, verified = reasoning.RedactValue(payload)
+		changed, verified = reasoning.RedactValue(payload, reasoning.NormalizedTraversal(""))
 	}
 	if !verified {
 		return json.RawMessage(`"` + reasoning.RedactedMarker + `"`), true, false
