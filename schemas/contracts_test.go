@@ -332,11 +332,12 @@ func TestGoProducedCurrentArtifactsValidateAgainstPublishedSchemas(t *testing.T)
 			name: "run record", schema: "run-record.schema.json",
 			value: runrecord.Record{
 				SchemaVersion: runrecord.SchemaVersion, Producer: producer, ID: "run-example", Agent: "codex", AgentVersion: "0.147.0",
-				CWD: "/workspace", RunDir: "/workspace/.acta/runs/run-example", Command: []string{"codex", "exec"},
+				TraceID: "0123456789abcdef0123456789abcdef",
+				CWD:     "/workspace", RunDir: "/workspace/.acta/runs/run-example", Command: []string{"codex", "exec"},
 				StartedAt: now, CompletedAt: now.Add(time.Second), DurationMillis: 1000, ExitCode: &exit, OK: true, Timeout: false,
 				TerminationReason: "completed", RawStdoutPath: "/workspace/.acta/runs/run-example/codex-events.jsonl",
 				RawStderrPath: "/workspace/.acta/runs/run-example/codex.stderr.log", RawStdoutArtifact: "codex-events.jsonl",
-				RawStderrArtifact: "codex.stderr.log", PromptSource: "flag", OTLPStatus: "not_sampled",
+				RawStderrArtifact: "codex.stderr.log", PromptSource: "flag", OTLPStatus: "pending",
 				ProcessContainment: "posix_process_group", AgentConfigMode: "ambient_ephemeral",
 			},
 		},
@@ -345,7 +346,7 @@ func TestGoProducedCurrentArtifactsValidateAgainstPublishedSchemas(t *testing.T)
 			value: digest.Digest{
 				SchemaVersion: digest.SchemaVersion, Producer: producer, RunID: "run-example", Agent: "codex", AgentVersion: "0.147.0",
 				Status: digest.StatusOK, Timeline: []digest.Event{}, Metrics: digest.Metrics{}, Files: []digest.FileTouch{}, HasWorkspaceDiff: false,
-				OTLPStatus: "not_sampled",
+				OTLPStatus: "pending",
 			},
 		},
 		{
@@ -353,7 +354,14 @@ func TestGoProducedCurrentArtifactsValidateAgainstPublishedSchemas(t *testing.T)
 			value: actaevents.Event{
 				SchemaVersion: actaevents.SchemaVersion, Producer: producer, RegeneratedBy: &regenerator, RunID: "run-example", Sequence: 1,
 				Timestamp: now, Source: actaevents.Source, Type: actaevents.TypeRunStarted,
-				Payload: json.RawMessage(`{"agent":"codex","agent_version":"0.147.0","cwd":"/workspace","run_dir":"/workspace/.acta/runs/run-example","prompt_source":"flag","otlp_status":"not_sampled"}`),
+				Payload: json.RawMessage(`{"agent":"codex","agent_version":"0.147.0","cwd":"/workspace","run_dir":"/workspace/.acta/runs/run-example","prompt_source":"flag","otlp_status":"pending"}`),
+			},
+		},
+		{
+			name: "projection manifest", schema: "projection.schema.json",
+			value: map[string]any{
+				"schema_version": 3, "producer": producer, "generation": "1787133600000000000",
+				"run_sha256": strings.Repeat("a", 64), "digest_sha256": strings.Repeat("b", 64), "events_sha256": strings.Repeat("c", 64),
 			},
 		},
 	}

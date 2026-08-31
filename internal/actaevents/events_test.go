@@ -728,6 +728,57 @@ func TestProjectionCommitLockReleasedAfterFailure(t *testing.T) {
 	assertProjectionGeneration(t, runDir, goodPayloads)
 }
 
+func TestProjectionCommitMidPublishFailureRestoresWholeGeneration(t *testing.T) {
+	runDir := t.TempDir()
+	finals := []string{"run.json", "digest.json", Filename, "projection.json"}
+	oldPayloads := [][]byte{[]byte("old run\n"), []byte("old digest\n"), []byte("old events\n"), []byte("old manifest\n")}
+	newPayloads := [][]byte{[]byte("new run\n"), []byte("new digest\n"), []byte("new events\n"), []byte("new manifest\n")}
+	if err := commitProjection(runDir, "100", finals, oldPayloads, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	originalRename := projectionRename
+	renames := 0
+	projectionRename = func(oldPath, newPath string) error {
+		renames++
+		// Four backups and the first published artifact have completed. Fail
+		// while publishing digest.json, after run.json is already replaced.
+		if renames == 6 {
+			return errors.New("injected mid-rename failure")
+		}
+		return os.Rename(oldPath, newPath)
+	}
+	t.Cleanup(func() { projectionRename = originalRename })
+
+	err := commitProjection(runDir, "200", finals, newPayloads, nil)
+	if err == nil || !strings.Contains(err.Error(), "injected mid-rename failure") {
+		t.Fatalf("commit error = %v, want injected mid-rename failure", err)
+	}
+	assertProjectionFiles(t, runDir, finals, oldPayloads)
+	entries, err := os.ReadDir(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".staged-") || strings.Contains(entry.Name(), ".backup-") {
+			t.Fatalf("failed commit left scratch artifact %s", entry.Name())
+		}
+	}
+}
+
+func assertProjectionFiles(t *testing.T, runDir string, finals []string, wantPayloads [][]byte) {
+	t.Helper()
+	for index, name := range finals {
+		payload, err := os.ReadFile(filepath.Join(runDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(payload) != string(wantPayloads[index]) {
+			t.Fatalf("%s = %q, want previous generation %q", name, payload, wantPayloads[index])
+		}
+	}
+}
+
 func projectionCommitFixture(t *testing.T, generation, digestPayload, eventsPayload string) ([]string, [][]byte) {
 	t.Helper()
 	manifestPayload, err := json.Marshal(struct {
@@ -737,7 +788,7 @@ func projectionCommitFixture(t *testing.T, generation, digestPayload, eventsPayl
 		DigestSHA256  string             `json:"digest_sha256"`
 		EventsSHA256  string             `json:"events_sha256"`
 	}{
-		SchemaVersion: ProjectionSchemaVersion,
+		SchemaVersion: MinProjectionSchemaVersion,
 		Producer:      runrecord.Producer{Name: "acta", Version: "test"},
 		Generation:    generation,
 		DigestSHA256:  fmt.Sprintf("%x", sha256.Sum256([]byte(digestPayload))),

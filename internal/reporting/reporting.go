@@ -114,6 +114,7 @@ type projectionManifest struct {
 	SchemaVersion int                `json:"schema_version"`
 	Producer      runrecord.Producer `json:"producer"`
 	Generation    string             `json:"generation"`
+	RunSHA256     string             `json:"run_sha256,omitempty"`
 	DigestSHA256  string             `json:"digest_sha256"`
 	EventsSHA256  string             `json:"events_sha256"`
 }
@@ -200,9 +201,6 @@ func UploadRun(ctx context.Context, cfg Config, record *runrecord.Record) error 
 	if maxRedactionLineBytes == 0 {
 		maxRedactionLineBytes = DefaultMaxRedactionLineBytes
 	}
-	if (record.ReasoningRedactionState == "failed" || record.ReasoningRedactionState == "partial") && !cfg.AllowUnredactedRemoteReasoning {
-		return errors.New("remote upload refused because local reasoning redaction did not complete; pass --allow-unredacted-remote-reasoning to explicitly upload the unredacted bundle")
-	}
 	// The upload boundary never trusts the mutable run record as evidence that
 	// content is safe. Default uploads always perform their own idempotent pass.
 	redactRemoteReasoning := !cfg.AllowUnredactedRemoteReasoning
@@ -210,10 +208,11 @@ func UploadRun(ctx context.Context, cfg Config, record *runrecord.Record) error 
 	if !redactRemoteReasoning {
 		remoteRedactionState = "unredacted"
 	}
-	eventFile, eventTempPath, artifacts, err := prepareUploadSnapshotContext(ctx, record, artifactLimit, redactRemoteReasoning, maxRedactionLineBytes, cfg.projectionSnapshotHook)
+	eventFile, eventTempPath, artifacts, snapshotRecord, err := prepareUploadSnapshotContext(ctx, record, artifactLimit, redactRemoteReasoning, maxRedactionLineBytes, cfg.projectionSnapshotHook)
 	if err != nil {
 		return err
 	}
+	record = snapshotRecord
 	defer func() {
 		_ = eventFile.Close()
 		_ = os.Remove(eventTempPath)
@@ -779,40 +778,63 @@ func dedupeArtifactRefs(refs []actaevents.ArtifactRef) []actaevents.ArtifactRef 
 	return out
 }
 
-func prepareUploadSnapshotContext(ctx context.Context, record *runrecord.Record, maxBytes int64, redactReasoning bool, maxRedactionLineBytes int, hook func(int)) (*os.File, string, []artifactUpload, error) {
+func prepareUploadSnapshotContext(ctx context.Context, record *runrecord.Record, maxBytes int64, redactReasoning bool, maxRedactionLineBytes int, hook func(int)) (*os.File, string, []artifactUpload, *runrecord.Record, error) {
 	for attempt := 1; attempt <= maxProjectionSnapshotAttempts; attempt++ {
 		snapshots, _, retry, err := snapshotProjectionArtifactsContext(ctx, record.RunDir, maxBytes, attempt, hook)
 		if err != nil {
-			return nil, "", nil, err
+			return nil, "", nil, nil, err
 		}
 		if retry {
 			continue
 		}
+		snapshotRecord := record
+		if snapshot, ok := snapshots["run.json"]; ok {
+			payload, readErr := readBoundedFile(snapshot.File, runrecord.MaxRecordBytes)
+			if readErr != nil {
+				closeArtifactSnapshots(snapshots)
+				return nil, "", nil, nil, fmt.Errorf("read manifested run record: %w", readErr)
+			}
+			var decoded runrecord.Record
+			if err := json.Unmarshal(payload, &decoded); err != nil {
+				closeArtifactSnapshots(snapshots)
+				return nil, "", nil, nil, fmt.Errorf("parse manifested run record: %w", err)
+			}
+			if err := decoded.Validate(); err != nil {
+				closeArtifactSnapshots(snapshots)
+				return nil, "", nil, nil, fmt.Errorf("validate manifested run record: %w", err)
+			}
+			decoded.RunDir = record.RunDir
+			snapshotRecord = &decoded
+		}
+		if redactReasoning && (snapshotRecord.ReasoningRedactionState == "failed" || snapshotRecord.ReasoningRedactionState == "partial") {
+			closeArtifactSnapshots(snapshots)
+			return nil, "", nil, nil, errors.New("remote upload refused because local reasoning redaction did not complete; pass --allow-unredacted-remote-reasoning to explicitly upload the unredacted bundle")
+		}
 		eventSnapshot := snapshots[actaevents.Filename]
-		artifactRefs, err := terminalArtifactRefsFromFile(ctx, eventSnapshot.File, record)
+		artifactRefs, err := terminalArtifactRefsFromFile(ctx, eventSnapshot.File, snapshotRecord)
 		if err != nil {
 			closeArtifactSnapshots(snapshots)
-			return nil, "", nil, err
+			return nil, "", nil, nil, err
 		}
 		if redactReasoning {
 			if _, err := redactArtifactSnapshot(ctx, eventSnapshot.File, "event_stream", actaevents.Filename, maxRedactionLineBytes); err != nil {
 				closeArtifactSnapshots(snapshots)
-				return nil, "", nil, fmt.Errorf("redact reasoning from event snapshot: %w", err)
+				return nil, "", nil, nil, fmt.Errorf("redact reasoning from event snapshot: %w", err)
 			}
-			if _, err := scanEventsFile(ctx, eventSnapshot.File, record.ID, nil); err != nil {
+			if _, err := scanEventsFile(ctx, eventSnapshot.File, snapshotRecord.ID, nil); err != nil {
 				closeArtifactSnapshots(snapshots)
-				return nil, "", nil, fmt.Errorf("validate redacted replay event snapshot: %w", err)
+				return nil, "", nil, nil, fmt.Errorf("validate redacted replay event snapshot: %w", err)
 			}
 		}
-		artifacts, err := buildArtifactsContext(ctx, record.RunDir, artifactRefs, eventSnapshot.File, eventSnapshot.TempPath, snapshots, maxBytes, redactReasoning, maxRedactionLineBytes)
+		artifacts, err := buildArtifactsContext(ctx, snapshotRecord.RunDir, artifactRefs, eventSnapshot.File, eventSnapshot.TempPath, snapshots, maxBytes, redactReasoning, maxRedactionLineBytes)
 		if err != nil {
 			closeArtifactSnapshots(snapshots)
-			return nil, "", nil, err
+			return nil, "", nil, nil, err
 		}
 		closeUnusedArtifactSnapshots(snapshots, eventSnapshot.File, artifacts)
-		return eventSnapshot.File, eventSnapshot.TempPath, artifacts, nil
+		return eventSnapshot.File, eventSnapshot.TempPath, artifacts, snapshotRecord, nil
 	}
-	return nil, "", nil, fmt.Errorf("torn bundle: projection generation changed while opening artifacts after %d attempts", maxProjectionSnapshotAttempts)
+	return nil, "", nil, nil, fmt.Errorf("torn bundle: projection generation changed while opening artifacts after %d attempts", maxProjectionSnapshotAttempts)
 }
 
 func snapshotProjectionArtifactsContext(ctx context.Context, runDir string, maxBytes int64, attempt int, hook func(int)) (map[string]artifactSnapshot, bool, bool, error) {
@@ -854,13 +876,19 @@ func snapshotProjectionArtifactsContext(ctx context.Context, runDir string, maxB
 		"digest.json":       manifest.DigestSHA256,
 		actaevents.Filename: manifest.EventsSHA256,
 	}
+	if manifest.RunSHA256 != "" {
+		expectedHashes["run.json"] = manifest.RunSHA256
+	}
 	sources := make(map[string]*os.File, len(expectedHashes))
 	defer func() {
 		for _, source := range sources {
 			_ = source.Close()
 		}
 	}()
-	for _, name := range []string{"digest.json", actaevents.Filename} {
+	for _, name := range []string{"run.json", "digest.json", actaevents.Filename} {
+		if _, ok := expectedHashes[name]; !ok {
+			continue
+		}
 		source, openErr := openManifestedProjectionRegular(resolvedRunDir, filepath.Join(runDir, name))
 		if openErr != nil {
 			if err := ctx.Err(); err != nil {
@@ -879,7 +907,10 @@ func snapshotProjectionArtifactsContext(ctx context.Context, runDir string, maxB
 	}
 
 	snapshots := make(map[string]artifactSnapshot, len(sources))
-	for _, name := range []string{actaevents.Filename, "digest.json"} {
+	for _, name := range []string{actaevents.Filename, "run.json", "digest.json"} {
+		if sources[name] == nil {
+			continue
+		}
 		file, tempPath, snapshotErr := snapshotOpenFileContext(ctx, sources[name], maxBytes, expectedHashes[name])
 		if snapshotErr != nil {
 			closeArtifactSnapshots(snapshots)
@@ -1015,7 +1046,7 @@ func decodeProjectionManifest(payload []byte) (projectionManifest, error) {
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return manifest, errors.New("decode projection manifest: trailing JSON value")
 	}
-	if manifest.SchemaVersion != actaevents.ProjectionSchemaVersion {
+	if manifest.SchemaVersion < actaevents.MinProjectionSchemaVersion || manifest.SchemaVersion > actaevents.ProjectionSchemaVersion {
 		return manifest, fmt.Errorf("projection manifest has unsupported schema_version %d", manifest.SchemaVersion)
 	}
 	if strings.TrimSpace(manifest.Producer.Name) == "" || strings.TrimSpace(manifest.Producer.Version) == "" {
@@ -1024,7 +1055,17 @@ func decodeProjectionManifest(payload []byte) (projectionManifest, error) {
 	if manifest.Generation == "" || strings.Trim(manifest.Generation, "0123456789") != "" {
 		return manifest, errors.New("projection manifest generation must contain only digits")
 	}
-	for name, value := range map[string]string{"digest_sha256": manifest.DigestSHA256, "events_sha256": manifest.EventsSHA256} {
+	if manifest.SchemaVersion == actaevents.ProjectionSchemaVersion && manifest.RunSHA256 == "" {
+		return manifest, errors.New("projection manifest run_sha256 is required")
+	}
+	if manifest.SchemaVersion < actaevents.ProjectionSchemaVersion && manifest.RunSHA256 != "" {
+		return manifest, errors.New("projection manifest run_sha256 requires schema_version 3")
+	}
+	hashes := map[string]string{"digest_sha256": manifest.DigestSHA256, "events_sha256": manifest.EventsSHA256}
+	if manifest.RunSHA256 != "" {
+		hashes["run_sha256"] = manifest.RunSHA256
+	}
+	for name, value := range hashes {
 		decoded, err := hex.DecodeString(value)
 		if err != nil || len(decoded) != sha256.Size || value != strings.ToLower(value) {
 			return manifest, fmt.Errorf("projection manifest %s must be a lowercase SHA-256 digest", name)

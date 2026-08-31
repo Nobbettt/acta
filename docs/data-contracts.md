@@ -10,7 +10,7 @@ Acta publishes five machine-readable contracts under [`schemas/`](../schemas/):
 - `acta-event.schema.json` — each `acta-events.jsonl` line, schema version 3
   (the frozen v2 contract is `acta-event.v2.schema.json`)
 - `projection.schema.json` — the transactional re-projection completion
-  manifest, schema version 2
+  manifest, schema version 3 (readers also accept v2)
 
 Representative files are in [`schemas/examples/`](../schemas/examples/). JSONL
 is validated one object per line.
@@ -23,12 +23,14 @@ are vendor evidence and do not use Acta schema versions.
 ## Compatibility rules
 
 - Version 2 is the first published run-record, digest, and Acta-event contract;
-  v3 extends their closed `otlp_status` enums with `not_sampled`, adds run
+  v3 extends their closed `otlp_status` enums with `not_sampled` and `pending`, adds run
   redaction/publication state and withheld-artifact metadata, and lets events
   identify a regenerating producer separately. Readers accept both, but reject
   these v3-only fields and values in a v2 artifact. The versions listed for the
   other contracts are their first published versions, and readers reject lower
   versions outright.
+- Projection manifest v3 hash-pins `run.json` in addition to the digest and
+  event stream; v2 manifests pin only the derived pair.
 - Adding an optional field without changing existing meaning is compatible
   and may retain the current schema version.
 - Removing or renaming a field, changing a field's type or semantics, changing

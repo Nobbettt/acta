@@ -29,9 +29,10 @@ const (
 	MinSchemaVersion = 2
 	// ProjectionSchemaVersion versions projection.json independently from the
 	// digest and event contracts it binds by hash.
-	ProjectionSchemaVersion = 2
-	Source                  = "acta"
-	Filename                = "acta-events.jsonl"
+	ProjectionSchemaVersion    = 3
+	MinProjectionSchemaVersion = 2
+	Source                     = "acta"
+	Filename                   = "acta-events.jsonl"
 	// MaxEventsRequestBytes is the complete upload-request budget. MaxEventBytes
 	// reserves the JSON array envelope so every writer-valid individual event is
 	// also uploadable as a one-event batch.
@@ -39,6 +40,15 @@ const (
 	MaxEventBytes         = MaxEventsRequestBytes - len(`{"events":[]}`)
 	MaxStreamBytes        = 256 << 20
 )
+
+type projectionManifest struct {
+	SchemaVersion int                `json:"schema_version"`
+	Producer      runrecord.Producer `json:"producer"`
+	Generation    string             `json:"generation"`
+	RunSHA256     string             `json:"run_sha256"`
+	DigestSHA256  string             `json:"digest_sha256"`
+	EventsSHA256  string             `json:"events_sha256"`
+}
 
 const (
 	TypeRunStarted             = "run.started"
@@ -207,7 +217,7 @@ func ValidateEvent(event Event, runID string, expectedSequence int) error {
 		}
 		validOTLPStatus := payload.OTLPStatus == "" || oneOf(payload.OTLPStatus, "not_configured", "exported", "failed")
 		if runrecord.SupportsV3Fields(event.SchemaVersion) {
-			validOTLPStatus = validOTLPStatus || payload.OTLPStatus == "not_sampled"
+			validOTLPStatus = validOTLPStatus || oneOf(payload.OTLPStatus, "not_sampled", "pending")
 		}
 		if !validOTLPStatus {
 			return fmt.Errorf("event sequence %d schema_version %d has invalid run.started otlp_status %q", event.Sequence, event.SchemaVersion, payload.OTLPStatus)
@@ -511,8 +521,8 @@ func buildEventsForRunDir(runDir string, d *digest.Digest) ([]Event, error) {
 
 // WriteProjectionForRunDir prebuilds and validates digest.json and the event
 // stream, stages both on the bundle filesystem, and publishes them as one
-// rollback-protected generation. projection.json is committed last and is the
-// completion marker for consumers that require pair consistency.
+// rollback-protected generation. projection.json is committed last and binds
+// the immutable run record to the derived pair.
 func WriteProjectionForRunDir(runDir string, d *digest.Digest) error {
 	return WriteProjectionForRunDirContext(context.Background(), runDir, d)
 }
@@ -520,39 +530,119 @@ func WriteProjectionForRunDir(runDir string, d *digest.Digest) error {
 // WriteProjectionForRunDirContext is WriteProjectionForRunDir with
 // cancellation support while waiting to publish the new generation.
 func WriteProjectionForRunDirContext(ctx context.Context, runDir string, d *digest.Digest) error {
-	events, err := buildEventsForRunDir(runDir, d)
-	if err != nil {
+	generation := fmt.Sprintf("%d", time.Now().UnixNano())
+	finals := []string{"digest.json", Filename, "projection.json"}
+	payloads := make([][]byte, len(finals))
+	return commitProjectionContext(ctx, runDir, generation, finals, payloads, func() error {
+		// run.json is now part of the generation identity. Re-read and reconcile
+		// it only after taking the projection lock so a post-publication final
+		// telemetry commit cannot race this re-projection.
+		runPayload, err := securefile.ReadRegularFile(runDir, filepath.Join(runDir, "run.json"), runrecord.MaxRecordBytes)
+		if err != nil {
+			return fmt.Errorf("read run record: %w", err)
+		}
+		events, err := buildEventsForRunDir(runDir, d)
+		if err != nil {
+			return err
+		}
+		payloads[0], err = marshalDigest(d)
+		if err != nil {
+			return err
+		}
+		payloads[1], err = encodeEvents(events)
+		if err != nil {
+			return err
+		}
+		payloads[2], err = marshalProjectionManifest(d.Producer, generation, runPayload, payloads[0], payloads[1])
 		return err
+	})
+}
+
+// WriteProjectionForRecord atomically reconciles every mutable local result
+// after publication. The prior generation remains authoritative unless all
+// three artifacts and their manifest commit successfully under the bundle
+// projection lock.
+func WriteProjectionForRecord(runDir string, record *runrecord.Record, d *digest.Digest, prompt string) error {
+	return WriteProjectionForRecordContext(context.Background(), runDir, record, d, prompt)
+}
+
+func WriteProjectionForRecordContext(ctx context.Context, runDir string, record *runrecord.Record, d *digest.Digest, prompt string) error {
+	if record == nil {
+		return errors.New("run record is nil")
 	}
-	digestPayload, err := digest.MarshalEvaluation(d)
-	if err != nil {
-		return fmt.Errorf("marshal digest: %w", err)
-	}
-	digestPayload = append(digestPayload, '\n')
-	if len(digestPayload) > digest.MaxDigestBytes {
-		return fmt.Errorf("digest is %d bytes; maximum is %d", len(digestPayload), digest.MaxDigestBytes)
-	}
-	eventPayload, err := encodeEvents(events)
-	if err != nil {
-		return err
+	if d == nil {
+		return errors.New("digest is nil")
 	}
 	generation := fmt.Sprintf("%d", time.Now().UnixNano())
-	manifestPayload, err := json.MarshalIndent(struct {
-		SchemaVersion int                `json:"schema_version"`
-		Producer      runrecord.Producer `json:"producer"`
-		Generation    string             `json:"generation"`
-		DigestSHA256  string             `json:"digest_sha256"`
-		EventsSHA256  string             `json:"events_sha256"`
-	}{SchemaVersion: ProjectionSchemaVersion, Producer: d.Producer, Generation: generation,
-		DigestSHA256: fmt.Sprintf("%x", sha256.Sum256(digestPayload)), EventsSHA256: fmt.Sprintf("%x", sha256.Sum256(eventPayload))}, "", "  ")
-	if err != nil {
+	finals := []string{"run.json", "digest.json", Filename, "projection.json"}
+	payloads := make([][]byte, len(finals))
+	return commitProjectionContext(ctx, runDir, generation, finals, payloads, func() error {
+		digest.ReconcileRecord(record, d)
+		events, err := BuildForBundle(runDir, record, d, prompt)
+		if err != nil {
+			return err
+		}
+		payloads[0], err = marshalRunRecord(record)
+		if err != nil {
+			return err
+		}
+		payloads[1], err = marshalDigest(d)
+		if err != nil {
+			return err
+		}
+		payloads[2], err = encodeEvents(events)
+		if err != nil {
+			return err
+		}
+		payloads[3], err = marshalProjectionManifest(d.Producer, generation, payloads[0], payloads[1], payloads[2])
 		return err
-	}
-	manifestPayload = append(manifestPayload, '\n')
-	finals := []string{"digest.json", Filename, "projection.json"}
-	payloads := [][]byte{digestPayload, eventPayload, manifestPayload}
-	return commitProjectionContext(ctx, runDir, generation, finals, payloads, nil)
+	})
 }
+
+func marshalRunRecord(record *runrecord.Record) ([]byte, error) {
+	if err := record.Validate(); err != nil {
+		return nil, fmt.Errorf("validate run record: %w", err)
+	}
+	payload, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal run record: %w", err)
+	}
+	payload = append(payload, '\n')
+	if int64(len(payload)) > runrecord.MaxRecordBytes {
+		return nil, fmt.Errorf("run record exceeds %d-byte limit", runrecord.MaxRecordBytes)
+	}
+	return payload, nil
+}
+
+func marshalDigest(d *digest.Digest) ([]byte, error) {
+	payload, err := digest.MarshalEvaluation(d)
+	if err != nil {
+		return nil, fmt.Errorf("marshal digest: %w", err)
+	}
+	payload = append(payload, '\n')
+	if len(payload) > digest.MaxDigestBytes {
+		return nil, fmt.Errorf("digest is %d bytes; maximum is %d", len(payload), digest.MaxDigestBytes)
+	}
+	return payload, nil
+}
+
+func marshalProjectionManifest(producer runrecord.Producer, generation string, runPayload, digestPayload, eventPayload []byte) ([]byte, error) {
+	payload, err := json.MarshalIndent(projectionManifest{
+		SchemaVersion: ProjectionSchemaVersion,
+		Producer:      producer,
+		Generation:    generation,
+		RunSHA256:     fmt.Sprintf("%x", sha256.Sum256(runPayload)),
+		DigestSHA256:  fmt.Sprintf("%x", sha256.Sum256(digestPayload)),
+		EventsSHA256:  fmt.Sprintf("%x", sha256.Sum256(eventPayload)),
+	}, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(payload, '\n'), nil
+}
+
+// projectionRename is a fault-injection seam for rollback tests.
+var projectionRename = os.Rename
 
 func commitProjection(runDir, generation string, finals []string, payloads [][]byte, afterLock func() error) (returnErr error) {
 	return commitProjectionContext(context.Background(), runDir, generation, finals, payloads, afterLock)
@@ -591,7 +681,7 @@ func commitProjectionContext(ctx context.Context, runDir, generation string, fin
 		}
 		for index := range finals {
 			if _, err := os.Stat(backups[index]); err == nil {
-				rollbackErr = errors.Join(rollbackErr, os.Rename(backups[index], filepath.Join(runDir, finals[index])))
+				rollbackErr = errors.Join(rollbackErr, projectionRename(backups[index], filepath.Join(runDir, finals[index])))
 			}
 			_ = os.Remove(staged[index])
 		}
@@ -600,13 +690,13 @@ func commitProjectionContext(ctx context.Context, runDir, generation string, fin
 	for index, name := range finals {
 		finalPath := filepath.Join(runDir, name)
 		if _, err := os.Stat(finalPath); err == nil {
-			if err := os.Rename(finalPath, backups[index]); err != nil {
+			if err := projectionRename(finalPath, backups[index]); err != nil {
 				return errors.Join(fmt.Errorf("backup projection %s: %w", name, err), rollback(0))
 			}
 		}
 	}
 	for index, name := range finals {
-		if err := os.Rename(staged[index], filepath.Join(runDir, name)); err != nil {
+		if err := projectionRename(staged[index], filepath.Join(runDir, name)); err != nil {
 			return errors.Join(fmt.Errorf("publish projection %s: %w", name, err), rollback(index))
 		}
 	}

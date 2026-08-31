@@ -43,7 +43,7 @@ Example:
   event-times.jsonl
   digest.json
   acta-events.jsonl
-  projection.json     # after acta digest re-projection
+  projection.json     # after final reconciliation or re-projection
   workspace.diff
 ```
 
@@ -57,7 +57,7 @@ Claude runs use Claude-specific raw filenames:
   event-times.jsonl
   digest.json
   acta-events.jsonl
-  projection.json     # after acta digest re-projection
+  projection.json     # after final reconciliation or re-projection
   workspace.diff
 ```
 
@@ -184,12 +184,14 @@ artifacts. `acta digest --allow-partial` explicitly accepts and writes the
 degraded projection, emits a warning, and exits 0. Raw provider evidence is
 never rewritten in either mode.
 
-After re-digestion, `projection.json` is committed last as the completion
-marker for the new derived generation. It records the schema version and Acta
-producer plus SHA-256 hashes of `digest.json` and `acta-events.jsonl`.
+After re-digestion or post-publication telemetry reconciliation,
+`projection.json` is committed last as the completion marker for the new
+generation. It records the schema version and Acta producer plus SHA-256
+hashes of `run.json`, `digest.json`, and `acta-events.jsonl`.
 Consumers that require a coherent re-projection should require this manifest
-and verify both hashes. Initial `acta run` publication is already atomic at
-the whole-directory level and therefore does not require the extra marker.
+and verify all hashes. The initial `acta run` publication is atomic at the
+whole-directory level; its post-flush reconciliation uses the same locked
+generation protocol.
 
 ## acta-events.jsonl
 

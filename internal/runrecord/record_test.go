@@ -46,6 +46,15 @@ func TestValidateAllowsNotSampledWithoutTraceID(t *testing.T) {
 	}
 }
 
+func TestValidateAllowsPendingWithTraceID(t *testing.T) {
+	record := validRecord()
+	record.OTLPStatus = "pending"
+	record.TraceID = "0123456789abcdef0123456789abcdef"
+	if err := record.Validate(); err != nil {
+		t.Fatalf("Validate() rejected pending record: %v", err)
+	}
+}
+
 func TestParseVersionedOTLPStatus(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -55,13 +64,18 @@ func TestParseVersionedOTLPStatus(t *testing.T) {
 	}{
 		{name: "v2 record", schemaVersion: 2, otlpStatus: "not_configured"},
 		{name: "v3 not sampled", schemaVersion: 3, otlpStatus: "not_sampled"},
+		{name: "v3 pending", schemaVersion: 3, otlpStatus: "pending"},
 		{name: "v2 rejects not sampled", schemaVersion: 2, otlpStatus: "not_sampled", wantError: true},
+		{name: "v2 rejects pending", schemaVersion: 2, otlpStatus: "pending", wantError: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			record := validRecord()
 			record.SchemaVersion = test.schemaVersion
 			record.OTLPStatus = test.otlpStatus
+			if test.otlpStatus == "pending" {
+				record.TraceID = "0123456789abcdef0123456789abcdef"
+			}
 			payload, err := json.Marshal(record)
 			if err != nil {
 				t.Fatal(err)

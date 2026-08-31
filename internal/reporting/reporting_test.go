@@ -2973,7 +2973,7 @@ func writeProjectionGeneration(t *testing.T, runDir, generation, digestPayload, 
 		DigestSHA256  string             `json:"digest_sha256"`
 		EventsSHA256  string             `json:"events_sha256"`
 	}{
-		SchemaVersion: actaevents.ProjectionSchemaVersion,
+		SchemaVersion: actaevents.MinProjectionSchemaVersion,
 		Producer:      runrecord.Producer{Name: "acta", Version: "test"},
 		Generation:    generation,
 		DigestSHA256:  fmt.Sprintf("%x", sha256.Sum256([]byte(digestPayload))),

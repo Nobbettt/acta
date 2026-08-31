@@ -179,12 +179,13 @@ func (r *Record) Validate() error {
 		}
 		validOTLPStatus := oneOf(r.OTLPStatus, "not_configured", "exported", "failed")
 		if SupportsV3Fields(r.SchemaVersion) {
-			validOTLPStatus = validOTLPStatus || r.OTLPStatus == "not_sampled"
+			validOTLPStatus = validOTLPStatus || oneOf(r.OTLPStatus, "not_sampled", "pending")
 		}
 		if !validOTLPStatus || r.OTLPStatus == "failed" && strings.TrimSpace(r.OTLPError) == "" || r.OTLPStatus != "failed" && r.OTLPError != "" {
 			return fmt.Errorf("run record OTLP status and error are inconsistent")
 		}
-		if r.OTLPStatus == "exported" && strings.TrimSpace(r.TraceID) == "" || r.OTLPStatus != "exported" && r.TraceID != "" {
+		if (r.OTLPStatus == "exported" || r.OTLPStatus == "pending") && strings.TrimSpace(r.TraceID) == "" ||
+			r.OTLPStatus != "exported" && r.OTLPStatus != "pending" && r.TraceID != "" {
 			return fmt.Errorf("run record OTLP status and trace_id are inconsistent")
 		}
 		if !oneOf(r.ProcessContainment, "posix_process_group", "windows_job", "direct_process") {

@@ -452,7 +452,7 @@ func (d *Digest) Validate() error {
 	}
 	validOTLPStatus := d.OTLPStatus == "" || oneOf(d.OTLPStatus, "not_configured", "exported", "failed")
 	if runrecord.SupportsV3Fields(d.SchemaVersion) {
-		validOTLPStatus = validOTLPStatus || d.OTLPStatus == "not_sampled"
+		validOTLPStatus = validOTLPStatus || oneOf(d.OTLPStatus, "not_sampled", "pending")
 	}
 	if !validOTLPStatus {
 		return fmt.Errorf("digest schema_version %d has invalid otlp_status %q", d.SchemaVersion, d.OTLPStatus)

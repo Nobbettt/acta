@@ -84,7 +84,7 @@ Every run lands in a self-contained bundle under `.acta/runs`:
   workspace.diff      # staged+unstaged+non-ignored-untracked diff, when non-empty
   digest.json         # normalized timeline, metrics, files touched
   acta-events.jsonl  # stable product/replay events derived from the digest
-  projection.json     # digest/event hashes after an acta digest re-projection
+  projection.json     # generation hashes after reconciliation/re-projection
 ```
 
 The digest is the heart of it: a normalized timeline with token and tool
