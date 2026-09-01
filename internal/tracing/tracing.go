@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"strconv"
@@ -268,6 +269,7 @@ func Setup(ctx context.Context, cfg Config) (*Run, error) {
 	provider := sdktrace.NewTracerProvider(
 		sdktrace.WithSpanProcessor(dropCountingProcessor),
 		sdktrace.WithResource(res),
+		sdktrace.WithSampler(samplerFromEnvironment()),
 	)
 	run, err := newRun(ctx, provider, cfg)
 	if err != nil {
@@ -277,6 +279,39 @@ func Setup(ctx context.Context, cfg Config) (*Run, error) {
 	run.exportErrors = capturingExporter
 	run.spanDelivery = dropCountingProcessor
 	return run, nil
+}
+
+// samplerFromEnvironment implements the standard built-in
+// OTEL_TRACES_SAMPLER values. Unknown names and invalid ratio arguments use
+// the SDK default (parent-based always-on) instead of silently forcing a
+// different sampling policy.
+func samplerFromEnvironment() sdktrace.Sampler {
+	defaultSampler := sdktrace.ParentBased(sdktrace.AlwaysSample())
+	ratio := func() sdktrace.Sampler {
+		value, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER_ARG")), 64)
+		if err != nil || math.IsNaN(value) || value < 0 || value > 1 {
+			value = 1
+		}
+		return sdktrace.TraceIDRatioBased(value)
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER"))) {
+	case "":
+		return defaultSampler
+	case "always_on":
+		return sdktrace.AlwaysSample()
+	case "always_off":
+		return sdktrace.NeverSample()
+	case "traceidratio":
+		return ratio()
+	case "parentbased_always_on":
+		return sdktrace.ParentBased(sdktrace.AlwaysSample())
+	case "parentbased_always_off":
+		return sdktrace.ParentBased(sdktrace.NeverSample())
+	case "parentbased_traceidratio":
+		return sdktrace.ParentBased(ratio())
+	default:
+		return defaultSampler
+	}
 }
 
 // newRun starts the root span on an existing provider (split from Setup so
