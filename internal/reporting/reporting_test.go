@@ -1086,13 +1086,13 @@ func TestSchemaStampingUsesV3OnlyFieldRegistry(t *testing.T) {
 		document     map[string]any
 	}{
 		{name: "run record", documentType: schemaversion.RunRecord, document: map[string]any{
-			"schema_version": 2, "reasoning_redaction_state": "redacted",
+			"schema_version": json.Number("2"), "reasoning_redaction_state": "redacted",
 		}},
 		{name: "digest", documentType: schemaversion.Digest, document: map[string]any{
-			"schema_version": 2, "timeline": []any{map[string]any{"kind": "reasoning", "redacted": true}},
+			"schema_version": json.Number("2"), "timeline": []any{map[string]any{"kind": "reasoning", "redacted": true}},
 		}},
 		{name: "event", documentType: schemaversion.Event, document: map[string]any{
-			"schema_version": 2, "payload": map[string]any{"reasoning_redaction_state": "redacted"},
+			"schema_version": json.Number("2"), "payload": map[string]any{"reasoning_redaction_state": "redacted"},
 		}},
 	}
 	for _, test := range tests {

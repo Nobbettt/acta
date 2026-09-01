@@ -574,74 +574,75 @@ func scanEventsFile(ctx context.Context, file *os.File, runID string, visit func
 	streamWasRegenerated := false
 	startedSeen := false
 	terminalSeen := false
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64<<10), maxEventsRequestBytes)
-	for scanner.Scan() {
-		if err := ctx.Err(); err != nil {
-			return 0, err
+	err := iterateBoundedJSONL(ctx, file, maxEventsRequestBytes, func(line []byte) (bool, error) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			return true, nil
 		}
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) > 0 {
-			if terminalSeen {
-				return 0, fmt.Errorf("event appears after terminal run event")
+		if terminalSeen {
+			return false, fmt.Errorf("event appears after terminal run event")
+		}
+		count++
+		var event actaevents.Event
+		if err := decodeUploadEvent(line, &event); err != nil {
+			return false, fmt.Errorf("decode %s: %w", actaevents.Filename, err)
+		}
+		if err := actaevents.ValidateEvent(event, runID, count); err != nil {
+			return false, err
+		}
+		eventWasRegenerated := event.RegeneratedBy != nil
+		if streamSchema == 0 {
+			streamSchema, streamProducer = event.SchemaVersion, event.Producer
+			streamWasRegenerated = eventWasRegenerated
+			if streamWasRegenerated {
+				streamRegeneratedBy = *event.RegeneratedBy
 			}
-			count++
-			var event actaevents.Event
-			if err := decodeUploadEvent(line, &event); err != nil {
-				return 0, fmt.Errorf("decode %s: %w", actaevents.Filename, err)
+		} else if event.SchemaVersion != streamSchema {
+			return false, fmt.Errorf("event sequence %d schema_version %d does not match stream schema_version %d", event.Sequence, event.SchemaVersion, streamSchema)
+		} else if event.SchemaVersion >= 2 && event.Producer != streamProducer {
+			return false, fmt.Errorf("event sequence %d producer does not match stream producer", event.Sequence)
+		} else if eventWasRegenerated != streamWasRegenerated || eventWasRegenerated && *event.RegeneratedBy != streamRegeneratedBy {
+			return false, fmt.Errorf("event sequence %d regenerated_by does not match stream regenerated_by", event.Sequence)
+		}
+		if event.Timestamp.IsZero() {
+			return false, fmt.Errorf("event sequence %d has no timestamp", event.Sequence)
+		}
+		if strings.TrimSpace(event.Type) == "" {
+			return false, fmt.Errorf("event sequence %d has no type", event.Sequence)
+		}
+		switch event.Type {
+		case actaevents.TypeAgentPrompt:
+			if count != 1 || startedSeen {
+				return false, fmt.Errorf("agent.prompt must appear at most once before run.started")
 			}
-			if err := actaevents.ValidateEvent(event, runID, count); err != nil {
-				return 0, err
+		case actaevents.TypeRunStarted:
+			if startedSeen {
+				return false, fmt.Errorf("event stream contains multiple run.started events")
 			}
-			eventWasRegenerated := event.RegeneratedBy != nil
-			if streamSchema == 0 {
-				streamSchema, streamProducer = event.SchemaVersion, event.Producer
-				streamWasRegenerated = eventWasRegenerated
-				if streamWasRegenerated {
-					streamRegeneratedBy = *event.RegeneratedBy
-				}
-			} else if event.SchemaVersion != streamSchema {
-				return 0, fmt.Errorf("event sequence %d schema_version %d does not match stream schema_version %d", event.Sequence, event.SchemaVersion, streamSchema)
-			} else if event.SchemaVersion >= 2 && event.Producer != streamProducer {
-				return 0, fmt.Errorf("event sequence %d producer does not match stream producer", event.Sequence)
-			} else if eventWasRegenerated != streamWasRegenerated || eventWasRegenerated && *event.RegeneratedBy != streamRegeneratedBy {
-				return 0, fmt.Errorf("event sequence %d regenerated_by does not match stream regenerated_by", event.Sequence)
+			startedSeen = true
+		case actaevents.TypeRunCompleted, actaevents.TypeRunFailed:
+			if !startedSeen {
+				return false, fmt.Errorf("terminal event appears before run.started")
 			}
-			if event.Timestamp.IsZero() {
-				return 0, fmt.Errorf("event sequence %d has no timestamp", event.Sequence)
-			}
-			if strings.TrimSpace(event.Type) == "" {
-				return 0, fmt.Errorf("event sequence %d has no type", event.Sequence)
-			}
-			switch event.Type {
-			case actaevents.TypeAgentPrompt:
-				if count != 1 || startedSeen {
-					return 0, fmt.Errorf("agent.prompt must appear at most once before run.started")
-				}
-			case actaevents.TypeRunStarted:
-				if startedSeen {
-					return 0, fmt.Errorf("event stream contains multiple run.started events")
-				}
-				startedSeen = true
-			case actaevents.TypeRunCompleted, actaevents.TypeRunFailed:
-				if !startedSeen {
-					return 0, fmt.Errorf("terminal event appears before run.started")
-				}
-				terminalSeen = true
-			default:
-				if !startedSeen {
-					return 0, fmt.Errorf("event type %q appears before run.started", event.Type)
-				}
-			}
-			if visit != nil {
-				if err := visit(event); err != nil {
-					return 0, err
-				}
+			terminalSeen = true
+		default:
+			if !startedSeen {
+				return false, fmt.Errorf("event type %q appears before run.started", event.Type)
 			}
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		return 0, fmt.Errorf("read %s (maximum line size %d bytes): %w", actaevents.Filename, maxEventsRequestBytes, err)
+		if visit != nil {
+			if err := visit(event); err != nil {
+				return false, err
+			}
+		}
+		return true, nil
+	})
+	if err != nil {
+		var lineErr *boundedJSONLLineError
+		if errors.As(err, &lineErr) {
+			return 0, fmt.Errorf("read %s (maximum line size %d bytes): %w", actaevents.Filename, maxEventsRequestBytes, err)
+		}
+		return 0, err
 	}
 	if count == 0 {
 		return 0, fmt.Errorf("%s contains no events", actaevents.Filename)
@@ -822,7 +823,7 @@ func snapshotLegacyProjectionArtifactsContext(ctx context.Context, resolvedRunDi
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, false, fmt.Errorf("projection lock held; upload cancelled/timed out: %w", err)
 		}
-		lockFree, probeErr := legacyProjectionLockFreeAllowed(runDir, err)
+		lockFree, probeErr := legacyProjectionLockFreeAllowedWithProbe(runDir, err, projectionDirectoryWritable)
 		if probeErr != nil {
 			return nil, false, probeErr
 		}
@@ -911,10 +912,6 @@ func snapshotProjectionSourcesContext(ctx context.Context, sources map[string]*o
 		snapshots[name] = artifactSnapshot{File: file, TempPath: tempPath}
 	}
 	return snapshots, nil
-}
-
-func legacyProjectionLockFreeAllowed(runDir string, lockErr error) (bool, error) {
-	return legacyProjectionLockFreeAllowedWithProbe(runDir, lockErr, projectionDirectoryWritable)
 }
 
 func legacyProjectionLockFreeAllowedWithProbe(runDir string, lockErr error, writableProbe func(string) (bool, error)) (bool, error) {
@@ -1189,39 +1186,20 @@ func annotateWithheldArtifactRefsContext(ctx context.Context, eventFile *os.File
 	if len(withheld) == 0 {
 		return false, nil
 	}
-	if _, err := eventFile.Seek(0, io.SeekStart); err != nil {
-		return false, fmt.Errorf("rewind event snapshot for withheld artifact annotations: %w", err)
-	}
-
-	annotated, err := os.CreateTemp("", "acta-upload-events-withheld-*")
-	if err != nil {
-		return false, fmt.Errorf("create annotated event snapshot: %w", err)
-	}
-	annotatedPath := annotated.Name()
-	defer func() {
-		_ = annotated.Close()
-		_ = os.Remove(annotatedPath)
-	}()
-
-	scanner := bufio.NewScanner(eventFile)
-	scanner.Buffer(make([]byte, 64<<10), maxEventsRequestBytes)
 	eventCount := 0
 	totalBytes := 0
-	for scanner.Scan() {
-		if err := ctx.Err(); err != nil {
-			return false, err
-		}
-		line := bytes.TrimSpace(scanner.Bytes())
+	err := rewriteJSONLSnapshot(ctx, eventFile, maxEventsRequestBytes, func(line []byte) ([]byte, error) {
+		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
-			continue
+			return nil, nil
 		}
 		eventCount++
 		var event actaevents.Event
 		if err := json.Unmarshal(line, &event); err != nil {
-			return false, fmt.Errorf("decode %s for withheld artifact annotations: %w", actaevents.Filename, err)
+			return nil, fmt.Errorf("decode %s for withheld artifact annotations: %w", actaevents.Filename, err)
 		}
 		if err := rejectUnsupportedFutureDocumentVersion(schemaversion.Event, &event); err != nil {
-			return false, err
+			return nil, err
 		}
 		for i := range event.ArtifactRefs {
 			ref := &event.ArtifactRefs[i]
@@ -1234,37 +1212,26 @@ func annotateWithheldArtifactRefsContext(ctx context.Context, eventFile *os.File
 			ref.RedactionState = artifact.RedactionState
 		}
 		if _, err := stampRewrittenDocumentSchemaVersion(schemaversion.Event, &event, true); err != nil {
-			return false, fmt.Errorf("upgrade event sequence %d after withheld artifact annotations: %w", event.Sequence, err)
+			return nil, fmt.Errorf("upgrade event sequence %d after withheld artifact annotations: %w", event.Sequence, err)
 		}
 		encoded, err := json.Marshal(event)
 		if err != nil {
-			return false, fmt.Errorf("encode event sequence %d with withheld artifact annotations: %w", event.Sequence, err)
+			return nil, fmt.Errorf("encode event sequence %d with withheld artifact annotations: %w", event.Sequence, err)
 		}
 		if len(encoded)+1 > actaevents.MaxEventBytes {
-			return false, fmt.Errorf("event sequence %d is %d bytes after withheld artifact annotations; maximum is %d", event.Sequence, len(encoded)+1, actaevents.MaxEventBytes)
+			return nil, fmt.Errorf("event sequence %d is %d bytes after withheld artifact annotations; maximum is %d", event.Sequence, len(encoded)+1, actaevents.MaxEventBytes)
 		}
 		totalBytes += len(encoded) + 1
 		if totalBytes > actaevents.MaxStreamBytes {
-			return false, fmt.Errorf("event stream exceeds maximum size %d after withheld artifact annotations", actaevents.MaxStreamBytes)
+			return nil, fmt.Errorf("event stream exceeds maximum size %d after withheld artifact annotations", actaevents.MaxStreamBytes)
 		}
-		encoded = append(encoded, '\n')
-		if n, writeErr := annotated.Write(encoded); writeErr != nil {
-			return false, fmt.Errorf("write annotated event snapshot: %w", writeErr)
-		} else if n != len(encoded) {
-			return false, io.ErrShortWrite
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return false, fmt.Errorf("read event snapshot for withheld artifact annotations: %w", err)
+		return append(encoded, '\n'), nil
+	})
+	if err != nil {
+		return false, err
 	}
 	if eventCount == 0 {
 		return false, fmt.Errorf("%s contains no events", actaevents.Filename)
-	}
-	if _, err := annotated.Seek(0, io.SeekStart); err != nil {
-		return false, fmt.Errorf("rewind annotated event snapshot: %w", err)
-	}
-	if err := replaceSnapshotReaderContext(ctx, eventFile, annotated); err != nil {
-		return false, fmt.Errorf("publish annotated event snapshot: %w", err)
 	}
 	if _, err := scanEventsFile(ctx, eventFile, runID, nil); err != nil {
 		return false, fmt.Errorf("validate annotated replay event snapshot: %w", err)
@@ -1328,36 +1295,32 @@ func isCanonicalEventArtifact(path string) bool {
 }
 
 func eventArtifactSchemaVersionContext(ctx context.Context, file *os.File) (int32, error) {
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return 0, err
-	}
 	defer func() { _, _ = file.Seek(0, io.SeekStart) }()
-
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64<<10), maxEventsRequestBytes)
-	for scanner.Scan() {
-		if err := ctx.Err(); err != nil {
-			return 0, err
-		}
-		line := bytes.TrimSpace(scanner.Bytes())
+	var schemaVersion int32
+	err := iterateBoundedJSONL(ctx, file, maxEventsRequestBytes, func(line []byte) (bool, error) {
+		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
-			continue
+			return true, nil
 		}
 		var envelope struct {
 			SchemaVersion int32 `json:"schema_version"`
 		}
 		if err := json.Unmarshal(line, &envelope); err != nil {
-			return 0, err
+			return false, err
 		}
 		if envelope.SchemaVersion == 0 {
-			return 0, errors.New("event artifact has no schema_version")
+			return false, errors.New("event artifact has no schema_version")
 		}
-		return envelope.SchemaVersion, nil
-	}
-	if err := scanner.Err(); err != nil {
+		schemaVersion = envelope.SchemaVersion
+		return false, nil
+	})
+	if err != nil {
 		return 0, err
 	}
-	return 0, errors.New("event artifact contains no events")
+	if schemaVersion == 0 {
+		return 0, errors.New("event artifact contains no events")
+	}
+	return schemaVersion, nil
 }
 
 // redactArtifactSnapshot uses the declared path/kind only to select a structured
@@ -1638,7 +1601,7 @@ func inspectOpaqueTextSnapshot(ctx context.Context, file *os.File, maxLineBytes 
 		}
 		if len(trimmed) > 0 && looksLikeJSON(trimmed[0]) {
 			var value any
-			if err := decodeJSONUseNumber(trimmed, &value); err != nil {
+			if err := reasoning.UnmarshalValue(trimmed, &value); err != nil {
 				inspection.Verified = false
 				return false, nil
 			}
@@ -1668,7 +1631,7 @@ func inspectJSONLinesSnapshot(ctx context.Context, file *os.File, maxLineBytes i
 		payload := bytes.TrimSpace(line)
 		if len(payload) > 0 {
 			var value any
-			if err := decodeJSONUseNumber(payload, &value); err != nil {
+			if err := reasoning.UnmarshalValue(payload, &value); err != nil {
 				inspection.Verified = false
 				return false, nil
 			}
@@ -1708,7 +1671,7 @@ func inspectActaEventValue(value any) (bool, bool) {
 		return changed, true
 	}
 	if typ == actaevents.TypeAgentEventUnsupported {
-		_, changed, verified := redactUnsupportedPayload(payload)
+		_, changed, verified := reasoning.RedactUnsupportedPayload(payload)
 		return changed, verified
 	}
 	if !reasoningFreeActaEventType(typ) {
@@ -1729,7 +1692,7 @@ func inspectJSONDocumentSnapshot(ctx context.Context, file *os.File, path string
 		return artifactInspection{Verified: false}, nil
 	}
 	var value any
-	if err := decodeJSONUseNumberContext(ctx, payload, &value); err != nil {
+	if err := reasoning.UnmarshalValueContext(ctx, payload, &value); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return artifactInspection{}, err
 		}
@@ -1849,7 +1812,7 @@ func stampActaEventLineSchemaVersion(line []byte) ([]byte, error) {
 		return line, nil
 	}
 	var event map[string]any
-	if err := decodeJSONUseNumber(payload, &event); err != nil {
+	if err := reasoning.UnmarshalValue(payload, &event); err != nil {
 		return nil, fmt.Errorf("parse Acta event for schema upgrade: %w", err)
 	}
 	if _, err := stampRewrittenDocumentSchemaVersion(schemaversion.Event, event, true); err != nil {
@@ -1894,7 +1857,7 @@ func redactProviderReasoningLineVerified(line []byte) ([]byte, bool, error) {
 		return nil, false, fmt.Errorf("parse provider event for remote reasoning redaction: %w", err)
 	}
 	traversal := reasoning.ProviderTraversal()
-	changed := setReasoningRedactionState(value, traversal)
+	changed, _ := setReasoningRedactionStateContext(context.Background(), value, traversal)
 	reasoningChanged, verified := reasoning.RedactValue(value, traversal)
 	if !verified {
 		return line, false, nil
@@ -1916,7 +1879,7 @@ func redactActaReasoningEventLine(line []byte) ([]byte, error) {
 		return line, nil
 	}
 	var event map[string]any
-	if err := decodeJSONUseNumber(payload, &event); err != nil {
+	if err := reasoning.UnmarshalValue(payload, &event); err != nil {
 		return nil, fmt.Errorf("parse Acta event for remote reasoning redaction: %w", err)
 	}
 	if err := rejectUnsupportedFutureDocumentVersion(schemaversion.Event, event); err != nil {
@@ -1924,7 +1887,7 @@ func redactActaReasoningEventLine(line []byte) ([]byte, error) {
 	}
 	typ, _ := event["type"].(string)
 	traversal := reasoning.NormalizedTraversal(typ)
-	changed := setReasoningRedactionState(event, reasoning.NormalizedTraversal(""))
+	changed, _ := setReasoningRedactionStateContext(context.Background(), event, reasoning.NormalizedTraversal(""))
 	if payload, ok := event["payload"]; ok {
 		switch {
 		case typ == actaevents.TypeAgentReasoning:
@@ -1932,7 +1895,7 @@ func redactActaReasoningEventLine(line []byte) ([]byte, error) {
 			event["payload"] = structural
 			changed = structuralChanged || changed
 		case typ == actaevents.TypeAgentEventUnsupported:
-			redacted, detailsChanged, verified := redactUnsupportedPayload(payload)
+			redacted, detailsChanged, verified := reasoning.RedactUnsupportedPayload(payload)
 			if !verified {
 				redacted, detailsChanged = reasoning.RedactToStructuralReferences(payload)
 			}
@@ -1963,15 +1926,6 @@ func redactActaReasoningEventLine(line []byte) ([]byte, error) {
 		return nil, err
 	}
 	return wrapJSONLine(prefix, encoded, suffix), nil
-}
-
-// redactUnsupportedPayload understands the stable normalized wrapper used in
-// digests and Acta events, but treats Details as retained raw provider data.
-// Exact nested provider blocks and standalone blocks in Details arrays are
-// masked recursively. Other inspectable diagnostics remain byte-for-byte data;
-// unfamiliar shapes fail verification so their artifact can be withheld.
-func redactUnsupportedPayload(value any) (any, bool, bool) {
-	return reasoning.RedactUnsupportedPayload(value)
 }
 
 // reasoningFreeActaEventType is deliberately explicit. A newly introduced
@@ -2006,11 +1960,6 @@ func redactReasoningValueContext(ctx context.Context, value any, traversal reaso
 		err = errors.New("reasoning redaction could not verify provider payload")
 	}
 	return changed, err
-}
-
-func setReasoningRedactionState(value any, traversal reasoning.TraversalContext) bool {
-	changed, _ := setReasoningRedactionStateContext(context.Background(), value, traversal)
-	return changed
 }
 
 func setReasoningRedactionStateContext(ctx context.Context, value any, traversal reasoning.TraversalContext) (bool, error) {
@@ -2105,6 +2054,7 @@ func rejectUnsupportedFutureDocumentVersion(documentType schemaversion.DocumentT
 	}
 
 	var version any
+	future := false
 	switch typed := document.(type) {
 	case map[string]any:
 		var present bool
@@ -2112,47 +2062,20 @@ func rejectUnsupportedFutureDocumentVersion(documentType schemaversion.DocumentT
 		if !present {
 			return nil
 		}
-	case *actaevents.Event:
-		version = typed.SchemaVersion
-	default:
-		return nil
-	}
-
-	future := false
-	switch typed := version.(type) {
-	case json.Number:
-		parsed, err := typed.Int64()
+		number, ok := version.(json.Number)
+		if !ok {
+			return fmt.Errorf("invalid schema_version type %T for %s", version, documentType)
+		}
+		parsed, err := number.Int64()
 		if err != nil {
-			return fmt.Errorf("invalid schema_version %q for %s: %w", typed, documentType, err)
+			return fmt.Errorf("invalid schema_version %q for %s: %w", number, documentType, err)
 		}
 		future = parsed > int64(maximum)
-	case float64:
-		if math.IsInf(typed, 0) || math.IsNaN(typed) || math.Trunc(typed) != typed {
-			return fmt.Errorf("invalid schema_version %v for %s", typed, documentType)
-		}
-		future = typed > float64(maximum)
-	case int:
-		future = typed > maximum
-	case int8:
-		future = int64(typed) > int64(maximum)
-	case int16:
-		future = int64(typed) > int64(maximum)
-	case int32:
-		future = int64(typed) > int64(maximum)
-	case int64:
-		future = typed > int64(maximum)
-	case uint:
-		future = uint64(typed) > uint64(maximum)
-	case uint8:
-		future = uint64(typed) > uint64(maximum)
-	case uint16:
-		future = uint64(typed) > uint64(maximum)
-	case uint32:
-		future = uint64(typed) > uint64(maximum)
-	case uint64:
-		future = typed > uint64(maximum)
+	case *actaevents.Event:
+		version = typed.SchemaVersion
+		future = typed.SchemaVersion > maximum
 	default:
-		return fmt.Errorf("invalid schema_version type %T for %s", version, documentType)
+		return nil
 	}
 	if future {
 		return fmt.Errorf("unsupported schema_version %v for %s (maximum supported is %d)", version, documentType, maximum)
@@ -2199,21 +2122,25 @@ func redactRunRecordSnapshot(ctx context.Context, file *os.File) error {
 		if encoded, ok := record["schema_version"].(json.Number); ok {
 			schemaVersion, _ = encoded.Int64()
 		}
-		changed, err := stampRewrittenDocumentSchemaVersion(schemaversion.RunRecord, record, contentChanged)
+		stamped, err := stampRewrittenDocumentSchemaVersion(schemaversion.RunRecord, record, contentChanged)
 		if err != nil {
 			return false, err
 		}
-		if schemaVersion < runrecord.SchemaVersion && !changed {
+		if schemaVersion < runrecord.SchemaVersion && !stamped {
 			// Legacy schemas do not define reasoning_redaction_state. Keep a
 			// content-safe record byte-for-byte intact and carry the result only
 			// in the artifact upload metadata.
 			return false, nil
 		}
+		stateChanged := false
 		if record["reasoning_redaction_state"] != "redacted" {
 			record["reasoning_redaction_state"] = "redacted"
-			changed = true
+			stateChanged = true
 		}
-		return stampRewrittenDocumentSchemaVersion(schemaversion.RunRecord, record, changed)
+		if stamped {
+			return true, nil
+		}
+		return stampRewrittenDocumentSchemaVersion(schemaversion.RunRecord, record, stateChanged)
 	})
 }
 
@@ -2261,7 +2188,7 @@ func rewriteJSONDocumentSnapshot(ctx context.Context, file *os.File, maxBytes in
 		return fmt.Errorf("JSON artifact exceeds %d-byte redaction limit", maxBytes)
 	}
 	var value any
-	if err := decodeJSONUseNumberContext(ctx, payload, &value); err != nil {
+	if err := reasoning.UnmarshalValueContext(ctx, payload, &value); err != nil {
 		return err
 	}
 	changed, err := transform(ctx, value)
@@ -2303,10 +2230,6 @@ func readFileContextLimit(ctx context.Context, file *os.File, maxBytes int64) ([
 	return payload.Bytes(), false, nil
 }
 
-func decodeJSONUseNumber(payload []byte, value any) error {
-	return reasoning.UnmarshalValue(payload, value)
-}
-
 type contextReader struct {
 	ctx    context.Context
 	reader io.Reader
@@ -2329,10 +2252,6 @@ func (r contextReader) Read(payload []byte) (int, error) {
 		return 0, err
 	}
 	return r.reader.Read(payload)
-}
-
-func decodeJSONUseNumberContext(ctx context.Context, payload []byte, value any) error {
-	return reasoning.UnmarshalValueContext(ctx, payload, value)
 }
 
 func replaceSnapshotReaderContext(ctx context.Context, file *os.File, reader io.Reader) error {
@@ -2375,18 +2294,11 @@ func snapshotRegularFile(ctx context.Context, root, path string, maxBytes int64)
 		return nil, "", err
 	}
 	defer source.Close()
-	return snapshotOpenFileContext(ctx, source, maxBytes, "")
-}
-
-// snapshotOpenFileContext copies an already-pinned source into a private
-// temporary file. An expected hash supplied by projection.json authoritatively
-// binds the copied bytes to that projection generation.
-func snapshotOpenFileContext(ctx context.Context, source *os.File, maxBytes int64, expectedHash string) (*os.File, string, error) {
 	var remaining *int64
 	if maxBytes > 0 {
 		remaining = &maxBytes
 	}
-	return snapshotOpenFileBudgetContext(ctx, source, remaining, expectedHash)
+	return snapshotOpenFileBudgetContext(ctx, source, remaining, "")
 }
 
 func snapshotOpenFileBudgetContext(ctx context.Context, source *os.File, remaining *int64, expectedHash string) (*os.File, string, error) {

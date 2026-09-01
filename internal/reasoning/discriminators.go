@@ -259,8 +259,7 @@ func redactReasoningFieldsContext(ctx context.Context, value any, traversal Trav
 		return false, false, err
 	}
 	switch typed := value.(type) {
-	case nil, string, bool, json.Number, float64, float32,
-		int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+	case nil, string, bool, json.Number, float64, int:
 		return false, true, nil
 	case []any:
 		verified = true
@@ -380,8 +379,7 @@ func structuralReasoningValue(key string, value any) bool {
 
 func maskableValue(value any) bool {
 	switch value.(type) {
-	case nil, string, []any, map[string]any, json.Number, float64, float32,
-		int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, bool:
+	case nil, string, []any, map[string]any, json.Number, float64, int, bool:
 		return true
 	default:
 		return false
@@ -524,10 +522,7 @@ func structuralInteger(value any) bool {
 		return err == nil
 	case float64:
 		return !math.IsInf(typed, 0) && !math.IsNaN(typed) && math.Trunc(typed) == typed
-	case float32:
-		value := float64(typed)
-		return !math.IsInf(value, 0) && !math.IsNaN(value) && float32(math.Trunc(value)) == typed
-	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+	case int:
 		return true
 	default:
 		return false
@@ -697,28 +692,8 @@ func MaskValue(value any) (any, bool) {
 		return json.Number("0"), typed != json.Number("0")
 	case float64:
 		return float64(0), typed != 0
-	case float32:
-		return float32(0), typed != 0
 	case int:
 		return 0, typed != 0
-	case int8:
-		return int8(0), typed != 0
-	case int16:
-		return int16(0), typed != 0
-	case int32:
-		return int32(0), typed != 0
-	case int64:
-		return int64(0), typed != 0
-	case uint:
-		return uint(0), typed != 0
-	case uint8:
-		return uint8(0), typed != 0
-	case uint16:
-		return uint16(0), typed != 0
-	case uint32:
-		return uint32(0), typed != 0
-	case uint64:
-		return uint64(0), typed != 0
 	case bool:
 		return false, typed
 	default:
