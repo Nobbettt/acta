@@ -7,77 +7,57 @@ import (
 	"testing"
 )
 
-func TestRedactProviderBlocksRecursesThroughExactProviderPositions(t *testing.T) {
-	var payload any
-	if err := json.Unmarshal([]byte(`{
-		"wrapper": [
-			{"type":"item.completed","item":{"type":"reasoning","text":"private","parts":["private"]}},
-			{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"private"}]}}
-		]
-	}`), &payload); err != nil {
-		t.Fatal(err)
+func TestRedactProviderBlocksExactPositionsAndMetadata(t *testing.T) {
+	tests := []struct {
+		name        string
+		raw         string
+		want        string
+		wantChanged bool
+	}{
+		{
+			name: "recurses through exact provider positions",
+			raw: `{
+				"wrapper": [
+					{"type":"item.completed","item":{"type":"reasoning","text":"private","parts":["private"]}},
+					{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"private"}]}}
+				]
+			}`,
+			want:        `{"wrapper":[{"item":{"parts":[],"redacted":true,"text":"[REDACTED]","text_chars":7,"text_truncated":false,"type":"reasoning"},"type":"item.completed"},{"message":{"content":[{"redacted":true,"text_chars":7,"text_truncated":false,"thinking":"[REDACTED]","type":"thinking"}]},"type":"assistant"}]}`,
+			wantChanged: true,
+		},
+		{
+			name: "preserves prior redaction metadata",
+			raw:  `{"type":"item.completed","item":{"type":"reasoning","text":"[REDACTED]","text_chars":123456,"text_truncated":true,"redacted":true}}`,
+			want: `{"item":{"redacted":true,"text":"[REDACTED]","text_chars":123456,"text_truncated":true,"type":"reasoning"},"type":"item.completed"}`,
+		},
+		{
+			name:        "treats unflagged marker as content",
+			raw:         `{"type":"item.completed","item":{"type":"reasoning","text":"[REDACTED]"}}`,
+			want:        `{"item":{"redacted":true,"text":"[REDACTED]","text_chars":10,"text_truncated":false,"type":"reasoning"},"type":"item.completed"}`,
+			wantChanged: true,
+		},
 	}
-
-	changed, _, err := redactProviderBlocks(context.Background(), payload, ProviderTraversal())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !changed {
-		t.Fatal("nested provider blocks were not redacted")
-	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := `{"wrapper":[{"item":{"parts":[],"redacted":true,"text":"[REDACTED]","text_chars":7,"text_truncated":false,"type":"reasoning"},"type":"item.completed"},{"message":{"content":[{"redacted":true,"text_chars":7,"text_truncated":false,"thinking":"[REDACTED]","type":"thinking"}]},"type":"assistant"}]}`
-	if string(encoded) != want {
-		t.Fatalf("redacted payload = %s\nwant %s", encoded, want)
-	}
-}
-
-func TestRedactProviderBlocksPreservesPriorRedactionMetadata(t *testing.T) {
-	const raw = `{"type":"item.completed","item":{"type":"reasoning","text":"[REDACTED]","text_chars":123456,"text_truncated":true,"redacted":true}}`
-	var payload any
-	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		t.Fatal(err)
-	}
-	changed, _, err := redactProviderBlocks(context.Background(), payload, ProviderTraversal())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if changed {
-		t.Fatal("already-redacted provider block changed")
-	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := `{"item":{"redacted":true,"text":"[REDACTED]","text_chars":123456,"text_truncated":true,"type":"reasoning"},"type":"item.completed"}`
-	if string(encoded) != want {
-		t.Fatalf("re-redacted payload = %s\nwant %s", encoded, want)
-	}
-}
-
-func TestRedactProviderBlocksTreatsUnflaggedMarkerAsContent(t *testing.T) {
-	const raw = `{"type":"item.completed","item":{"type":"reasoning","text":"[REDACTED]"}}`
-	var payload any
-	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		t.Fatal(err)
-	}
-	changed, _, err := redactProviderBlocks(context.Background(), payload, ProviderTraversal())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !changed {
-		t.Fatal("unflagged marker content was not redacted with provenance metadata")
-	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := `{"item":{"redacted":true,"text":"[REDACTED]","text_chars":10,"text_truncated":false,"type":"reasoning"},"type":"item.completed"}`
-	if string(encoded) != want {
-		t.Fatalf("redacted marker payload = %s\nwant %s", encoded, want)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var payload any
+			if err := json.Unmarshal([]byte(test.raw), &payload); err != nil {
+				t.Fatal(err)
+			}
+			changed, _, err := redactProviderBlocks(context.Background(), payload, ProviderTraversal())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if changed != test.wantChanged {
+				t.Fatalf("changed = %v, want %v", changed, test.wantChanged)
+			}
+			encoded, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(encoded) != test.want {
+				t.Fatalf("redacted payload = %s\nwant %s", encoded, test.want)
+			}
+		})
 	}
 }
 

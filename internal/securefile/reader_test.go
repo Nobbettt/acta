@@ -30,40 +30,16 @@ func TestOpenRegularRejectsSymlinkAndDirectory(t *testing.T) {
 	}
 }
 
-// The same contract is required on every platform: in particular, Windows
-// must grant delete sharing so projection publication can replace a file while
-// a manifested snapshot still holds its old generation open.
-func TestOpenRegularAllowsAtomicReplacementWhileOpen(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "projection.json")
-	if err := WriteFile(path, []byte("old generation")); err != nil {
-		t.Fatal(err)
-	}
-	opened, err := OpenRegular(root, path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer opened.Close()
-	if err := WriteFile(path, []byte("new generation")); err != nil {
-		t.Fatalf("replace file while snapshot handle is open: %v", err)
-	}
-	if got, err := os.ReadFile(path); err != nil || string(got) != "new generation" {
-		t.Fatalf("replacement path = %q, %v", got, err)
-	}
-	if _, err := opened.Seek(0, io.SeekStart); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := io.ReadAll(opened); err != nil || string(got) != "old generation" {
-		t.Fatalf("open snapshot = %q, %v; want old generation", got, err)
-	}
-}
-
+// Every opener must grant delete sharing on Windows so projection publication
+// can replace a file while a handle still holds its old generation open.
 func TestWritableRegularHandlesAllowAtomicReplacementWhileOpen(t *testing.T) {
 	tests := []struct {
-		name     string
-		readable bool
-		open     func(string, string) (*os.File, error)
+		name           string
+		readable       bool
+		seedBeforeOpen bool
+		open           func(string, string) (*os.File, error)
 	}{
+		{name: "read only", readable: true, seedBeforeOpen: true, open: OpenRegular},
 		{
 			name: "exclusive",
 			open: func(_ string, path string) (*os.File, error) {
@@ -89,14 +65,21 @@ func TestWritableRegularHandlesAllowAtomicReplacementWhileOpen(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
 			path := filepath.Join(root, "projection.json")
+			if test.seedBeforeOpen {
+				if err := WriteFile(path, []byte("old generation")); err != nil {
+					t.Fatal(err)
+				}
+			}
 			opened, err := test.open(root, path)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer opened.Close()
 			path = opened.Name()
-			if _, err := opened.Write([]byte("old generation")); err != nil {
-				t.Fatal(err)
+			if !test.seedBeforeOpen {
+				if _, err := opened.Write([]byte("old generation")); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if err := WriteFile(path, []byte("new generation")); err != nil {
 				t.Fatalf("replace file while secure writable handle is open: %v", err)

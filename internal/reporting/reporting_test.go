@@ -373,12 +373,7 @@ func TestUploadRunRejectsRepeatedlyChangingProjectionBeforeUpload(t *testing.T) 
 	events := readTestFile(t, filepath.Join(runDir, actaevents.Filename))
 	writeProjectionGeneration(t, runDir, "100", readTestFile(t, filepath.Join(runDir, "digest.json")), events)
 
-	requests := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		requests++
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	capture, server := newUploadCapture(t)
 	var attempts []int
 	err := UploadRun(context.Background(), Config{
 		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
@@ -395,8 +390,8 @@ func TestUploadRunRejectsRepeatedlyChangingProjectionBeforeUpload(t *testing.T) 
 	if len(attempts) != maxProjectionSnapshotAttempts {
 		t.Fatalf("projection snapshot attempts = %v, want %d attempts", attempts, maxProjectionSnapshotAttempts)
 	}
-	if requests != 0 {
-		t.Fatalf("torn bundle issued %d upload requests, want none", requests)
+	if len(capture.Requests) != 0 {
+		t.Fatalf("torn bundle issued %d upload requests, want none", len(capture.Requests))
 	}
 }
 
@@ -876,22 +871,11 @@ func TestUploadRunAcceptsRedigestedV2EventsWithProducerProvenance(t *testing.T) 
 	}
 	assertEventProducerProvenance(t, localEvents, originalProducer, regenerator)
 
-	var uploadedEvents []actaevents.Event
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/api/ingest/runs/"+record.ID+"/events" {
-			var body eventsRequest
-			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
-				t.Error(err)
-			}
-			uploadedEvents = append(uploadedEvents, body.Events...)
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	capture, server := newUploadCapture(t)
 	if err := uploadToTestServer(server, record); err != nil {
 		t.Fatalf("upload re-digested v2 bundle: %v", err)
 	}
-	assertEventProducerProvenance(t, uploadedEvents, originalProducer, regenerator)
+	assertEventProducerProvenance(t, capture.events(t), originalProducer, regenerator)
 }
 
 func assertEventProducerProvenance(t *testing.T, events []actaevents.Event, original, regenerator runrecord.Producer) {
@@ -954,24 +938,14 @@ func TestUploadRunLegacyRecordUsesMetadataOrExplicitSchemaUpgrade(t *testing.T) 
 			runDir := writeBundle(t)
 			writeFile(t, filepath.Join(runDir, "run.json"), test.body)
 
-			var uploadedBody string
-			var uploadedState string
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-				if request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == "run.json" {
-					body, err := io.ReadAll(request.Body)
-					if err != nil {
-						t.Error(err)
-					}
-					uploadedBody = string(body)
-					uploadedState = request.URL.Query().Get("redaction_state")
-				}
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer server.Close()
+			capture, server := newUploadCapture(t)
 
 			if err := uploadToTestServer(server, testRecord(runDir)); err != nil {
 				t.Fatal(err)
 			}
+			artifact := capture.Artifacts["run.json"]
+			uploadedBody := string(artifact.Body)
+			uploadedState := artifact.Query.Get("redaction_state")
 			if uploadedState != "redacted" {
 				t.Fatalf("run record redaction_state metadata = %q, want redacted", uploadedState)
 			}
@@ -1177,36 +1151,18 @@ func TestUploadRunWithholdsAmbiguousOpaqueStderrByDefault(t *testing.T) {
 		t.Fatalf("ambiguous opaque stderr was not classified as withheld/unverified: %#v", artifacts)
 	}
 
-	uploaded := map[string]bool{}
-	var remoteEvents []actaevents.Event
-	var eventArtifactSchemaVersion string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		switch request.URL.Path {
-		case "/api/ingest/runs/run-1/events":
-			var body eventsRequest
-			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
-				t.Error(err)
-			}
-			remoteEvents = append(remoteEvents, body.Events...)
-		case "/api/ingest/runs/run-1/artifacts":
-			filename := request.URL.Query().Get("filename")
-			uploaded[filename] = true
-			if filename == actaevents.Filename {
-				eventArtifactSchemaVersion = request.URL.Query().Get("schema_version")
-			}
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	capture, server := newUploadCapture(t)
 	if err := uploadToTestServer(server, testRecord(runDir)); err != nil {
 		t.Fatal(err)
 	}
-	if uploaded[stderrName] {
+	if _, uploaded := capture.Artifacts[stderrName]; uploaded {
 		t.Fatal("ambiguous opaque stderr was uploaded by default")
 	}
+	eventArtifactSchemaVersion := capture.Artifacts[actaevents.Filename].Query.Get("schema_version")
 	if eventArtifactSchemaVersion != "3" {
 		t.Fatalf("rewritten event artifact schema_version metadata = %q, want 3", eventArtifactSchemaVersion)
 	}
+	remoteEvents := capture.events(t)
 	var terminalRefs []actaevents.ArtifactRef
 	for _, event := range remoteEvents {
 		if event.SchemaVersion != actaevents.SchemaVersion {
@@ -1225,7 +1181,7 @@ func TestUploadRunWithholdsAmbiguousOpaqueStderrByDefault(t *testing.T) {
 			foundWithheld = ref.Status == actaevents.ArtifactStatusWithheld && ref.Reason == withheldArtifactReason && ref.RedactionState == actaevents.ArtifactRedactionStateUnverified
 			continue
 		}
-		if ref.Status == "" && !uploaded[ref.Path] {
+		if _, uploaded := capture.Artifacts[ref.Path]; ref.Status == "" && !uploaded {
 			t.Errorf("uploaded event stream has dangling artifact reference %#v", ref)
 		}
 	}
@@ -1278,27 +1234,13 @@ func TestUploadRunDoesNotTrustBareUnsupportedKind(t *testing.T) {
 	writeFile(t, filepath.Join(runDir, stderrName), `{"kind":"unsupported","details":"diagnostic"}`+"\n")
 	addArtifactRef(t, runDir, `{"kind":"raw_stderr","path":"`+stderrName+`"}`)
 
-	uploaded := map[string]bool{}
-	var remoteEvents []actaevents.Event
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		switch request.URL.Path {
-		case "/api/ingest/runs/run-1/events":
-			var body eventsRequest
-			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
-				t.Error(err)
-			}
-			remoteEvents = append(remoteEvents, body.Events...)
-		case "/api/ingest/runs/run-1/artifacts":
-			uploaded[request.URL.Query().Get("filename")] = true
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	capture, server := newUploadCapture(t)
 
 	if err := uploadToTestServer(server, testRecord(runDir)); err != nil {
 		t.Fatalf("UploadRun() rejected an unverifiable opaque JSON line: %v", err)
 	}
-	if !uploaded[stderrName] {
+	remoteEvents := capture.events(t)
+	if _, uploaded := capture.Artifacts[stderrName]; !uploaded {
 		t.Fatalf("inspectable raw provider object was withheld based on its bare kind: %#v", remoteEvents)
 	}
 }
@@ -1358,16 +1300,7 @@ func TestUploadRunRedactsRemoteReasoningByDefaultForEveryAgentShape(t *testing.T
 			if strings.Contains(string(remote), secret) {
 				t.Fatalf("remote upload leaked private reasoning: %s", remote)
 			}
-			var remoteEvents []actaevents.Event
-			for _, request := range capture.Requests {
-				if request.Path == "/api/ingest/runs/run-1/events" {
-					var body eventsRequest
-					if err := json.Unmarshal(request.Body, &body); err != nil {
-						t.Error(err)
-					}
-					remoteEvents = append(remoteEvents, body.Events...)
-				}
-			}
+			remoteEvents := capture.events(t)
 			redactionStates := make(map[string]string, len(capture.Artifacts))
 			for filename, request := range capture.Artifacts {
 				redactionStates[filename] = request.Query.Get("redaction_state")
@@ -1419,16 +1352,7 @@ func TestUploadRunWithholdsScalarProviderRecords(t *testing.T) {
 			if _, uploaded := capture.Artifacts[rawName]; uploaded {
 				t.Fatal("provider scalar was uploaded unchanged as redacted")
 			}
-			var remoteEvents []actaevents.Event
-			for _, request := range capture.Requests {
-				if request.Path == "/api/ingest/runs/run-1/events" {
-					var body eventsRequest
-					if err := json.Unmarshal(request.Body, &body); err != nil {
-						t.Error(err)
-					}
-					remoteEvents = append(remoteEvents, body.Events...)
-				}
-			}
+			remoteEvents := capture.events(t)
 			for _, event := range remoteEvents {
 				for _, ref := range event.ArtifactRefs {
 					if ref.Path == rawName && ref.Status == actaevents.ArtifactStatusWithheld &&
@@ -2600,19 +2524,14 @@ func TestUploadRunRejectsUnknownEventFieldsBeforeUpload(t *testing.T) {
 			eventsPath := filepath.Join(runDir, actaevents.Filename)
 			writeFile(t, eventsPath, mutate(readTestFile(t, eventsPath)))
 
-			requests := 0
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				requests++
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer server.Close()
+			capture, server := newUploadCapture(t)
 
 			err := uploadToTestServer(server, testRecord(runDir))
 			if err == nil || !strings.Contains(err.Error(), `unknown field "thinking"`) {
 				t.Fatalf("UploadRun() error = %v, want unknown-field rejection", err)
 			}
-			if requests != 0 {
-				t.Fatalf("invalid event stream issued %d remote requests, want none", requests)
+			if len(capture.Requests) != 0 {
+				t.Fatalf("invalid event stream issued %d remote requests, want none", len(capture.Requests))
 			}
 			if local := readTestFile(t, eventsPath); !strings.Contains(local, `"thinking":"private"`) {
 				t.Fatal("upload validation rewrote the local invalid event stream")
@@ -2672,19 +2591,14 @@ func TestUploadRunValidatesPublishedEventSchemasBeforeUpload(t *testing.T) {
 			eventsPath := filepath.Join(runDir, actaevents.Filename)
 			writeFile(t, eventsPath, test.mutate(readTestFile(t, eventsPath)))
 
-			requests := 0
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				requests++
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer server.Close()
+			capture, server := newUploadCapture(t)
 
 			err := uploadToTestServer(server, testRecord(runDir))
 			if !test.wantError {
 				if err != nil {
 					t.Fatalf("UploadRun() rejected valid payloads: %v", err)
 				}
-				if requests == 0 {
+				if len(capture.Requests) == 0 {
 					t.Fatal("valid payloads issued no remote requests")
 				}
 				return
@@ -2692,8 +2606,8 @@ func TestUploadRunValidatesPublishedEventSchemasBeforeUpload(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "does not match the published schema") {
 				t.Fatalf("UploadRun() error = %v, want event-schema rejection", err)
 			}
-			if requests != 0 {
-				t.Fatalf("invalid payload issued %d remote requests, want none", requests)
+			if len(capture.Requests) != 0 {
+				t.Fatalf("invalid payload issued %d remote requests, want none", len(capture.Requests))
 			}
 		})
 	}
@@ -2711,19 +2625,14 @@ func TestUploadRunRejectsFutureEventSchemaBeforeRemoteRewrite(t *testing.T) {
 	eventsPath := filepath.Join(runDir, actaevents.Filename)
 	writeFile(t, eventsPath, futureStream)
 
-	requests := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		requests++
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	capture, server := newUploadCapture(t)
 
 	err := uploadToTestServer(server, testRecord(runDir))
 	if err == nil || !strings.Contains(err.Error(), "unsupported schema_version 4") {
 		t.Fatalf("UploadRun() error = %v, want future schema rejection", err)
 	}
-	if requests != 0 {
-		t.Fatalf("future event stream issued %d remote requests, want none", requests)
+	if len(capture.Requests) != 0 {
+		t.Fatalf("future event stream issued %d remote requests, want none", len(capture.Requests))
 	}
 	if local := readTestFile(t, eventsPath); local != futureStream || !strings.Contains(local, secret) {
 		t.Fatalf("future event stream was normalized locally:\n%s", local)
@@ -2740,12 +2649,7 @@ func TestUploadRunRejectsFutureDigestSchemaRegardlessOfPrivacyOptIn(t *testing.T
 			digestPath := filepath.Join(runDir, "digest.json")
 			writeFile(t, digestPath, futureDigest)
 
-			requests := 0
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				requests++
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer server.Close()
+			capture, server := newUploadCapture(t)
 
 			err := UploadRun(context.Background(), Config{
 				BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
@@ -2754,8 +2658,8 @@ func TestUploadRunRejectsFutureDigestSchemaRegardlessOfPrivacyOptIn(t *testing.T
 			if err == nil || !strings.Contains(err.Error(), "unsupported schema_version 4") {
 				t.Fatalf("UploadRun() error = %v, want future digest schema rejection", err)
 			}
-			if requests != 0 {
-				t.Fatalf("future digest issued %d remote requests, want none", requests)
+			if len(capture.Requests) != 0 {
+				t.Fatalf("future digest issued %d remote requests, want none", len(capture.Requests))
 			}
 			if local := readTestFile(t, digestPath); local != futureDigest || !strings.Contains(local, secret) {
 				t.Fatalf("future digest was transformed or relabeled locally:\n%s", local)
@@ -2811,12 +2715,7 @@ func TestUploadRunCountsUnreferencedEventSnapshotAtBudgetBoundary(t *testing.T) 
 		snapshotBytes += info.Size()
 	}
 
-	requests := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		requests++
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	capture, server := newUploadCapture(t)
 	config := Config{
 		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
 		MaxUploadBytes: snapshotBytes - 1,
@@ -2826,15 +2725,15 @@ func TestUploadRunCountsUnreferencedEventSnapshotAtBudgetBoundary(t *testing.T) 
 	if err == nil || !strings.Contains(err.Error(), "maximum") {
 		t.Fatalf("UploadRun() error = %v, want aggregate budget rejection", err)
 	}
-	if requests != 0 {
-		t.Fatalf("over-budget upload issued %d remote requests, want none", requests)
+	if len(capture.Requests) != 0 {
+		t.Fatalf("over-budget upload issued %d remote requests, want none", len(capture.Requests))
 	}
 
 	config.MaxUploadBytes = snapshotBytes
 	if err := UploadRun(context.Background(), config, testRecord(runDir)); err != nil {
 		t.Fatalf("UploadRun() at exact aggregate budget = %v", err)
 	}
-	if requests == 0 {
+	if len(capture.Requests) == 0 {
 		t.Fatal("exact-budget upload issued no remote requests")
 	}
 }
@@ -3003,6 +2902,22 @@ func (capture *uploadCapture) bodies(paths ...string) []byte {
 	return body
 }
 
+func (capture *uploadCapture) events(t *testing.T) []actaevents.Event {
+	t.Helper()
+	var events []actaevents.Event
+	for _, request := range capture.Requests {
+		if !strings.HasSuffix(request.Path, "/events") {
+			continue
+		}
+		var body eventsRequest
+		if err := json.Unmarshal(request.Body, &body); err != nil {
+			t.Error(err)
+		}
+		events = append(events, body.Events...)
+	}
+	return events
+}
+
 func makeBundleDirectoryReadOnly(t *testing.T, runDir string) os.FileMode {
 	t.Helper()
 	info, err := os.Stat(runDir)
@@ -3075,32 +2990,21 @@ func uploadBundleStderr(t *testing.T, content string) string {
 	writeFile(t, filepath.Join(runDir, stderrName), content)
 	addArtifactRef(t, runDir, `{"kind":"raw_stderr","path":"`+stderrName+`"}`)
 
-	var uploaded string
-	created := false
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/api/ingest/runs" {
-			created = true
-		}
-		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == stderrName {
-			payload, err := io.ReadAll(request.Body)
-			if err != nil {
-				t.Error(err)
-			}
-			uploaded = string(payload)
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	capture, server := newUploadCapture(t)
 
 	record := testRecord(runDir)
 	record.ReasoningRedactionState = "retained_local"
 	if err := uploadToTestServer(server, record); err != nil {
 		t.Fatalf("UploadRun() error = %v", err)
 	}
+	created := false
+	for _, request := range capture.Requests {
+		created = created || request.Path == "/api/ingest/runs"
+	}
 	if !created {
 		t.Fatal("upload did not create the remote run")
 	}
-	return uploaded
+	return string(capture.Artifacts[stderrName].Body)
 }
 
 func testEvent(sequence int, text string) actaevents.Event {

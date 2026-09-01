@@ -420,6 +420,8 @@ func TestPublishedBundleArtifactIDSchemaAndGoValidatorAgree(t *testing.T) {
 		wantValid  bool
 	}{
 		{name: "single character", artifactID: "a", wantValid: true},
+		{name: "plain", artifactID: "artifact-01", wantValid: true},
+		{name: "allowed punctuation", artifactID: "A._-9", wantValid: true},
 		{name: "machine ID", artifactID: "Bundle_2026.08-24", wantValid: true},
 		{name: "maximum length", artifactID: "a" + strings.Repeat("-", 127), wantValid: true},
 		{name: "empty", artifactID: ""},

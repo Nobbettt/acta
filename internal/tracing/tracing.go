@@ -180,7 +180,7 @@ type Run struct {
 // processor's background worker. The SDK reports those failures to its global
 // error handler instead of returning them from a later ForceFlush.
 type errorCapturingExporter struct {
-	exporter  sdktrace.SpanExporter
+	sdktrace.SpanExporter
 	mu        sync.Mutex
 	err       error
 	forwarded atomic.Uint64
@@ -188,7 +188,7 @@ type errorCapturingExporter struct {
 
 func (e *errorCapturingExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
 	e.forwarded.Add(uint64(len(spans)))
-	err := e.exporter.ExportSpans(ctx, spans)
+	err := e.SpanExporter.ExportSpans(ctx, spans)
 	if err != nil {
 		e.mu.Lock()
 		e.err = errors.Join(e.err, err)
@@ -202,26 +202,14 @@ func (e *errorCapturingExporter) ExportSpans(ctx context.Context, spans []sdktra
 // queue otherwise discards overflow without returning an error from OnEnd or
 // a later ForceFlush.
 type dropCountingSpanProcessor struct {
-	processor sdktrace.SpanProcessor
-	exporter  *errorCapturingExporter
-	ended     atomic.Uint64
-}
-
-func (p *dropCountingSpanProcessor) OnStart(ctx context.Context, span sdktrace.ReadWriteSpan) {
-	p.processor.OnStart(ctx, span)
+	sdktrace.SpanProcessor
+	exporter *errorCapturingExporter
+	ended    atomic.Uint64
 }
 
 func (p *dropCountingSpanProcessor) OnEnd(span sdktrace.ReadOnlySpan) {
 	p.ended.Add(1)
-	p.processor.OnEnd(span)
-}
-
-func (p *dropCountingSpanProcessor) Shutdown(ctx context.Context) error {
-	return p.processor.Shutdown(ctx)
-}
-
-func (p *dropCountingSpanProcessor) ForceFlush(ctx context.Context) error {
-	return p.processor.ForceFlush(ctx)
+	p.SpanProcessor.OnEnd(span)
 }
 
 func (p *dropCountingSpanProcessor) DropError() error {
@@ -234,10 +222,6 @@ func (p *dropCountingSpanProcessor) DropError() error {
 		return nil
 	}
 	return fmt.Errorf("batch span processor dropped %d of %d ended spans", ended-forwarded, ended)
-}
-
-func (e *errorCapturingExporter) Shutdown(ctx context.Context) error {
-	return e.exporter.Shutdown(ctx)
 }
 
 func (e *errorCapturingExporter) Err() error {
@@ -275,16 +259,15 @@ func Setup(ctx context.Context, cfg Config) (*Run, error) {
 	if err != nil {
 		res = resource.Default()
 	}
-	capturingExporter := &errorCapturingExporter{exporter: exporter}
+	capturingExporter := &errorCapturingExporter{SpanExporter: exporter}
 	batchProcessor := sdktrace.NewBatchSpanProcessor(capturingExporter)
 	dropCountingProcessor := &dropCountingSpanProcessor{
-		processor: batchProcessor,
-		exporter:  capturingExporter,
+		SpanProcessor: batchProcessor,
+		exporter:      capturingExporter,
 	}
 	provider := sdktrace.NewTracerProvider(
 		sdktrace.WithSpanProcessor(dropCountingProcessor),
 		sdktrace.WithResource(res),
-		sdktrace.WithSampler(samplerFromEnvironment()),
 	)
 	run, err := newRun(ctx, provider, cfg)
 	if err != nil {
@@ -294,39 +277,6 @@ func Setup(ctx context.Context, cfg Config) (*Run, error) {
 	run.exportErrors = capturingExporter
 	run.spanDelivery = dropCountingProcessor
 	return run, nil
-}
-
-// samplerFromEnvironment implements the standard built-in
-// OTEL_TRACES_SAMPLER values. Unknown names and invalid ratio arguments use
-// the SDK default (parent-based always-on) instead of silently forcing a
-// different sampling policy.
-func samplerFromEnvironment() sdktrace.Sampler {
-	defaultSampler := sdktrace.ParentBased(sdktrace.AlwaysSample())
-	ratio := func() sdktrace.Sampler {
-		value, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER_ARG")), 64)
-		if err != nil || value < 0 || value > 1 {
-			value = 1
-		}
-		return sdktrace.TraceIDRatioBased(value)
-	}
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER"))) {
-	case "":
-		return defaultSampler
-	case "always_on":
-		return sdktrace.AlwaysSample()
-	case "always_off":
-		return sdktrace.NeverSample()
-	case "traceidratio":
-		return ratio()
-	case "parentbased_always_on":
-		return sdktrace.ParentBased(sdktrace.AlwaysSample())
-	case "parentbased_always_off":
-		return sdktrace.ParentBased(sdktrace.NeverSample())
-	case "parentbased_traceidratio":
-		return sdktrace.ParentBased(ratio())
-	default:
-		return defaultSampler
-	}
 }
 
 // newRun starts the root span on an existing provider (split from Setup so

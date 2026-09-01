@@ -294,7 +294,7 @@ var errTestMidRunExport = errorString("mid-run export boom")
 
 func TestFinishSurfacesEarlierAsynchronousBatchError(t *testing.T) {
 	exporter := &failFirstExporter{firstExport: make(chan struct{})}
-	capturingExporter := &errorCapturingExporter{exporter: exporter}
+	capturingExporter := &errorCapturingExporter{SpanExporter: exporter}
 	provider := sdktrace.NewTracerProvider(sdktrace.WithBatcher(
 		capturingExporter,
 		sdktrace.WithMaxExportBatchSize(1),
@@ -345,7 +345,7 @@ func TestFinishSurfacesSaturatedBatchQueueDrop(t *testing.T) {
 		firstExport: make(chan struct{}),
 		release:     make(chan struct{}),
 	}
-	capturingExporter := &errorCapturingExporter{exporter: exporter}
+	capturingExporter := &errorCapturingExporter{SpanExporter: exporter}
 	batchProcessor := sdktrace.NewBatchSpanProcessor(
 		capturingExporter,
 		sdktrace.WithMaxQueueSize(1),
@@ -353,8 +353,8 @@ func TestFinishSurfacesSaturatedBatchQueueDrop(t *testing.T) {
 		sdktrace.WithBatchTimeout(time.Hour),
 	)
 	dropCountingProcessor := &dropCountingSpanProcessor{
-		processor: batchProcessor,
-		exporter:  capturingExporter,
+		SpanProcessor: batchProcessor,
+		exporter:      capturingExporter,
 	}
 	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(dropCountingProcessor))
 	r, err := newRun(context.Background(), provider, Config{Agent: "codex", RunID: "t", StartedAt: testStart})
@@ -525,20 +525,42 @@ func TestDeliveryUnavailableReasonRequiresSampledParentForParentBasedAlwaysOff(t
 	}
 }
 
-func TestSamplerFromEnvironmentHonorsSamplerAndArgument(t *testing.T) {
-	t.Setenv("OTEL_TRACES_SAMPLER", "traceidratio")
-	t.Setenv("OTEL_TRACES_SAMPLER_ARG", "0")
-	parameters := sdktrace.SamplingParameters{Name: "test"}
-	if decision := samplerFromEnvironment().ShouldSample(parameters).Decision; decision != sdktrace.Drop {
-		t.Fatalf("traceidratio=0 decision = %v, want drop", decision)
+func TestTracerProviderHonorsSamplerEnvironment(t *testing.T) {
+	tests := []struct {
+		name       string
+		sampler    string
+		arg        string
+		wantSample bool
+	}{
+		{name: "default", wantSample: true},
+		{name: "unknown fallback", sampler: "unknown", wantSample: true},
+		{name: "always on", sampler: "always_on", wantSample: true},
+		{name: "always off", sampler: "always_off"},
+		{name: "ratio zero", sampler: "traceidratio", arg: "0"},
+		{name: "ratio one", sampler: "traceidratio", arg: "1", wantSample: true},
+		{name: "ratio invalid fallback", sampler: "traceidratio", arg: "invalid", wantSample: true},
+		{name: "ratio NaN", sampler: "traceidratio", arg: "NaN"},
+		{name: "ratio negative fallback", sampler: "traceidratio", arg: "-1", wantSample: true},
+		{name: "ratio greater than one fallback", sampler: "traceidratio", arg: "2", wantSample: true},
+		{name: "parent based always on", sampler: "parentbased_always_on", wantSample: true},
+		{name: "parent based always off", sampler: "parentbased_always_off"},
+		{name: "parent based ratio zero", sampler: "parentbased_traceidratio", arg: "0"},
+		{name: "parent based ratio one", sampler: "parentbased_traceidratio", arg: "1", wantSample: true},
+		{name: "parent based ratio invalid fallback", sampler: "parentbased_traceidratio", arg: "invalid", wantSample: true},
+		{name: "parent based ratio NaN", sampler: "parentbased_traceidratio", arg: "NaN"},
 	}
-	t.Setenv("OTEL_TRACES_SAMPLER_ARG", "1")
-	if decision := samplerFromEnvironment().ShouldSample(parameters).Decision; decision != sdktrace.RecordAndSample {
-		t.Fatalf("traceidratio=1 decision = %v, want record and sample", decision)
-	}
-	t.Setenv("OTEL_TRACES_SAMPLER", "always_off")
-	if decision := samplerFromEnvironment().ShouldSample(parameters).Decision; decision != sdktrace.Drop {
-		t.Fatalf("always_off decision = %v, want drop", decision)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("OTEL_TRACES_SAMPLER", test.sampler)
+			t.Setenv("OTEL_TRACES_SAMPLER_ARG", test.arg)
+			provider := sdktrace.NewTracerProvider()
+			_, span := provider.Tracer("test").Start(context.Background(), "root")
+			sampled := span.SpanContext().IsSampled()
+			span.End()
+			if sampled != test.wantSample {
+				t.Fatalf("root span sampled = %v, want %v", sampled, test.wantSample)
+			}
+		})
 	}
 }
 

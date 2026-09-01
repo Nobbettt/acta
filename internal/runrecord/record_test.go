@@ -37,24 +37,6 @@ func validRecord() Record {
 	}
 }
 
-func TestValidateAllowsNotSampledWithoutTraceID(t *testing.T) {
-	record := validRecord()
-	record.OTLPStatus = "not_sampled"
-	record.TraceID = ""
-	if err := record.Validate(); err != nil {
-		t.Fatalf("Validate() rejected not_sampled record: %v", err)
-	}
-}
-
-func TestValidateAllowsPendingWithTraceID(t *testing.T) {
-	record := validRecord()
-	record.OTLPStatus = "pending"
-	record.TraceID = "0123456789abcdef0123456789abcdef"
-	if err := record.Validate(); err != nil {
-		t.Fatalf("Validate() rejected pending record: %v", err)
-	}
-}
-
 func TestParseVersionedOTLPStatus(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -139,39 +121,6 @@ func TestValidateCurrentRecord(t *testing.T) {
 	record := validRecord()
 	if err := record.Validate(); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestValidatePublishedBundleArtifactIDUsesMachineIDPattern(t *testing.T) {
-	sha256 := strings.Repeat("a", 64)
-	tests := []struct {
-		name       string
-		artifactID string
-		wantError  bool
-	}{
-		{name: "plain", artifactID: "artifact-01"},
-		{name: "allowed punctuation", artifactID: "A._-9"},
-		{name: "maximum length", artifactID: "a" + strings.Repeat("-", 127)},
-		{name: "embedded space", artifactID: "artifact id", wantError: true},
-		{name: "Unicode NBSP", artifactID: "artifact\u00a0id", wantError: true},
-		{name: "vertical tab", artifactID: "artifact\vid", wantError: true},
-		{name: "leading dot", artifactID: ".artifact", wantError: true},
-		{name: "leading hyphen", artifactID: "-artifact", wantError: true},
-		{name: "too long", artifactID: "a" + strings.Repeat("-", 128), wantError: true},
-		{name: "empty", artifactID: "", wantError: true},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			record := validRecord()
-			record.PublishedBundle = &PublishedBundle{ArtifactID: test.artifactID, SHA256: sha256}
-			err := record.Validate()
-			if test.wantError && err == nil {
-				t.Fatal("Validate() accepted invalid artifact ID")
-			}
-			if !test.wantError && err != nil {
-				t.Fatalf("Validate() rejected schema-valid artifact ID: %v", err)
-			}
-		})
 	}
 }
 
