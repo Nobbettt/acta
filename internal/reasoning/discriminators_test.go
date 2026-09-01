@@ -1,6 +1,7 @@
 package reasoning
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -130,12 +131,16 @@ func TestRedactProviderBlocksTraversesRawProviderData(t *testing.T) {
 	}
 }
 
-func TestContainsRedactedProviderBlockTraversesRawProviderData(t *testing.T) {
+func TestRedactProviderBlocksReportsPriorRedactionInRawProviderData(t *testing.T) {
 	var payload any
 	if err := json.Unmarshal([]byte(`{"type":"mcp_tool_call","result":{"type":"item.completed","item":{"type":"reasoning","redacted":true}}}`), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if !ContainsRedactedProviderBlock(payload) {
+	_, containsPreviouslyRedacted, err := redactProviderBlocks(context.Background(), payload, ProviderTraversal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsPreviouslyRedacted {
 		t.Fatal("redacted block nested in raw provider data was not found")
 	}
 }

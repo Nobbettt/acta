@@ -14,7 +14,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -210,11 +209,7 @@ func ValidateEvent(event Event, runID string, expectedSequence int) error {
 		if err := json.Unmarshal(event.Payload, &payload); err != nil {
 			return fmt.Errorf("event sequence %d has invalid run.started payload: %w", event.Sequence, err)
 		}
-		validOTLPStatus := payload.OTLPStatus == "" || slices.Contains([]string{"not_configured", "exported", "failed"}, payload.OTLPStatus)
-		if runrecord.SupportsV3Fields(event.SchemaVersion) {
-			validOTLPStatus = validOTLPStatus || slices.Contains([]string{"not_sampled", "pending"}, payload.OTLPStatus)
-		}
-		if !validOTLPStatus {
+		if payload.OTLPStatus != "" && !runrecord.SupportsOTLPStatus(event.SchemaVersion, payload.OTLPStatus) {
 			return fmt.Errorf("event sequence %d schema_version %d has invalid run.started otlp_status %q", event.Sequence, event.SchemaVersion, payload.OTLPStatus)
 		}
 	}

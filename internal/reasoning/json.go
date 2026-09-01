@@ -43,20 +43,37 @@ func ValidateUniqueObjectKeys(payload []byte) error {
 	return ValidateUniqueObjectKeysContext(context.Background(), payload)
 }
 
+// UnmarshalValue rejects duplicate keys, preserves JSON numbers, and requires
+// exactly one complete JSON value.
+func UnmarshalValue(payload []byte, value any) error {
+	return UnmarshalValueContext(context.Background(), payload, value)
+}
+
+// UnmarshalValueContext is UnmarshalValue with cancellation checks while
+// scanning and decoding potentially large values.
+func UnmarshalValueContext(ctx context.Context, payload []byte, value any) error {
+	return unmarshalValueContext(ctx, payload, value, false)
+}
+
 // UnmarshalProviderLine is the single decode boundary for raw provider lines.
-// It requires an object envelope and rejects duplicate keys at any depth
-// before decoding can apply encoding/json's last-key-wins behavior.
+// In addition to UnmarshalValue's guarantees, it requires an object envelope.
 func UnmarshalProviderLine(payload []byte, value any) error {
-	if err := ValidateUniqueObjectKeys(payload); err != nil {
+	return unmarshalValueContext(context.Background(), payload, value, true)
+}
+
+func unmarshalValueContext(ctx context.Context, payload []byte, value any, requireObject bool) error {
+	if err := ValidateUniqueObjectKeysContext(ctx, payload); err != nil {
 		return err
 	}
-	trimmed := bytes.TrimSpace(payload)
-	if len(trimmed) == 0 || trimmed[0] != '{' {
+	if trimmed := bytes.TrimSpace(payload); requireObject && (len(trimmed) == 0 || trimmed[0] != '{') {
 		return ErrInvalidProviderEnvelope
 	}
-	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder := json.NewDecoder(jsonContextReader{ctx: ctx, reader: bytes.NewReader(payload)})
 	decoder.UseNumber()
-	return decoder.Decode(value)
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 // ValidateUniqueObjectKeysContext is ValidateUniqueObjectKeys with

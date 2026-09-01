@@ -224,31 +224,20 @@ func UploadRun(ctx context.Context, cfg Config, record *runrecord.Record) error 
 		status = "completed"
 	}
 	completePath := "/api/ingest/runs/" + url.PathEscape(record.ID) + "/complete"
+	completion := buildCompletionMetadata(record, remoteRedactionState)
 	markUploadFailed := func(uploadErr error) error {
 		// The upload context is often already canceled when a timeout causes the
 		// partial failure. Give the best-effort terminal update its own short
 		// deadline so the remote run is not stranded in "running".
 		markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
+		failedCompletion := completion
+		failedCompletion.OK = false
+		failedCompletion.Error = "acta upload failed: " + uploadErr.Error()
 		markErr := client.postJSON(markCtx, completePath, completeRunRequest{
 			Status:      "failed",
 			CompletedAt: record.CompletedAt,
-			Metadata: completionMetadata{
-				OK:                false,
-				Timeout:           record.Timeout,
-				DurationMillis:    record.DurationMillis,
-				ExitCode:          record.ExitCode,
-				HeadCommitSHA:     record.HeadCommitSHA,
-				TerminationReason: record.TerminationReason,
-				Error:             "acta upload failed: " + uploadErr.Error(),
-				TraceID:           record.TraceID,
-				PromptSource:      record.PromptSource,
-				PromptCaptured:    record.PromptCaptured,
-				OTLPStatus:        record.OTLPStatus, OTLPError: record.OTLPError,
-				RawOutputLimitBytes: record.RawOutputLimitBytes, RawOutputLimitExceeded: record.RawOutputLimitExceeded,
-				WorkspaceDiffLimitBytes: record.WorkspaceDiffLimitBytes, WorkspaceDiffLimitExceeded: record.WorkspaceDiffLimitExceeded,
-				ReasoningRedactionState: remoteRedactionState,
-			},
+			Metadata:    failedCompletion,
 		})
 		if markErr != nil {
 			return errors.Join(uploadErr, fmt.Errorf("mark partial run failed: %w", markErr))
@@ -284,22 +273,7 @@ func UploadRun(ctx context.Context, cfg Config, record *runrecord.Record) error 
 	if err := client.postJSON(ctx, completePath, completeRunRequest{
 		Status:      status,
 		CompletedAt: record.CompletedAt,
-		Metadata: completionMetadata{
-			OK:                record.OK,
-			Timeout:           record.Timeout,
-			DurationMillis:    record.DurationMillis,
-			ExitCode:          record.ExitCode,
-			HeadCommitSHA:     record.HeadCommitSHA,
-			TerminationReason: record.TerminationReason,
-			Error:             record.Error,
-			TraceID:           record.TraceID,
-			PromptSource:      record.PromptSource,
-			PromptCaptured:    record.PromptCaptured,
-			OTLPStatus:        record.OTLPStatus, OTLPError: record.OTLPError,
-			RawOutputLimitBytes: record.RawOutputLimitBytes, RawOutputLimitExceeded: record.RawOutputLimitExceeded,
-			WorkspaceDiffLimitBytes: record.WorkspaceDiffLimitBytes, WorkspaceDiffLimitExceeded: record.WorkspaceDiffLimitExceeded,
-			ReasoningRedactionState: remoteRedactionState,
-		},
+		Metadata:    completion,
 	}); err != nil {
 		return fmt.Errorf("complete run: %w", err)
 	}
@@ -372,8 +346,8 @@ func (c client) postJSON(ctx context.Context, path string, body any) error {
 	if err != nil {
 		return fmt.Errorf("marshal request: %w", err)
 	}
-	return c.retry(ctx, func() error {
-		return c.postOnce(ctx, path, payload)
+	return c.postRequest(ctx, path, "application/json", int64(len(payload)), func() io.Reader {
+		return bytes.NewReader(payload)
 	})
 }
 
@@ -468,8 +442,8 @@ func (c client) postArtifact(ctx context.Context, runID string, artifact artifac
 	values.Set("redaction_state", artifact.RedactionState)
 	path := "/api/ingest/runs/" + url.PathEscape(runID) + "/artifacts?" + values.Encode()
 
-	return c.retry(ctx, func() error {
-		return c.postArtifactOnce(ctx, path, artifact)
+	return c.postRequest(ctx, path, artifact.ContentType, artifact.SizeBytes, func() io.Reader {
+		return io.NewSectionReader(artifact.File, 0, artifact.SizeBytes)
 	})
 }
 
@@ -495,64 +469,36 @@ func (c client) retry(ctx context.Context, operation func() error) error {
 	}
 }
 
-func (c client) postOnce(ctx context.Context, path string, payload []byte) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(payload))
-	if err != nil {
+func (c client) postRequest(ctx context.Context, path, contentType string, contentLength int64, freshBody func() io.Reader) error {
+	return c.retry(ctx, func() error {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, freshBody())
+		if err != nil {
+			return err
+		}
+		req.ContentLength = contentLength
+		req.Header.Set("Content-Type", contentType)
+		if c.token != "" {
+			req.Header.Set("Authorization", "Bearer "+c.token)
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return transientError{err: err}
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			return nil
+		}
+
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		err = fmt.Errorf("backend returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		if resp.StatusCode == http.StatusRequestTimeout || resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+			return transientError{err: err}
+		}
 		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return transientError{err: err}
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		return nil
-	}
-
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	err = fmt.Errorf("backend returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
-	if resp.StatusCode == http.StatusRequestTimeout || resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-		return transientError{err: err}
-	}
-	return err
-}
-
-func (c client) postArtifactOnce(ctx context.Context, path string, artifact artifactUpload) error {
-	reader := io.NewSectionReader(artifact.File, 0, artifact.SizeBytes)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, reader)
-	if err != nil {
-		return err
-	}
-	req.ContentLength = artifact.SizeBytes
-	req.Header.Set("Content-Type", artifact.ContentType)
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return transientError{err: err}
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		return nil
-	}
-
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	err = fmt.Errorf("backend returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
-	if resp.StatusCode == http.StatusRequestTimeout || resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-		return transientError{err: err}
-	}
-	return err
+	})
 }
 
 type transientError struct {
@@ -1521,13 +1467,49 @@ func looksLikeJSON(first byte) bool {
 	return first == '{' || first == '['
 }
 
-func rewriteOpaqueTextSnapshot(ctx context.Context, file *os.File, maxLineBytes int) (bool, error) {
+type boundedJSONLLineError struct {
+	Line         int
+	MaxLineBytes int
+}
+
+func (e *boundedJSONLLineError) Error() string {
+	return fmt.Sprintf("JSONL line %d exceeds maximum redaction line size of %d bytes", e.Line, e.MaxLineBytes)
+}
+
+func (e *boundedJSONLLineError) Unwrap() error {
+	return reasoning.ErrProviderLineTooLong
+}
+
+func iterateBoundedJSONL(ctx context.Context, file *os.File, maxLineBytes int, visit func([]byte) (bool, error)) error {
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return false, err
+		return err
 	}
 	if maxLineBytes <= 0 {
-		return false, fmt.Errorf("maximum redaction line size must be positive")
+		return fmt.Errorf("maximum redaction line size must be positive")
 	}
+	reader := bufio.NewReaderSize(file, 64<<10)
+	for lineNumber := 1; ; lineNumber++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		line, readErr := reasoning.ReadBoundedProviderLine(reader, maxLineBytes)
+		if errors.Is(readErr, reasoning.ErrProviderLineTooLong) {
+			return &boundedJSONLLineError{Line: lineNumber, MaxLineBytes: maxLineBytes}
+		}
+		more, err := visit(line)
+		if err != nil || !more {
+			return err
+		}
+		if readErr != nil {
+			if readErr != io.EOF {
+				return readErr
+			}
+			return nil
+		}
+	}
+}
+
+func rewriteOpaqueTextSnapshot(ctx context.Context, file *os.File, maxLineBytes int) (bool, error) {
 	temp, err := os.CreateTemp("", "acta-redacted-snapshot-*")
 	if err != nil {
 		return false, err
@@ -1537,29 +1519,22 @@ func rewriteOpaqueTextSnapshot(ctx context.Context, file *os.File, maxLineBytes 
 		_ = temp.Close()
 		_ = os.Remove(tempPath)
 	}()
-	reader := bufio.NewReaderSize(file, 64<<10)
-	for {
-		if err := ctx.Err(); err != nil {
-			return false, err
-		}
-		line, readErr := reasoning.ReadBoundedProviderLine(reader, maxLineBytes)
-		if errors.Is(readErr, reasoning.ErrProviderLineTooLong) {
-			// An overlong opaque line cannot be classified within the configured
-			// privacy bound. Keep the artifact local rather than failing the run.
-			return false, nil
-		}
+	verified := true
+	err = iterateBoundedJSONL(ctx, file, maxLineBytes, func(line []byte) (bool, error) {
 		_, trimmed, _ := jsonLineParts(line)
 		if opaqueLineHasJSONAmbiguity(trimmed) {
+			verified = false
 			return false, nil
 		}
 		output := line
 		if len(trimmed) > 0 && looksLikeJSON(trimmed[0]) {
-			var verified bool
-			output, verified, err = redactProviderReasoningLineVerified(line)
+			var lineVerified bool
+			output, lineVerified, err = redactProviderReasoningLineVerified(line)
 			if err != nil {
 				return false, err
 			}
-			if !verified {
+			if !lineVerified {
+				verified = false
 				return false, nil
 			}
 		}
@@ -1568,12 +1543,16 @@ func rewriteOpaqueTextSnapshot(ctx context.Context, file *os.File, maxLineBytes 
 				return false, err
 			}
 		}
-		if readErr != nil {
-			if readErr != io.EOF {
-				return false, readErr
-			}
-			break
-		}
+		return true, nil
+	})
+	var lineErr *boundedJSONLLineError
+	if errors.As(err, &lineErr) {
+		// An overlong opaque line cannot be classified within the configured
+		// privacy bound. Keep the artifact local rather than failing the run.
+		return false, nil
+	}
+	if err != nil || !verified {
+		return false, err
 	}
 	if err := temp.Sync(); err != nil {
 		return false, err
@@ -1704,87 +1683,65 @@ func inspectArtifactSnapshot(ctx context.Context, file *os.File, kind, path stri
 }
 
 func inspectOpaqueTextSnapshot(ctx context.Context, file *os.File, maxLineBytes int) (artifactInspection, error) {
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return artifactInspection{}, err
-	}
 	defer func() { _, _ = file.Seek(0, io.SeekStart) }()
-	if maxLineBytes <= 0 {
-		return artifactInspection{}, fmt.Errorf("maximum redaction line size must be positive")
-	}
-	reader := bufio.NewReaderSize(file, 64<<10)
 	inspection := artifactInspection{Verified: true}
-	for {
-		if err := ctx.Err(); err != nil {
-			return artifactInspection{}, err
-		}
-		line, readErr := reasoning.ReadBoundedProviderLine(reader, maxLineBytes)
-		if errors.Is(readErr, reasoning.ErrProviderLineTooLong) {
-			inspection.Verified = false
-			return inspection, nil
-		}
+	err := iterateBoundedJSONL(ctx, file, maxLineBytes, func(line []byte) (bool, error) {
 		trimmed := bytes.TrimSpace(line)
 		if opaqueLineHasJSONAmbiguity(trimmed) {
 			inspection.Verified = false
-			return inspection, nil
+			return false, nil
 		}
 		if len(trimmed) > 0 && looksLikeJSON(trimmed[0]) {
 			var value any
 			if err := decodeJSONUseNumber(trimmed, &value); err != nil {
 				inspection.Verified = false
-				return inspection, nil
+				return false, nil
 			}
 			containsReasoning, verified := reasoning.RedactValue(value, reasoning.ProviderTraversal())
 			inspection.ContainsReasoning = containsReasoning || inspection.ContainsReasoning
 			inspection.Verified = verified && inspection.Verified
 		}
-		if readErr != nil {
-			if readErr != io.EOF {
-				return artifactInspection{}, readErr
-			}
-			return inspection, nil
-		}
+		return true, nil
+	})
+	var lineErr *boundedJSONLLineError
+	if errors.As(err, &lineErr) {
+		inspection.Verified = false
+		return inspection, nil
 	}
+	if err != nil {
+		return artifactInspection{}, err
+	}
+	return inspection, nil
 }
 
 type inspectJSONValue func(any) (containsReasoning bool, verified bool)
 
 func inspectJSONLinesSnapshot(ctx context.Context, file *os.File, maxLineBytes int, inspect inspectJSONValue) (artifactInspection, error) {
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return artifactInspection{}, err
-	}
 	defer func() { _, _ = file.Seek(0, io.SeekStart) }()
-	if maxLineBytes <= 0 {
-		return artifactInspection{}, fmt.Errorf("maximum redaction line size must be positive")
-	}
-	reader := bufio.NewReaderSize(file, 64<<10)
 	inspection := artifactInspection{Verified: true}
-	for {
-		if err := ctx.Err(); err != nil {
-			return artifactInspection{}, err
-		}
-		line, readErr := reasoning.ReadBoundedProviderLine(reader, maxLineBytes)
-		if errors.Is(readErr, reasoning.ErrProviderLineTooLong) {
-			inspection.Verified = false
-			return inspection, nil
-		}
+	err := iterateBoundedJSONL(ctx, file, maxLineBytes, func(line []byte) (bool, error) {
 		payload := bytes.TrimSpace(line)
 		if len(payload) > 0 {
 			var value any
 			if err := decodeJSONUseNumber(payload, &value); err != nil {
 				inspection.Verified = false
-				return inspection, nil
+				return false, nil
 			}
 			containsReasoning, verified := inspect(value)
 			inspection.ContainsReasoning = containsReasoning || inspection.ContainsReasoning
 			inspection.Verified = verified && inspection.Verified
 		}
-		if readErr != nil {
-			if readErr != io.EOF {
-				return artifactInspection{}, readErr
-			}
-			return inspection, nil
-		}
+		return true, nil
+	})
+	var lineErr *boundedJSONLLineError
+	if errors.As(err, &lineErr) {
+		inspection.Verified = false
+		return inspection, nil
 	}
+	if err != nil {
+		return artifactInspection{}, err
+	}
+	return inspection, nil
 }
 
 func inspectProviderValue(value any) (bool, bool) {
@@ -1857,12 +1814,6 @@ func inspectJSONDocumentSnapshot(ctx context.Context, file *os.File, path string
 }
 
 func rewriteJSONLSnapshot(ctx context.Context, file *os.File, maxLineBytes int, transform func([]byte) ([]byte, error)) error {
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return err
-	}
-	if maxLineBytes <= 0 {
-		return fmt.Errorf("maximum redaction line size must be positive")
-	}
 	temp, err := os.CreateTemp("", "acta-redacted-snapshot-*")
 	if err != nil {
 		return err
@@ -1872,32 +1823,20 @@ func rewriteJSONLSnapshot(ctx context.Context, file *os.File, maxLineBytes int, 
 		_ = temp.Close()
 		_ = os.Remove(tempPath)
 	}()
-	reader := bufio.NewReaderSize(file, 64<<10)
-	lineNumber := 0
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		lineNumber++
-		line, readErr := reasoning.ReadBoundedProviderLine(reader, maxLineBytes)
-		if errors.Is(readErr, reasoning.ErrProviderLineTooLong) {
-			return fmt.Errorf("JSONL line %d exceeds maximum redaction line size of %d bytes", lineNumber, maxLineBytes)
-		}
+	err = iterateBoundedJSONL(ctx, file, maxLineBytes, func(line []byte) (bool, error) {
 		if len(line) > 0 {
 			redacted, err := transform(line)
 			if err != nil {
-				return err
+				return false, err
 			}
 			if _, err := temp.Write(redacted); err != nil {
-				return err
+				return false, err
 			}
 		}
-		if readErr != nil {
-			if readErr != io.EOF {
-				return readErr
-			}
-			break
-		}
+		return true, nil
+	})
+	if err != nil {
+		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -1941,37 +1880,24 @@ func wrapJSONLine(prefix, payload, suffix []byte) []byte {
 // the event that acquired v3 redaction fields would produce an invalid mixed
 // v2/v3 stream.
 func redactActaEventSnapshot(ctx context.Context, file *os.File, maxLineBytes int) error {
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return err
-	}
-	if maxLineBytes <= 0 {
-		return fmt.Errorf("maximum redaction line size must be positive")
-	}
-	reader := bufio.NewReaderSize(file, 64<<10)
-	lineNumber := 0
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		lineNumber++
-		line, readErr := reasoning.ReadBoundedProviderLine(reader, maxLineBytes)
-		if errors.Is(readErr, reasoning.ErrProviderLineTooLong) {
-			return fmt.Errorf("JSONL line %d exceeds maximum redaction line size of %d bytes", lineNumber, maxLineBytes)
-		}
+	changed := false
+	err := iterateBoundedJSONL(ctx, file, maxLineBytes, func(line []byte) (bool, error) {
 		redacted, err := redactActaReasoningEventLine(line)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if !bytes.Equal(redacted, line) {
-			break
+			changed = true
+			return false, nil
 		}
-		if readErr != nil {
-			if readErr != io.EOF {
-				return readErr
-			}
-			_, err := file.Seek(0, io.SeekStart)
-			return err
-		}
+		return true, nil
+	})
+	if err != nil {
+		return err
+	}
+	if !changed {
+		_, err := file.Seek(0, io.SeekStart)
+		return err
 	}
 	return rewriteJSONLSnapshot(ctx, file, maxLineBytes, func(line []byte) ([]byte, error) {
 		redacted, err := redactActaReasoningEventLine(line)
@@ -2465,7 +2391,7 @@ func readFileContextLimit(ctx context.Context, file *os.File, maxBytes int64) ([
 }
 
 func decodeJSONUseNumber(payload []byte, value any) error {
-	return reasoning.UnmarshalProviderLine(payload, value)
+	return reasoning.UnmarshalValue(payload, value)
 }
 
 type contextReader struct {
@@ -2481,25 +2407,7 @@ func (r contextReader) Read(payload []byte) (int, error) {
 }
 
 func decodeJSONUseNumberContext(ctx context.Context, payload []byte, value any) error {
-	if err := reasoning.ValidateUniqueObjectKeysContext(ctx, payload); err != nil {
-		return err
-	}
-	decoder := json.NewDecoder(contextReader{ctx: ctx, reader: bytes.NewReader(payload)})
-	decoder.UseNumber()
-	if err := decoder.Decode(value); err != nil {
-		return err
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	var extra any
-	if err := decoder.Decode(&extra); err != io.EOF {
-		if err == nil {
-			return fmt.Errorf("multiple JSON values")
-		}
-		return err
-	}
-	return ctx.Err()
+	return reasoning.UnmarshalValueContext(ctx, payload, value)
 }
 
 func replaceSnapshotReaderContext(ctx context.Context, file *os.File, reader io.Reader) error {
@@ -2714,4 +2622,26 @@ func buildRunMetadata(record *runrecord.Record, reasoningRedactionState string) 
 		metadata.IssueNumber = record.IssueNumber
 	}
 	return metadata
+}
+
+func buildCompletionMetadata(record *runrecord.Record, reasoningRedactionState string) completionMetadata {
+	return completionMetadata{
+		OK:                         record.OK,
+		Timeout:                    record.Timeout,
+		DurationMillis:             record.DurationMillis,
+		ExitCode:                   record.ExitCode,
+		HeadCommitSHA:              record.HeadCommitSHA,
+		TerminationReason:          record.TerminationReason,
+		Error:                      record.Error,
+		TraceID:                    record.TraceID,
+		PromptSource:               record.PromptSource,
+		PromptCaptured:             record.PromptCaptured,
+		OTLPStatus:                 record.OTLPStatus,
+		OTLPError:                  record.OTLPError,
+		RawOutputLimitBytes:        record.RawOutputLimitBytes,
+		RawOutputLimitExceeded:     record.RawOutputLimitExceeded,
+		WorkspaceDiffLimitBytes:    record.WorkspaceDiffLimitBytes,
+		WorkspaceDiffLimitExceeded: record.WorkspaceDiffLimitExceeded,
+		ReasoningRedactionState:    reasoningRedactionState,
+	}
 }

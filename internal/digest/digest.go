@@ -13,7 +13,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -250,17 +249,8 @@ func redactEventDetails(kind, providerEvent string, raw json.RawMessage) (json.R
 	if len(raw) == 0 {
 		return raw, false, true
 	}
-	if err := reasoning.ValidateUniqueObjectKeys(raw); err != nil {
-		return json.RawMessage(`"` + reasoning.RedactedMarker + `"`), true, false
-	}
 	var value any
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	if err := decoder.Decode(&value); err != nil {
-		return json.RawMessage(`"` + reasoning.RedactedMarker + `"`), true, false
-	}
-	var extra any
-	if err := decoder.Decode(&extra); err != io.EOF {
+	if err := reasoning.UnmarshalValue(raw, &value); err != nil {
 		return json.RawMessage(`"` + reasoning.RedactedMarker + `"`), true, false
 	}
 	payload := map[string]any{
@@ -451,11 +441,7 @@ func (d *Digest) Validate() error {
 			return fmt.Errorf("digest schema_version %d does not support %s", d.SchemaVersion, field)
 		}
 	}
-	validOTLPStatus := d.OTLPStatus == "" || slices.Contains([]string{"not_configured", "exported", "failed"}, d.OTLPStatus)
-	if runrecord.SupportsV3Fields(d.SchemaVersion) {
-		validOTLPStatus = validOTLPStatus || slices.Contains([]string{"not_sampled", "pending"}, d.OTLPStatus)
-	}
-	if !validOTLPStatus {
+	if d.OTLPStatus != "" && !runrecord.SupportsOTLPStatus(d.SchemaVersion, d.OTLPStatus) {
 		return fmt.Errorf("digest schema_version %d has invalid otlp_status %q", d.SchemaVersion, d.OTLPStatus)
 	}
 	return nil

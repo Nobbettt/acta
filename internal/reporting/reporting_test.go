@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -1345,35 +1346,27 @@ func TestUploadRunRedactsRemoteReasoningByDefaultForEveryAgentShape(t *testing.T
 			record.Agent = agent
 			record.ReasoningRedactionState = "retained_local"
 
-			var remote bytes.Buffer
-			var remoteEvents []actaevents.Event
-			redactionStates := map[string]string{}
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-				if request.URL.Path == "/api/ingest/runs/run-1/events" || request.URL.Path == "/api/ingest/runs/run-1/artifacts" {
-					payload, err := io.ReadAll(request.Body)
-					if err != nil {
-						t.Error(err)
-					}
-					remote.Write(payload)
-					if request.URL.Path == "/api/ingest/runs/run-1/events" {
-						var body eventsRequest
-						if err := json.Unmarshal(payload, &body); err != nil {
-							t.Error(err)
-						}
-						remoteEvents = append(remoteEvents, body.Events...)
-					}
-				}
-				if request.URL.Path == "/api/ingest/runs/run-1/artifacts" {
-					redactionStates[request.URL.Query().Get("filename")] = request.URL.Query().Get("redaction_state")
-				}
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer server.Close()
+			capture, server := newUploadCapture(t)
 			if err := uploadToTestServer(server, record); err != nil {
 				t.Fatal(err)
 			}
-			if strings.Contains(remote.String(), secret) {
-				t.Fatalf("remote upload leaked private reasoning: %s", remote.String())
+			remote := capture.bodies("/api/ingest/runs/run-1/events", "/api/ingest/runs/run-1/artifacts")
+			if strings.Contains(string(remote), secret) {
+				t.Fatalf("remote upload leaked private reasoning: %s", remote)
+			}
+			var remoteEvents []actaevents.Event
+			for _, request := range capture.Requests {
+				if request.Path == "/api/ingest/runs/run-1/events" {
+					var body eventsRequest
+					if err := json.Unmarshal(request.Body, &body); err != nil {
+						t.Error(err)
+					}
+					remoteEvents = append(remoteEvents, body.Events...)
+				}
+			}
+			redactionStates := make(map[string]string, len(capture.Artifacts))
+			for filename, request := range capture.Artifacts {
+				redactionStates[filename] = request.Query.Get("redaction_state")
 			}
 			wantStates := map[string]string{
 				"run.json":          "redacted",
@@ -1414,28 +1407,23 @@ func TestUploadRunWithholdsScalarProviderRecords(t *testing.T) {
 			writeFile(t, filepath.Join(runDir, rawName), scalar+"\n")
 			addArtifactRef(t, runDir, `{"kind":"raw_stdout","path":"`+rawName+`"}`)
 
-			uploaded := map[string]bool{}
-			var remoteEvents []actaevents.Event
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-				switch request.URL.Path {
-				case "/api/ingest/runs/run-1/events":
-					var body eventsRequest
-					if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
-						t.Error(err)
-					}
-					remoteEvents = append(remoteEvents, body.Events...)
-				case "/api/ingest/runs/run-1/artifacts":
-					uploaded[request.URL.Query().Get("filename")] = true
-				}
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer server.Close()
+			capture, server := newUploadCapture(t)
 
 			if err := uploadToTestServer(server, testRecord(runDir)); err != nil {
 				t.Fatalf("UploadRun() rejected an unverifiable provider scalar: %v", err)
 			}
-			if uploaded[rawName] {
+			if _, uploaded := capture.Artifacts[rawName]; uploaded {
 				t.Fatal("provider scalar was uploaded unchanged as redacted")
+			}
+			var remoteEvents []actaevents.Event
+			for _, request := range capture.Requests {
+				if request.Path == "/api/ingest/runs/run-1/events" {
+					var body eventsRequest
+					if err := json.Unmarshal(request.Body, &body); err != nil {
+						t.Error(err)
+					}
+					remoteEvents = append(remoteEvents, body.Events...)
+				}
 			}
 			for _, event := range remoteEvents {
 				for _, ref := range event.ArtifactRefs {
@@ -1450,120 +1438,130 @@ func TestUploadRunWithholdsScalarProviderRecords(t *testing.T) {
 	}
 }
 
-func TestUploadRunRedactsReasoningKindDespiteFutureType(t *testing.T) {
+func TestUploadRunRedactsRawArtifactsByDefault(t *testing.T) {
 	const (
-		rawName = "codex-events.jsonl"
-		secret  = "private-conflicting-discriminator-3291"
+		rawName             = "codex-events.jsonl"
+		conflictingSecret   = "private-conflicting-discriminator-3291"
+		bareKindSecret      = "private-remote-bare-normalized-kind-6452"
+		fixtureText         = "visible-provider-shaped-tool-fixture-9241"
+		topLevelSecret      = "private-top-level-reasoning-7148"
+		mismatchedSecret    = "mismatched-kind-reasoning-19571"
+		tamperedStateSecret = "tampered-redaction-state-secret-8901"
 	)
-	runDir := writeBundle(t)
-	original := `{"type":"future.event","kind":"reasoning","text":"` + secret + `"}` + "\n"
-	writeFile(t, filepath.Join(runDir, rawName), original)
-	addArtifactRef(t, runDir, `{"kind":"raw_stdout","path":"`+rawName+`"}`)
-
-	var remoteRaw, remoteState string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == rawName {
-			payload, err := io.ReadAll(request.Body)
-			if err != nil {
-				t.Error(err)
+	tests := []struct {
+		name           string
+		kind           string
+		original       string
+		recordState    string
+		runRecordBody  string
+		assertCaptured func(*testing.T, capturedUploadRequest)
+		assertLocal    func(*testing.T, string, string)
+	}{
+		{
+			name:     "reasoning kind despite future type",
+			kind:     "raw_stdout",
+			original: `{"type":"future.event","kind":"reasoning","text":"` + conflictingSecret + `"}` + "\n",
+			assertCaptured: func(t *testing.T, remote capturedUploadRequest) {
+				body, state := string(remote.Body), remote.Query.Get("redaction_state")
+				if strings.Contains(body, conflictingSecret) || !strings.Contains(body, `"type":"future.event"`) ||
+					!strings.Contains(body, `"kind":"reasoning"`) || !strings.Contains(body, `"redacted":true`) || state != "redacted" {
+					t.Fatalf("remote conflicting discriminator body/state = %q / %q", body, state)
+				}
+			},
+			assertLocal: func(t *testing.T, local, original string) {
+				if local != original {
+					t.Fatalf("remote redaction changed local raw stream:\n got %s\nwant %s", local, original)
+				}
+			},
+		},
+		{
+			name:     "bare normalized kind",
+			kind:     "raw_stdout",
+			original: `{"kind":"tool_call","input":{"thinking":"` + bareKindSecret + `"}}` + "\n",
+			assertCaptured: func(t *testing.T, remote capturedUploadRequest) {
+				body, state := string(remote.Body), remote.Query.Get("redaction_state")
+				if strings.Contains(body, bareKindSecret) || !strings.Contains(body, `"kind":"tool_call"`) ||
+					!strings.Contains(body, `"thinking":"[REDACTED]"`) || state != "redacted" {
+					t.Fatalf("remote bare normalized-kind body/state = %q / %q", body, state)
+				}
+			},
+			assertLocal: func(t *testing.T, local, original string) {
+				if local != original {
+					t.Fatalf("remote redaction changed local raw stream:\n got %s\nwant %s", local, original)
+				}
+			},
+		},
+		{
+			name:        "provider-shaped tool result",
+			kind:        "raw_stdout",
+			recordState: "retained_local",
+			original: strings.Join([]string{
+				`{"type":"item.completed","item":{"id":"mcp-1","type":"mcp_tool_call","result":{"type":"item.completed","item":{"type":"reasoning","text":"` + fixtureText + `"}}}}`,
+				`{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","text":"` + topLevelSecret + `"}}`, "",
+			}, "\n"),
+			assertCaptured: func(t *testing.T, remote capturedUploadRequest) {
+				body := string(remote.Body)
+				if strings.Contains(body, fixtureText) || strings.Contains(body, topLevelSecret) || strings.Count(body, `"redacted":true`) != 2 {
+					t.Fatalf("remote snapshot did not traverse all raw provider data: %s", body)
+				}
+			},
+			assertLocal: func(t *testing.T, local, original string) {
+				if local != original {
+					t.Fatal("default remote redaction changed the local raw stream")
+				}
+			},
+		},
+		{
+			name:        "mismatched digest kind",
+			kind:        "digest",
+			recordState: "retained_local",
+			original:    `{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","text":"` + mismatchedSecret + `"}}` + "\n",
+			assertCaptured: func(t *testing.T, remote capturedUploadRequest) {
+				if kind := remote.Query.Get("kind"); kind != "digest" {
+					t.Fatalf("test did not exercise mismatched declared kind: %q", kind)
+				}
+				if body := string(remote.Body); strings.Contains(body, mismatchedSecret) || !strings.Contains(body, `"redacted":true`) {
+					t.Fatalf("mismatched kind bypassed conservative JSONL redaction: %s", body)
+				}
+			},
+		},
+		{
+			name:          "tampered run record claims redacted",
+			kind:          "raw_stdout",
+			recordState:   "redacted",
+			runRecordBody: `{"id":"run-1","reasoning_redaction_state":"redacted"}` + "\n",
+			original:      `{"type":"item.completed","item":{"type":"reasoning","text":"` + tamperedStateSecret + `"}}` + "\n",
+			assertCaptured: func(t *testing.T, remote capturedUploadRequest) {
+				if strings.Contains(string(remote.Body), tamperedStateSecret) {
+					t.Fatalf("mutable redaction-state claim bypassed upload redaction: %s", remote.Body)
+				}
+			},
+			assertLocal: func(t *testing.T, local, _ string) {
+				if !strings.Contains(local, tamperedStateSecret) {
+					t.Fatal("upload redaction rewrote the local artifact")
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runDir := writeBundle(t)
+			writeFile(t, filepath.Join(runDir, rawName), test.original)
+			if test.runRecordBody != "" {
+				writeFile(t, filepath.Join(runDir, "run.json"), test.runRecordBody)
 			}
-			remoteRaw = string(payload)
-			remoteState = request.URL.Query().Get("redaction_state")
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-
-	if err := uploadToTestServer(server, testRecord(runDir)); err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(remoteRaw, secret) ||
-		!strings.Contains(remoteRaw, `"type":"future.event"`) ||
-		!strings.Contains(remoteRaw, `"kind":"reasoning"`) ||
-		!strings.Contains(remoteRaw, `"redacted":true`) || remoteState != "redacted" {
-		t.Fatalf("remote conflicting discriminator body/state = %q / %q", remoteRaw, remoteState)
-	}
-	if local := readTestFile(t, filepath.Join(runDir, rawName)); local != original {
-		t.Fatalf("remote redaction changed local raw stream:\n got %s\nwant %s", local, original)
-	}
-}
-
-func TestUploadRunDoesNotTrustBareNormalizedKind(t *testing.T) {
-	const (
-		rawName = "codex-events.jsonl"
-		secret  = "private-remote-bare-normalized-kind-6452"
-	)
-	runDir := writeBundle(t)
-	original := `{"kind":"tool_call","input":{"thinking":"` + secret + `"}}` + "\n"
-	writeFile(t, filepath.Join(runDir, rawName), original)
-	addArtifactRef(t, runDir, `{"kind":"raw_stdout","path":"`+rawName+`"}`)
-
-	var remoteRaw, remoteState string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == rawName {
-			payload, err := io.ReadAll(request.Body)
-			if err != nil {
-				t.Error(err)
+			addArtifactRef(t, runDir, `{"kind":"`+test.kind+`","path":"`+rawName+`"}`)
+			record := testRecord(runDir)
+			record.ReasoningRedactionState = test.recordState
+			capture, server := newUploadCapture(t)
+			if err := uploadToTestServer(server, record); err != nil {
+				t.Fatal(err)
 			}
-			remoteRaw = string(payload)
-			remoteState = request.URL.Query().Get("redaction_state")
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-
-	if err := uploadToTestServer(server, testRecord(runDir)); err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(remoteRaw, secret) ||
-		!strings.Contains(remoteRaw, `"kind":"tool_call"`) ||
-		!strings.Contains(remoteRaw, `"thinking":"[REDACTED]"`) || remoteState != "redacted" {
-		t.Fatalf("remote bare normalized-kind body/state = %q / %q", remoteRaw, remoteState)
-	}
-	if local := readTestFile(t, filepath.Join(runDir, rawName)); local != original {
-		t.Fatalf("remote redaction changed local raw stream:\n got %s\nwant %s", local, original)
-	}
-}
-
-func TestUploadRunRemoteSnapshotTraversesProviderShapedToolResult(t *testing.T) {
-	const (
-		rawName     = "codex-events.jsonl"
-		fixtureText = "visible-provider-shaped-tool-fixture-9241"
-		secret      = "private-top-level-reasoning-7148"
-	)
-	runDir := writeBundle(t)
-	original := strings.Join([]string{
-		`{"type":"item.completed","item":{"id":"mcp-1","type":"mcp_tool_call","result":{"type":"item.completed","item":{"type":"reasoning","text":"` + fixtureText + `"}}}}`,
-		`{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","text":"` + secret + `"}}`,
-		"",
-	}, "\n")
-	writeFile(t, filepath.Join(runDir, rawName), original)
-	addArtifactRef(t, runDir, `{"kind":"raw_stdout","path":"`+rawName+`"}`)
-
-	var remoteRaw string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == rawName {
-			payload, err := io.ReadAll(request.Body)
-			if err != nil {
-				t.Error(err)
+			test.assertCaptured(t, capture.Artifacts[rawName])
+			if test.assertLocal != nil {
+				test.assertLocal(t, readTestFile(t, filepath.Join(runDir, rawName)), test.original)
 			}
-			remoteRaw = string(payload)
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-
-	record := testRecord(runDir)
-	record.ReasoningRedactionState = "retained_local"
-	if err := uploadToTestServer(server, record); err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(remoteRaw, fixtureText) || strings.Contains(remoteRaw, secret) ||
-		strings.Count(remoteRaw, `"redacted":true`) != 2 {
-		t.Fatalf("remote snapshot did not traverse all raw provider data: %s", remoteRaw)
-	}
-	if local := readTestFile(t, filepath.Join(runDir, rawName)); local != original {
-		t.Fatal("default remote redaction changed the local raw stream")
+		})
 	}
 }
 
@@ -1610,23 +1608,13 @@ func TestUploadRunRemoteRawReasoningRedigestsWithOriginalMetadata(t *testing.T) 
 	}
 	writeRecord(runDir)
 
-	var remoteRaw []byte
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == rawName {
-			payload, err := io.ReadAll(request.Body)
-			if err != nil {
-				t.Error(err)
-			}
-			remoteRaw = payload
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	capture, server := newUploadCapture(t)
 	uploadRecord := testRecord(runDir)
 	uploadRecord.ReasoningRedactionState = "retained_local"
 	if err := uploadToTestServer(server, uploadRecord); err != nil {
 		t.Fatal(err)
 	}
+	remoteRaw := capture.Artifacts[rawName].Body
 	if bytes.Contains(remoteRaw, []byte(reasoningText)) {
 		t.Fatal("remote raw snapshot retained private reasoning")
 	}
@@ -1687,24 +1675,13 @@ func TestUploadRunRedactsReasoningFromLegacyDigest(t *testing.T) {
 	record := testRecord(runDir)
 	record.ReasoningRedactionState = "retained_local"
 
-	var remoteDigest string
-	var remoteState string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == "digest.json" {
-			body, err := io.ReadAll(request.Body)
-			if err != nil {
-				t.Error(err)
-			}
-			remoteDigest = string(body)
-			remoteState = request.URL.Query().Get("redaction_state")
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	capture, server := newUploadCapture(t)
 
 	if err := uploadToTestServer(server, record); err != nil {
 		t.Fatal(err)
 	}
+	remote := capture.Artifacts["digest.json"]
+	remoteDigest, remoteState := string(remote.Body), remote.Query.Get("redaction_state")
 	if strings.Contains(remoteDigest, secret) || !strings.Contains(remoteDigest, `"text":"`+reasoningRedactionMarker+`"`) {
 		t.Fatalf("remote legacy digest retained reasoning: %s", remoteDigest)
 	}
@@ -1749,24 +1726,13 @@ func TestUploadRunRedactsManifestPinnedLegacyDigest(t *testing.T) {
 			eventsBody := readTestFile(t, filepath.Join(runDir, actaevents.Filename))
 			writeProjectionGeneration(t, runDir, "100", test.digestBody, eventsBody)
 
-			var remoteDigest string
-			var remoteState string
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-				if request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == "digest.json" {
-					body, err := io.ReadAll(request.Body)
-					if err != nil {
-						t.Error(err)
-					}
-					remoteDigest = string(body)
-					remoteState = request.URL.Query().Get("redaction_state")
-				}
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer server.Close()
+			capture, server := newUploadCapture(t)
 
 			if err := uploadToTestServer(server, testRecord(runDir)); err != nil {
 				t.Fatal(err)
 			}
+			remote := capture.Artifacts["digest.json"]
+			remoteDigest, remoteState := string(remote.Body), remote.Query.Get("redaction_state")
 			if remoteState != "redacted" {
 				t.Fatalf("manifest-pinned digest redaction_state = %q, want redacted", remoteState)
 			}
@@ -1780,44 +1746,6 @@ func TestUploadRunRedactsManifestPinnedLegacyDigest(t *testing.T) {
 				t.Fatalf("manifest-pinned digest was uploaded without structural redaction: %s", remoteDigest)
 			}
 		})
-	}
-}
-
-func TestUploadRunRedactsJSONLDespiteMismatchedDigestKind(t *testing.T) {
-	const secret = "mismatched-kind-reasoning-19571"
-	runDir := writeBundle(t)
-	rawName := "codex-events.jsonl"
-	writeFile(t, filepath.Join(runDir, rawName), `{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","text":"`+secret+`"}}`+"\n")
-	eventsPath := filepath.Join(runDir, actaevents.Filename)
-	events := readTestFile(t, eventsPath)
-	events = strings.Replace(events, `{"kind":"event_stream","path":"acta-events.jsonl"}`, `{"kind":"digest","path":"codex-events.jsonl"},{"kind":"event_stream","path":"acta-events.jsonl"}`, 1)
-	writeFile(t, eventsPath, events)
-	record := testRecord(runDir)
-	record.ReasoningRedactionState = "retained_local"
-
-	var remoteRaw string
-	var remoteKind string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == rawName {
-			body, err := io.ReadAll(request.Body)
-			if err != nil {
-				t.Error(err)
-			}
-			remoteRaw = string(body)
-			remoteKind = request.URL.Query().Get("kind")
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-
-	if err := uploadToTestServer(server, record); err != nil {
-		t.Fatal(err)
-	}
-	if remoteKind != "digest" {
-		t.Fatalf("test did not exercise mismatched declared kind: %q", remoteKind)
-	}
-	if strings.Contains(remoteRaw, secret) || !strings.Contains(remoteRaw, `"redacted":true`) {
-		t.Fatalf("mismatched kind bypassed conservative JSONL redaction: %s", remoteRaw)
 	}
 }
 
@@ -1838,28 +1766,18 @@ func TestUploadRunRedactsUnsupportedClaudeDetailsByDefault(t *testing.T) {
 	record.Agent = "claude"
 	record.ReasoningRedactionState = "retained_local"
 
-	var remote bytes.Buffer
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/api/ingest/runs/run-1/events" || request.URL.Path == "/api/ingest/runs/run-1/artifacts" {
-			payload, err := io.ReadAll(request.Body)
-			if err != nil {
-				t.Error(err)
-			}
-			remote.Write(payload)
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	capture, server := newUploadCapture(t)
 	if err := uploadToTestServer(server, record); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(remote.String(), secret) || !strings.Contains(remote.String(), `"details":{}`) {
-		t.Fatalf("remote upload retained unsupported reasoning details: %s", remote.String())
+	remote := capture.bodies("/api/ingest/runs/run-1/events", "/api/ingest/runs/run-1/artifacts")
+	if strings.Contains(string(remote), secret) || !strings.Contains(string(remote), `"details":{}`) {
+		t.Fatalf("remote upload retained unsupported reasoning details: %s", remote)
 	}
-	if !strings.Contains(remote.String(), `"provider_event":"assistant.redacted_thinking"`) ||
-		!strings.Contains(remote.String(), `"raw_event_lines":[1]`) ||
-		!strings.Contains(remote.String(), `"redacted":true`) {
-		t.Fatalf("remote upload lost structural unsupported-event references: %s", remote.String())
+	if !strings.Contains(string(remote), `"provider_event":"assistant.redacted_thinking"`) ||
+		!strings.Contains(string(remote), `"raw_event_lines":[1]`) ||
+		!strings.Contains(string(remote), `"redacted":true`) {
+		t.Fatalf("remote upload lost structural unsupported-event references: %s", remote)
 	}
 }
 
@@ -1875,28 +1793,18 @@ func TestUploadRunRedactsUnsupportedFutureMapDetailsByDefault(t *testing.T) {
 		"",
 	}, "\n"))
 
-	var remote bytes.Buffer
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/api/ingest/runs/run-1/events" ||
-			request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == actaevents.Filename {
-			payload, err := io.ReadAll(request.Body)
-			if err != nil {
-				t.Error(err)
-			}
-			remote.Write(payload)
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	capture, server := newUploadCapture(t)
 
 	if err := uploadToTestServer(server, testRecord(runDir)); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(remote.String(), secret) || !strings.Contains(remote.String(), `"thinking":"`+reasoningRedactionMarker+`"`) {
-		t.Fatalf("remote upload did not redact unsupported future map details: %s", remote.String())
+	remote := capture.bodies("/api/ingest/runs/run-1/events")
+	remote = append(remote, capture.Artifacts[actaevents.Filename].Body...)
+	if strings.Contains(string(remote), secret) || !strings.Contains(string(remote), `"thinking":"`+reasoningRedactionMarker+`"`) {
+		t.Fatalf("remote upload did not redact unsupported future map details: %s", remote)
 	}
-	if !strings.Contains(remote.String(), `"type":"future.event"`) || !strings.Contains(remote.String(), `"redacted":true`) {
-		t.Fatalf("remote upload lost unsupported future event structure: %s", remote.String())
+	if !strings.Contains(string(remote), `"type":"future.event"`) || !strings.Contains(string(remote), `"redacted":true`) {
+		t.Fatalf("remote upload lost unsupported future event structure: %s", remote)
 	}
 }
 
@@ -2000,39 +1908,6 @@ func TestUnsupportedUninspectableDetailsAreUnverified(t *testing.T) {
 				t.Fatal("uninspectable unsupported details were treated as verified")
 			}
 		})
-	}
-}
-
-func TestUploadRunRedactsEvenWhenRunRecordClaimsRedacted(t *testing.T) {
-	const secret = "tampered-redaction-state-secret-8901"
-	runDir := writeBundle(t)
-	rawName := "codex-events.jsonl"
-	writeFile(t, filepath.Join(runDir, rawName), `{"type":"item.completed","item":{"type":"reasoning","text":"`+secret+`"}}`+"\n")
-	writeFile(t, filepath.Join(runDir, "run.json"), `{"id":"run-1","reasoning_redaction_state":"redacted"}`+"\n")
-	eventsPath := filepath.Join(runDir, actaevents.Filename)
-	events := readTestFile(t, eventsPath)
-	events = strings.Replace(events, `{"kind":"event_stream","path":"acta-events.jsonl"}`, `{"kind":"raw_stdout","path":"codex-events.jsonl"},{"kind":"event_stream","path":"acta-events.jsonl"}`, 1)
-	writeFile(t, eventsPath, events)
-	record := testRecord(runDir)
-	record.ReasoningRedactionState = "redacted"
-
-	var remote bytes.Buffer
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" {
-			payload, _ := io.ReadAll(request.Body)
-			remote.Write(payload)
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-	if err := uploadToTestServer(server, record); err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(remote.String(), secret) {
-		t.Fatalf("mutable redaction-state claim bypassed upload redaction: %s", remote.String())
-	}
-	if local := readTestFile(t, filepath.Join(runDir, rawName)); !strings.Contains(local, secret) {
-		t.Fatal("upload redaction rewrote the local artifact")
 	}
 }
 
@@ -2379,24 +2254,13 @@ func TestUploadRunPreservesNormalizedStructuredOutput(t *testing.T) {
 		"",
 	}, "\n"))
 
-	uploaded := map[string]string{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" {
-			payload, err := io.ReadAll(request.Body)
-			if err != nil {
-				t.Error(err)
-			}
-			uploaded[request.URL.Query().Get("filename")] = string(payload)
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	capture, server := newUploadCapture(t)
 
 	if err := uploadToTestServer(server, testRecord(runDir)); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"digest.json", actaevents.Filename} {
-		body := uploaded[name]
+		body := string(capture.Artifacts[name].Body)
 		if strings.Contains(body, secret) || !strings.Contains(body, structured) || !strings.Contains(body, `"thinking":"[REDACTED]"`) {
 			t.Fatalf("uploaded %s did not preserve structured output and redact outside reasoning: %s", name, body)
 		}
@@ -2432,27 +2296,17 @@ func TestUploadRunAllowsExplicitUnredactedRemoteReasoning(t *testing.T) {
 	writeFile(t, eventsPath, events)
 	record := testRecord(runDir)
 	record.ReasoningRedactionState = "retained_local"
-	var remote bytes.Buffer
-	var rawState string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" {
-			body, _ := io.ReadAll(request.Body)
-			remote.Write(body)
-			if request.URL.Query().Get("filename") == "codex-events.jsonl" {
-				rawState = request.URL.Query().Get("redaction_state")
-			}
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	capture, server := newUploadCapture(t)
 	if err := UploadRun(context.Background(), Config{
 		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
 		AllowUnredactedRemoteReasoning: true,
 	}, record); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(remote.String(), secret) || rawState != "unredacted" {
-		t.Fatalf("explicit upload remote=%q redaction_state=%q", remote.String(), rawState)
+	remote := capture.bodies("/api/ingest/runs/run-1/artifacts")
+	rawState := capture.Artifacts["codex-events.jsonl"].Query.Get("redaction_state")
+	if !strings.Contains(string(remote), secret) || rawState != "unredacted" {
+		t.Fatalf("explicit upload remote=%q redaction_state=%q", remote, rawState)
 	}
 }
 
@@ -2466,28 +2320,17 @@ func TestUploadRunDerivesUnredactedLabelsFromArtifactContent(t *testing.T) {
 	addArtifactRef(t, runDir, `{"kind":"raw_stderr","path":"`+logName+`"}`)
 	addArtifactRef(t, runDir, `{"kind":"raw_stderr","path":"`+cleanLogName+`"}`)
 
-	var remoteLog string
-	remoteStates := map[string]string{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" {
-			filename := request.URL.Query().Get("filename")
-			remoteStates[filename] = request.URL.Query().Get("redaction_state")
-			if filename == logName {
-				body, err := io.ReadAll(request.Body)
-				if err != nil {
-					t.Error(err)
-				}
-				remoteLog = string(body)
-			}
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	capture, server := newUploadCapture(t)
 	if err := UploadRun(context.Background(), Config{
 		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
 		AllowUnredactedRemoteReasoning: true,
 	}, testRecord(runDir)); err != nil {
 		t.Fatal(err)
+	}
+	remoteLog := string(capture.Artifacts[logName].Body)
+	remoteStates := make(map[string]string, len(capture.Artifacts))
+	for filename, request := range capture.Artifacts {
+		remoteStates[filename] = request.Query.Get("redaction_state")
 	}
 	if !strings.Contains(remoteLog, secret) || remoteStates[logName] != "unredacted" {
 		t.Fatalf("reasoning log body/states = %q / %v, want retained content labeled unredacted", remoteLog, remoteStates)
@@ -2504,25 +2347,15 @@ func TestUploadRunExplicitlyUploadsAmbiguousOpaqueStderrAsUnredacted(t *testing.
 	writeFile(t, filepath.Join(runDir, stderrName), "diagnostic\n{\n  \"thinking\": \""+secret+"\"\n}\n")
 	addArtifactRef(t, runDir, `{"kind":"raw_stderr","path":"`+stderrName+`"}`)
 
-	var remoteStderr, remoteState string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == stderrName {
-			body, err := io.ReadAll(request.Body)
-			if err != nil {
-				t.Error(err)
-			}
-			remoteStderr = string(body)
-			remoteState = request.URL.Query().Get("redaction_state")
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	capture, server := newUploadCapture(t)
 	if err := UploadRun(context.Background(), Config{
 		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
 		AllowUnredactedRemoteReasoning: true,
 	}, testRecord(runDir)); err != nil {
 		t.Fatal(err)
 	}
+	remote := capture.Artifacts[stderrName]
+	remoteStderr, remoteState := string(remote.Body), remote.Query.Get("redaction_state")
 	if !strings.Contains(remoteStderr, secret) || remoteState != "unredacted" {
 		t.Fatalf("ambiguous stderr body/state = %q / %q, want explicit unredacted upload", remoteStderr, remoteState)
 	}
@@ -3122,6 +2955,50 @@ func writeBundle(t *testing.T) string {
 		"",
 	}, "\n"))
 	return runDir
+}
+
+type capturedUploadRequest struct {
+	Path  string
+	Query url.Values
+	Body  []byte
+}
+
+type uploadCapture struct {
+	Requests  []capturedUploadRequest
+	Artifacts map[string]capturedUploadRequest
+}
+
+func newUploadCapture(t *testing.T) (*uploadCapture, *httptest.Server) {
+	t.Helper()
+	capture := &uploadCapture{Artifacts: make(map[string]capturedUploadRequest)}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Error(err)
+		}
+		captured := capturedUploadRequest{Path: request.URL.Path, Query: request.URL.Query(), Body: body}
+		capture.Requests = append(capture.Requests, captured)
+		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" {
+			capture.Artifacts[captured.Query.Get("filename")] = captured
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	return capture, server
+}
+
+func (capture *uploadCapture) bodies(paths ...string) []byte {
+	selected := make(map[string]bool, len(paths))
+	for _, path := range paths {
+		selected[path] = true
+	}
+	var body []byte
+	for _, request := range capture.Requests {
+		if selected[request.Path] {
+			body = append(body, request.Body...)
+		}
+	}
+	return body
 }
 
 func makeBundleDirectoryReadOnly(t *testing.T, runDir string) os.FileMode {

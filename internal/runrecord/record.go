@@ -40,6 +40,13 @@ func SupportsV3Fields(schemaVersion int) bool {
 	return schemaVersion >= 3
 }
 
+// SupportsOTLPStatus reports whether status belongs to the closed vocabulary
+// for schemaVersion. Callers decide whether an empty status is allowed.
+func SupportsOTLPStatus(schemaVersion int, status string) bool {
+	return slices.Contains([]string{"not_configured", "exported", "failed"}, status) ||
+		SupportsV3Fields(schemaVersion) && slices.Contains([]string{"not_sampled", "pending"}, status)
+}
+
 type Record struct {
 	SchemaVersion int      `json:"schema_version,omitempty"`
 	Producer      Producer `json:"producer,omitempty"`
@@ -178,11 +185,7 @@ func (r *Record) Validate() error {
 		if r.OK && (r.ExitCode == nil || *r.ExitCode != 0) {
 			return fmt.Errorf("successful run record requires exit_code 0")
 		}
-		validOTLPStatus := slices.Contains([]string{"not_configured", "exported", "failed"}, r.OTLPStatus)
-		if SupportsV3Fields(r.SchemaVersion) {
-			validOTLPStatus = validOTLPStatus || slices.Contains([]string{"not_sampled", "pending"}, r.OTLPStatus)
-		}
-		if !validOTLPStatus || r.OTLPStatus == "failed" && strings.TrimSpace(r.OTLPError) == "" || r.OTLPStatus != "failed" && r.OTLPError != "" {
+		if !SupportsOTLPStatus(r.SchemaVersion, r.OTLPStatus) || r.OTLPStatus == "failed" && strings.TrimSpace(r.OTLPError) == "" || r.OTLPStatus != "failed" && r.OTLPError != "" {
 			return fmt.Errorf("run record OTLP status and error are inconsistent")
 		}
 		if (r.OTLPStatus == "exported" || r.OTLPStatus == "pending") && strings.TrimSpace(r.TraceID) == "" ||

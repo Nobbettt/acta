@@ -144,7 +144,7 @@ func IsNormalizedEvent(kind, providerEvent, detailType string) bool {
 // deliberately does not classify arbitrary objects with a reasoning-shaped
 // type as provider output.
 func RedactProviderBlocks(value any) bool {
-	changed, _ := redactProviderBlocks(context.Background(), value, ProviderTraversal())
+	changed, _, _ := redactProviderBlocks(context.Background(), value, ProviderTraversal())
 	return changed
 }
 
@@ -160,7 +160,7 @@ func RedactValue(value any, traversal TraversalContext) (changed, verified bool)
 // RedactValueContext is RedactValue with cancellation checks while traversing
 // potentially large artifacts.
 func RedactValueContext(ctx context.Context, value any, traversal TraversalContext) (changed, verified bool, err error) {
-	changed, err = redactProviderBlocks(ctx, value, traversal)
+	changed, _, err = redactProviderBlocks(ctx, value, traversal)
 	if err != nil {
 		return false, false, err
 	}
@@ -214,11 +214,7 @@ func RedactUnsupportedPayloadContext(ctx context.Context, value any) (redacted a
 		changed, verified, err := redactToStructuralReferencesContext(ctx, payload)
 		return payload, changed, verified, err
 	}
-	providerChanged, err := redactProviderBlocks(ctx, payload, ProviderTraversal())
-	if err != nil {
-		return payload, false, false, err
-	}
-	containsRedacted, err := containsRedactedProviderBlock(ctx, payload, ProviderTraversal())
+	providerChanged, containsRedacted, err := redactProviderBlocks(ctx, payload, ProviderTraversal())
 	if err != nil {
 		return payload, false, false, err
 	}
@@ -407,65 +403,68 @@ func maskableValue(value any) bool {
 	}
 }
 
-func redactProviderBlocks(ctx context.Context, value any, traversal TraversalContext) (bool, error) {
+func redactProviderBlocks(ctx context.Context, value any, traversal TraversalContext) (changed, containsPreviouslyRedacted bool, err error) {
 	if err := ctx.Err(); err != nil {
-		return false, err
+		return false, false, err
 	}
 	switch typed := value.(type) {
 	case []any:
-		changed := false
 		for _, item := range typed {
-			itemChanged, err := redactProviderBlocks(ctx, item, traversal)
+			itemChanged, itemContained, err := redactProviderBlocks(ctx, item, traversal)
 			if err != nil {
-				return false, err
+				return false, false, err
 			}
 			changed = itemChanged || changed
+			containsPreviouslyRedacted = itemContained || containsPreviouslyRedacted
 		}
-		return changed, nil
+		return changed, containsPreviouslyRedacted, nil
 	case map[string]any:
-		changed := redactCodexBlock(typed)
-		changed = redactClaudeBlocks(typed) || changed
+		changed, containsPreviouslyRedacted = redactCodexBlock(typed)
+		claudeChanged, claudeContained := redactClaudeBlocks(typed)
+		changed = claudeChanged || changed
+		containsPreviouslyRedacted = claudeContained || containsPreviouslyRedacted
 		for key, item := range typed {
 			childTraversal, exempt := traversal.Enter(typed, key)
 			if exempt {
 				continue
 			}
-			itemChanged, err := redactProviderBlocks(ctx, item, childTraversal)
+			itemChanged, itemContained, err := redactProviderBlocks(ctx, item, childTraversal)
 			if err != nil {
-				return false, err
+				return false, false, err
 			}
 			changed = itemChanged || changed
+			containsPreviouslyRedacted = itemContained || containsPreviouslyRedacted
 		}
-		return changed, nil
+		return changed, containsPreviouslyRedacted, nil
 	default:
-		return false, nil
+		return false, false, nil
 	}
 }
 
-func redactCodexBlock(event map[string]any) bool {
+func redactCodexBlock(event map[string]any) (changed, containsPreviouslyRedacted bool) {
 	eventType, _ := event["type"].(string)
 	item, ok := event["item"].(map[string]any)
 	if !ok {
-		return false
+		return false, false
 	}
 	itemType, _ := item["type"].(string)
 	if !IsCodexBlock(eventType, itemType) {
-		return false
+		return false, false
 	}
-	return redactBlock(item, "text")
+	redacted, _ := item["redacted"].(bool)
+	return redactBlock(item, "text"), IsRedactedBlock(redacted)
 }
 
-func redactClaudeBlocks(event map[string]any) bool {
+func redactClaudeBlocks(event map[string]any) (changed, containsPreviouslyRedacted bool) {
 	eventType, _ := event["type"].(string)
 	message, ok := event["message"].(map[string]any)
 	if !ok {
-		return false
+		return false, false
 	}
 	content, ok := message["content"].([]any)
 	if !ok {
-		return false
+		return false, false
 	}
-	changed := false
 	for _, value := range content {
 		block, ok := value.(map[string]any)
 		if !ok {
@@ -473,6 +472,8 @@ func redactClaudeBlocks(event map[string]any) bool {
 		}
 		blockType, _ := block["type"].(string)
 		if IsClaudeBlock(eventType, blockType) {
+			redacted, _ := block["redacted"].(bool)
+			containsPreviouslyRedacted = IsRedactedBlock(redacted) || containsPreviouslyRedacted
 			textField := "thinking"
 			if blockType == claudeRedactedThinking {
 				textField = "data"
@@ -480,7 +481,7 @@ func redactClaudeBlocks(event map[string]any) bool {
 			changed = redactBlock(block, textField) || changed
 		}
 	}
-	return changed
+	return changed, containsPreviouslyRedacted
 }
 
 func redactBlock(block map[string]any, textField string) bool {
@@ -546,45 +547,6 @@ func structuralInteger(value any) bool {
 	default:
 		return false
 	}
-}
-
-// ContainsRedactedProviderBlock reports whether an exact provider position
-// contains a block carrying redaction provenance. It lets owning normalized
-// wrappers preserve that provenance after an earlier exact pass has already
-// made a later redaction traversal idempotent.
-func ContainsRedactedProviderBlock(value any) bool {
-	contains, _ := containsRedactedProviderBlock(context.Background(), value, ProviderTraversal())
-	return contains
-}
-
-func containsRedactedProviderBlock(ctx context.Context, value any, traversal TraversalContext) (bool, error) {
-	if err := ctx.Err(); err != nil {
-		return false, err
-	}
-	switch typed := value.(type) {
-	case []any:
-		for _, item := range typed {
-			contains, err := containsRedactedProviderBlock(ctx, item, traversal)
-			if err != nil || contains {
-				return contains, err
-			}
-		}
-	case map[string]any:
-		if redactedCodexBlock(typed) || redactedClaudeBlock(typed) {
-			return true, nil
-		}
-		for key, item := range typed {
-			childTraversal, exempt := traversal.Enter(typed, key)
-			if exempt {
-				continue
-			}
-			contains, err := containsRedactedProviderBlock(ctx, item, childTraversal)
-			if err != nil || contains {
-				return contains, err
-			}
-		}
-	}
-	return false, nil
 }
 
 // normalizedEnvelopePayloadKey reports whether a field is surfaced user or
@@ -726,41 +688,6 @@ func normalizedKindPayloadKey(value any, kind, key string) bool {
 		}
 	case "details":
 		return kind == "structured_output"
-	}
-	return false
-}
-
-func redactedCodexBlock(event map[string]any) bool {
-	eventType, _ := event["type"].(string)
-	item, ok := event["item"].(map[string]any)
-	if !ok {
-		return false
-	}
-	itemType, _ := item["type"].(string)
-	redacted, _ := item["redacted"].(bool)
-	return IsCodexBlock(eventType, itemType) && IsRedactedBlock(redacted)
-}
-
-func redactedClaudeBlock(event map[string]any) bool {
-	eventType, _ := event["type"].(string)
-	message, ok := event["message"].(map[string]any)
-	if !ok {
-		return false
-	}
-	content, ok := message["content"].([]any)
-	if !ok {
-		return false
-	}
-	for _, value := range content {
-		block, ok := value.(map[string]any)
-		if !ok {
-			continue
-		}
-		blockType, _ := block["type"].(string)
-		redacted, _ := block["redacted"].(bool)
-		if IsClaudeBlock(eventType, blockType) && IsRedactedBlock(redacted) {
-			return true
-		}
 	}
 	return false
 }
