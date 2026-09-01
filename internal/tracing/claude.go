@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/nobbettt/acta/internal/digest"
+	"github.com/nobbettt/acta/internal/reasoning"
 )
 
 // claudeMapper maps claude stream-json lines to spans: tool_use starts an
@@ -23,7 +24,7 @@ type claudeMapper struct {
 
 func (m *claudeMapper) onLine(r *Run, line []byte, at time.Time) {
 	var item digest.ClaudeItem
-	if json.Unmarshal(line, &item) != nil {
+	if reasoning.UnmarshalProviderLine(line, &item) != nil {
 		return
 	}
 	switch item.Type {
@@ -108,8 +109,10 @@ func (m *claudeMapper) onAssistantContent(r *Run, content *digest.ClaudeContent,
 		}
 	case "thinking":
 		if strings.TrimSpace(content.Thinking) != "" {
-			r.addTextEvent("acta.reasoning", content.Thinking, at)
+			r.addReasoningEvent(content.Thinking, at)
 		}
+	case "redacted_thinking":
+		r.addRedactedReasoningEvent(at)
 	}
 }
 

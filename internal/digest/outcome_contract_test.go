@@ -25,6 +25,28 @@ func TestCodexTurnFailedOverridesZeroExit(t *testing.T) {
 	}
 }
 
+func TestReconcileRecordCopiesFinalOTLPResultAndStampsCurrentSchema(t *testing.T) {
+	record := &runrecord.Record{
+		OK:                true,
+		TerminationReason: OutcomeCompleted,
+		OTLPStatus:        "failed",
+		OTLPError:         "flush failed",
+	}
+	d := &Digest{
+		SchemaVersion: MinSchemaVersion,
+		Status:        StatusOK,
+		OTLPStatus:    "exported",
+		Termination:   Termination{Outcome: OutcomeCompleted},
+	}
+
+	ReconcileRecord(record, d)
+
+	if d.SchemaVersion != SchemaVersion || d.OTLPStatus != record.OTLPStatus || d.OTLPError != record.OTLPError {
+		t.Fatalf("reconciled digest = schema %d, OTLP %q/%q; want schema %d, OTLP %q/%q",
+			d.SchemaVersion, d.OTLPStatus, d.OTLPError, SchemaVersion, record.OTLPStatus, record.OTLPError)
+	}
+}
+
 func TestClaudeUnderspecifiedResultIsProviderError(t *testing.T) {
 	d, err := parseClaude(strings.NewReader(`{"type":"result","session_id":"s-1"}`+"\n"), newWorkspace(""))
 	if err == nil || !strings.Contains(err.Error(), "recognized subtype") {
@@ -55,6 +77,39 @@ func TestNormalizeEventBoundsEveryFreeFormField(t *testing.T) {
 		if len(value) > MaxEventTextBytes {
 			t.Fatalf("%s retained %d bytes", name, len(value))
 		}
+	}
+}
+
+func TestProjectionBudgetIncludesLocalReasoning(t *testing.T) {
+	// Quotes exercise JSON expansion as well as the retained string bytes. The
+	// event stream must fit the same projection budget after reasoning is copied
+	// into its text field.
+	reasoning := strings.Repeat(`"`, MaxEventTextBytes)
+	d := &Digest{}
+	attempted := MaxProjectionBytes/MaxEventTextBytes + 256
+	for range attempted {
+		d.appendEvent(Event{Kind: KindReasoning, localReasoningText: reasoning})
+	}
+	if !d.Metrics.ProjectionTruncated || d.Metrics.DroppedEvents == 0 {
+		t.Fatalf("projection metrics = %+v, want dropped reasoning events", d.Metrics)
+	}
+	if d.projectionBytes > MaxProjectionBytes {
+		t.Fatalf("projection retained %d bytes, maximum is %d", d.projectionBytes, MaxProjectionBytes)
+	}
+
+	accounted := 0
+	for _, event := range d.Timeline {
+		eventBytes, err := eventProjectionBytes(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		accounted += eventBytes
+		if len(event.LocalReasoningText()) != MaxEventTextBytes {
+			t.Fatalf("reasoning event retained %d bytes, want %d", len(event.LocalReasoningText()), MaxEventTextBytes)
+		}
+	}
+	if accounted != d.projectionBytes {
+		t.Fatalf("accounted projection bytes = %d, digest tracks %d", accounted, d.projectionBytes)
 	}
 }
 

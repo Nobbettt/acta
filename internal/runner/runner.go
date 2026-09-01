@@ -51,6 +51,27 @@ const DefaultMaxWorkspaceDiffBytes int64 = 256 << 20
 
 const DefaultUploadTimeout = 2 * time.Minute
 
+const (
+	OTLPExportFailurePolicyBestEffort = "best-effort"
+	OTLPExportFailurePolicyRequired   = "required"
+	// TelemetryOnlyFailureExitCode is returned by the CLI when required OTLP
+	// setup or delivery fails. A setup failure can occur before an agent run or
+	// run record exists; otherwise launchers must also validate run.json before
+	// treating this code as a warning, because an agent process may
+	// independently use the same code.
+	TelemetryOnlyFailureExitCode = 86
+)
+
+var ErrTelemetryOnlyFailure = errors.New("required telemetry export failed")
+
+// Package variables keep final artifact writes fault-injectable in runner
+// tests. Production always uses the package implementations.
+var (
+	writeFinalDigest     = digest.Write
+	writeFinalEvents     = actaevents.WriteForRecordWithPrompt
+	writeFinalProjection = actaevents.WriteProjectionForRecord
+)
+
 // DefaultRunsDir is the workspace-relative bundle root shared by every
 // command that resolves a runs directory.
 const DefaultRunsDir = ".acta/runs"
@@ -77,25 +98,32 @@ type Options struct {
 	// MaxRawOutputBytes bounds stdout+stderr combined. Zero explicitly keeps
 	// full fidelity without a byte limit. Crossing a positive limit terminates
 	// the process tree and fails the run; it never silently truncates success.
-	MaxRawOutputBytes     int64
-	MaxWorkspaceDiffBytes int64
-	MaxUploadBytes        int64
-	Stream                bool
-	AgentWritableDirs     []string
-	CodexSandbox          string
-	ClaudePermissionMode  string
-	OTLPEndpoint          string
-	OTLPIncludeOutput     bool
-	OTLPBestEffort        bool
-	RunID                 string
-	BackendURL            string
-	ReportToken           string
-	ReportTokenEnv        string
-	OrganizationID        string
-	RepositoryID          string
-	ReportMode            string
-	RuntimeBundlePath     string
-	AllowInsecureHTTP     bool
+	MaxRawOutputBytes       int64
+	MaxWorkspaceDiffBytes   int64
+	MaxUploadBytes          int64
+	MaxRedactionLineBytes   int
+	Stream                  bool
+	AgentWritableDirs       []string
+	CodexSandbox            string
+	ClaudePermissionMode    string
+	OTLPEndpoint            string
+	OTLPIncludeOutput       bool
+	OTLPExportFailurePolicy string
+	// OTLPBestEffort is a deprecated programmatic compatibility switch. The
+	// default and the preferred explicit policy are both best-effort.
+	OTLPBestEffort                 bool
+	OTLPForceRoot                  bool
+	RedactReasoning                bool
+	AllowUnredactedRemoteReasoning bool
+	RunID                          string
+	BackendURL                     string
+	ReportToken                    string
+	ReportTokenEnv                 string
+	OrganizationID                 string
+	RepositoryID                   string
+	ReportMode                     string
+	RuntimeBundlePath              string
+	AllowInsecureHTTP              bool
 	// GitEvidenceExcludes are workspace-relative generated/control paths to
 	// omit in addition to the run's bundle root, which is always excluded so
 	// prior bundles never leak into captured evidence.
@@ -118,6 +146,9 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 	if opts.MaxUploadBytes < 0 {
 		return nil, fmt.Errorf("--max-upload-bytes must not be negative")
 	}
+	if opts.MaxRedactionLineBytes < 0 {
+		return nil, fmt.Errorf("--max-redaction-line-bytes must not be negative")
+	}
 	if err := validateGitEvidenceExcludes(opts.GitEvidenceExcludes); err != nil {
 		return nil, err
 	}
@@ -126,6 +157,18 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 	}
 	if err := validateRetainedContent(opts); err != nil {
 		return nil, err
+	}
+	otlpFailurePolicy, err := normalizeOTLPExportFailurePolicy(opts)
+	if err != nil {
+		return nil, err
+	}
+	otlpEndpointErr := tracing.EndpointConfigurationError(opts.OTLPEndpoint)
+	if otlpFailurePolicy == OTLPExportFailurePolicyRequired {
+		if reason := tracing.DeliveryUnavailableReasonWithForceRoot(opts.OTLPEndpoint, opts.OTLPForceRoot); reason != "" {
+			return nil, fmt.Errorf("--otlp-export-failure-policy required cannot deliver traces: %s", reason)
+		}
+	} else if otlpEndpointErr != nil {
+		fmt.Fprintf(stderr, "acta: OTLP export disabled: %v\n", otlpEndpointErr)
 	}
 
 	adapter, err := agents.Get(opts.Agent)
@@ -274,12 +317,18 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 	var tr *tracing.Run
 	otlpStatus := "not_configured"
 	otlpError := ""
+	var telemetryErr error
+	if otlpEndpointErr != nil {
+		otlpStatus = "failed"
+		otlpError = otlpEndpointErr.Error()
+	}
 	if tracing.Enabled(opts.OTLPEndpoint) {
 		otlpStatus = "configured"
 		traceStartedAt := time.Now().UTC()
 		tr, err = tracing.Setup(ctx, tracing.Config{
 			Endpoint:      opts.OTLPEndpoint,
 			IncludeOutput: opts.OTLPIncludeOutput,
+			ForceRoot:     opts.OTLPForceRoot,
 			RunID:         runID,
 			Agent:         adapter.Name(),
 			Provider:      adapter.Provider(),
@@ -288,11 +337,11 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 			StartedAt:     traceStartedAt,
 		})
 		if err != nil {
+			if otlpFailurePolicy == OTLPExportFailurePolicyRequired {
+				return nil, fmt.Errorf("%w during OTLP exporter setup: %w", ErrTelemetryOnlyFailure, err)
+			}
 			otlpStatus = "failed"
 			otlpError = err.Error()
-			if !opts.OTLPBestEffort {
-				return nil, fmt.Errorf("set up OTLP export: %w", err)
-			}
 			fmt.Fprintf(stderr, "acta: OTLP export disabled: %v\n", err)
 			tr = nil
 		}
@@ -330,6 +379,7 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 		ProcessContainment:      processContainmentName(),
 		AgentConfigMode:         configMode,
 		RuntimeBundleSHA256:     preparedRuntime.BundleSHA256,
+		ReasoningRedactionState: "retained_local",
 	}
 
 	cmd := exec.Command(spec.Path, spec.Args...)
@@ -439,20 +489,50 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 	record.OK = preview.OK
 	record.TerminationReason = preview.TerminationReason
 	record.Error = preview.Error
-	if err := tr.Finish(record, completedAt); err != nil {
-		fmt.Fprintf(stderr, "acta: OTLP flush failed: %v\n", err)
-		otlpStatus = "failed"
-		otlpError = err.Error()
-		record.TraceID = ""
-		if !opts.OTLPBestEffort {
-			runErr = errors.Join(runErr, fmt.Errorf("OTLP export failed: %w", err))
+
+	reasoningRedacted := false
+	if opts.RedactReasoning {
+		maxRedactionLineBytes := opts.MaxRedactionLineBytes
+		if maxRedactionLineBytes == 0 {
+			maxRedactionLineBytes = reporting.DefaultMaxRedactionLineBytes
 		}
-	} else if tr != nil {
-		otlpStatus = "exported"
+		redactionState, redactErr := redactReasoningRawStream(stagedStdoutPath, maxRedactionLineBytes)
+		if redactErr != nil {
+			// Treat redaction as a late Acta failure, but continue derivation and
+			// publication. A post-rename commit error is marked partial unless the
+			// pre-computed original hash verifies byte-identical retention.
+			record.ReasoningRedactionState = redactionState
+			if redactionState == "partial" {
+				redactErr = fmt.Errorf("reasoning redaction partially committed; original raw stream retention was not verified: %w", redactErr)
+			} else {
+				redactErr = fmt.Errorf("reasoning redaction failed; raw stream was not replaced or was hash-verified unchanged: %w", redactErr)
+			}
+			fmt.Fprintf(stderr, "acta: %v\n", redactErr)
+			runErr = errors.Join(runErr, redactErr)
+			FinalizeRecordOutcome(record, runErr)
+		} else {
+			record.ReasoningRedactionState = redactionState
+			reasoningRedacted = true
+		}
+	}
+
+	// Publication exposes an honest pre-flush state. The export result is not
+	// knowable until after the root span carries the publication outcome, so a
+	// sampled trace remains pending until Finish returns.
+	traceSampled := tr != nil && tr.Sampled()
+	if tr != nil {
+		if traceSampled {
+			otlpStatus = "pending"
+		} else {
+			otlpStatus = "not_sampled"
+			record.TraceID = ""
+			if otlpFailurePolicy == OTLPExportFailurePolicyRequired {
+				telemetryErr = errors.Join(telemetryErr, errors.New("required OTLP export did not deliver a trace because the root span was not sampled"))
+			}
+		}
 	}
 	record.OTLPStatus = otlpStatus
 	record.OTLPError = otlpError
-	FinalizeRecordOutcome(record, runErr)
 
 	if writeErr := WriteRecord(stagingDir, record); writeErr != nil {
 		runErr = errors.Join(runErr, writeErr)
@@ -462,9 +542,24 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 	if opts.CapturePrompt {
 		capturedPrompt = opts.Prompt
 	}
-	finalDigest, postErr := postRun(ctx, record, stagingDir, gitExcludes, opts.MaxWorkspaceDiffBytes, digester, capturedPrompt, stderr, runErr)
+	finalDigest, postErr := postRun(ctx, record, stagingDir, gitExcludes, opts.MaxWorkspaceDiffBytes, digester, capturedPrompt, reasoningRedacted, stderr, runErr)
 	if postErr != nil {
 		runErr = errors.Join(runErr, postErr)
+	}
+	finishTrace := func() {
+		if err := tr.Finish(record, completedAt); err != nil {
+			fmt.Fprintf(stderr, "acta: OTLP flush failed: %v\n", err)
+			otlpStatus = "failed"
+			otlpError = err.Error()
+			record.TraceID = ""
+			if otlpFailurePolicy == OTLPExportFailurePolicyRequired {
+				telemetryErr = errors.Join(telemetryErr, fmt.Errorf("required OTLP export failed during flush: %w", err))
+			}
+		} else if traceSampled {
+			otlpStatus = "exported"
+		}
+		record.OTLPStatus = otlpStatus
+		record.OTLPError = otlpError
 	}
 	if writeErr := WriteRecord(stagingDir, record); writeErr != nil {
 		runErr = errors.Join(runErr, writeErr)
@@ -480,7 +575,13 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 			runErr = errors.Join(runErr, remainingErr)
 			FinalizeRecordOutcome(record, runErr)
 			record.RecoveryDir = stagingDir
-			_ = WriteRecord(stagingDir, record)
+			finishTrace()
+			if rewriteErr := rewriteTelemetryArtifacts(stagingDir, record, finalDigest, capturedPrompt); rewriteErr != nil {
+				recordingErr := fmt.Errorf("record final recovery generation: %w", rewriteErr)
+				fmt.Fprintf(stderr, "acta: %v\n", recordingErr)
+				runErr = errors.Join(runErr, recordingErr)
+				FinalizeRecordOutcome(record, runErr)
+			}
 			stagingPublished = true
 			return record, fmt.Errorf("%w; incomplete bundle retained for recovery at %s", runErr, stagingDir)
 		}
@@ -489,32 +590,48 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 		runErr = errors.Join(runErr, err)
 		FinalizeRecordOutcome(record, runErr)
 		record.RecoveryDir = stagingDir
-		if rewriteErr := rewriteRecoveryArtifacts(stagingDir, record, finalDigest, capturedPrompt, stderr); rewriteErr != nil {
-			runErr = errors.Join(runErr, rewriteErr)
+		finishTrace()
+		if rewriteErr := rewriteTelemetryArtifacts(stagingDir, record, finalDigest, capturedPrompt); rewriteErr != nil {
+			recordingErr := fmt.Errorf("record final recovery generation: %w", rewriteErr)
+			fmt.Fprintf(stderr, "acta: %v\n", recordingErr)
+			runErr = errors.Join(runErr, recordingErr)
+			FinalizeRecordOutcome(record, runErr)
 		}
 		stagingPublished = true // retain the protected, recoverable staging bundle
 		return record, fmt.Errorf("%w; completed bundle retained at %s", runErr, stagingDir)
 	}
 	published, publishErr := publishBundle(stagingDir, runDir)
+	finalBundleDir := runDir
 	if publishErr != nil {
 		runErr = errors.Join(runErr, fmt.Errorf("publish run bundle: %w", publishErr))
 		FinalizeRecordOutcome(record, runErr)
-		if published {
-			record.RecoveryDir = ""
-			if rewriteErr := rewriteRecoveryArtifacts(runDir, record, finalDigest, capturedPrompt, stderr); rewriteErr != nil {
-				runErr = errors.Join(runErr, rewriteErr)
-			}
-			stagingPublished = true
-			return record, fmt.Errorf("%w; bundle was published at %s but durability confirmation failed", runErr, runDir)
+		if !published {
+			record.RecoveryDir = stagingDir
+			finalBundleDir = stagingDir
 		}
-		record.RecoveryDir = stagingDir
-		if rewriteErr := rewriteRecoveryArtifacts(stagingDir, record, finalDigest, capturedPrompt, stderr); rewriteErr != nil {
-			runErr = errors.Join(runErr, rewriteErr)
-		}
-		stagingPublished = true // publication leaves staging intact on failure
-		return record, fmt.Errorf("%w; completed bundle retained at %s", runErr, stagingDir)
 	}
 	stagingPublished = true
+	// The root span now observes the settled publication result. Its delivery
+	// result and the publication state are reconciled into one locked generation
+	// commit; a failed commit is a local recording failure under every telemetry
+	// delivery policy.
+	finishTrace()
+	var recordingErr error
+	if err := rewriteTelemetryArtifacts(finalBundleDir, record, finalDigest, capturedPrompt); err != nil {
+		recordingErr = fmt.Errorf("record final telemetry generation: %w", err)
+		fmt.Fprintf(stderr, "acta: %v\n", recordingErr)
+		runErr = errors.Join(runErr, recordingErr)
+		FinalizeRecordOutcome(record, runErr)
+	}
+	if publishErr != nil {
+		if published {
+			return record, fmt.Errorf("%w; bundle was published at %s but durability confirmation failed", runErr, runDir)
+		}
+		return record, fmt.Errorf("%w; completed bundle retained at %s", runErr, stagingDir)
+	}
+	if recordingErr != nil {
+		return record, runErr
+	}
 	if reportMode(opts) == "hybrid" {
 		reportCtx := ctx
 		cancel := func() {}
@@ -523,12 +640,14 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 		}
 		defer cancel()
 		if err := reporting.UploadRun(reportCtx, reporting.Config{
-			BackendURL:        opts.BackendURL,
-			ReportToken:       opts.ReportToken,
-			OrganizationID:    opts.OrganizationID,
-			RepositoryID:      opts.RepositoryID,
-			AllowInsecureHTTP: opts.AllowInsecureHTTP,
-			MaxUploadBytes:    opts.MaxUploadBytes,
+			BackendURL:                     opts.BackendURL,
+			ReportToken:                    opts.ReportToken,
+			OrganizationID:                 opts.OrganizationID,
+			RepositoryID:                   opts.RepositoryID,
+			AllowInsecureHTTP:              opts.AllowInsecureHTTP,
+			MaxUploadBytes:                 opts.MaxUploadBytes,
+			MaxRedactionLineBytes:          opts.MaxRedactionLineBytes,
+			AllowUnredactedRemoteReasoning: opts.AllowUnredactedRemoteReasoning,
 		}, record); err != nil {
 			err = fmt.Errorf("upload report: %w", err)
 			fmt.Fprintf(stderr, "acta: %v\n", err)
@@ -541,10 +660,35 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 			fmt.Fprintf(stderr, "acta: uploaded run report to %s\n", strings.TrimRight(opts.BackendURL, "/"))
 		}
 	}
+	if telemetryErr != nil {
+		if runErr == nil && record.OK {
+			return record, fmt.Errorf("%w: %v", ErrTelemetryOnlyFailure, telemetryErr)
+		}
+		runErr = errors.Join(runErr, telemetryErr)
+	}
 	if runErr != nil {
 		return record, runErr
 	}
 	return record, nil
+}
+
+func normalizeOTLPExportFailurePolicy(opts Options) (string, error) {
+	policy := strings.ToLower(strings.TrimSpace(opts.OTLPExportFailurePolicy))
+	if policy != "" && policy != OTLPExportFailurePolicyBestEffort && policy != OTLPExportFailurePolicyRequired {
+		return "", fmt.Errorf("--otlp-export-failure-policy must be %q or %q", OTLPExportFailurePolicyBestEffort, OTLPExportFailurePolicyRequired)
+	}
+	if opts.OTLPBestEffort && policy == OTLPExportFailurePolicyRequired {
+		return "", fmt.Errorf("--otlp-best-effort cannot be combined with --otlp-export-failure-policy=%s", OTLPExportFailurePolicyRequired)
+	}
+	if policy == "" || opts.OTLPBestEffort {
+		policy = OTLPExportFailurePolicyBestEffort
+	}
+	switch policy {
+	case OTLPExportFailurePolicyBestEffort, OTLPExportFailurePolicyRequired:
+		return policy, nil
+	default:
+		return "", fmt.Errorf("--otlp-export-failure-policy must be %q or %q", OTLPExportFailurePolicyBestEffort, OTLPExportFailurePolicyRequired)
+	}
 }
 
 // rejectProjectCodexConfig prevents a repository-local Codex config layer from
@@ -600,7 +744,7 @@ func verifyCompleteBundle(bundleDir string, record *runrecord.Record) error {
 // postRun captures derived evidence into artifactDir. artifactDir remains
 // private staging until every final/failed artifact has been generated; the
 // caller publishes the complete directory atomically afterwards.
-func postRun(ctx context.Context, record *runrecord.Record, artifactDir string, gitExcludes []string, maxWorkspaceDiffBytes int64, digester *digest.StreamDigester, capturedPrompt string, stderr io.Writer, priorErr error) (*digest.Digest, error) {
+func postRun(ctx context.Context, record *runrecord.Record, artifactDir string, gitExcludes []string, maxWorkspaceDiffBytes int64, digester *digest.StreamDigester, capturedPrompt string, redactReasoning bool, stderr io.Writer, priorErr error) (*digest.Digest, error) {
 	var postErr error
 	refreshOutcome := func() {
 		FinalizeRecordOutcome(record, errors.Join(priorErr, postErr))
@@ -659,23 +803,30 @@ func postRun(ctx context.Context, record *runrecord.Record, artifactDir string, 
 	// Finalize AFTER the diff is written so HasWorkspaceDiff sees it. No
 	// re-decode of the raw stream, no sidecar re-read — times are already set.
 	d := digester.Finalize(record, artifactDir)
+	if redactReasoning && !digest.RedactReasoning(d) {
+		err := errors.New("reasoning redaction could not verify normalized digest payload")
+		record.ReasoningRedactionState = "failed"
+		fmt.Fprintf(stderr, "acta: %v\n", err)
+		postErr = errors.Join(postErr, err)
+		refreshOutcome()
+	}
 	digest.ReconcileRecord(record, d)
 	if !record.OK && priorErr == nil && postErr == nil {
 		postErr = errors.New(record.Error)
 	}
-	if err := digest.Write(artifactDir, d); err != nil {
+	if err := writeFinalDigest(artifactDir, d); err != nil {
 		fmt.Fprintf(stderr, "acta: write digest failed: %v\n", err)
 		postErr = errors.Join(postErr, fmt.Errorf("write digest: %w", err))
 		refreshOutcome()
 		digest.ReconcileRecord(record, d)
 	}
 	writeCurrentRecord()
-	if err := actaevents.WriteForRecordWithPrompt(artifactDir, record, d, capturedPrompt); err != nil {
+	if err := writeFinalEvents(artifactDir, record, d, capturedPrompt); err != nil {
 		fmt.Fprintf(stderr, "acta: write events failed: %v\n", err)
 		postErr = errors.Join(postErr, fmt.Errorf("write events: %w", err))
 		refreshOutcome()
 		digest.ReconcileRecord(record, d)
-		if rewriteErr := digest.Write(artifactDir, d); rewriteErr != nil {
+		if rewriteErr := writeFinalDigest(artifactDir, d); rewriteErr != nil {
 			postErr = errors.Join(postErr, fmt.Errorf("rewrite digest after event failure: %w", rewriteErr))
 		}
 		writeCurrentRecord()
@@ -687,7 +838,7 @@ func rewriteRecoveryArtifacts(bundleDir string, record *runrecord.Record, d *dig
 	var rewriteErr error
 	if d != nil {
 		digest.ReconcileRecord(record, d)
-		if err := digest.Write(bundleDir, d); err != nil {
+		if err := writeFinalDigest(bundleDir, d); err != nil {
 			fmt.Fprintf(stderr, "acta: rewrite recovery digest failed: %v\n", err)
 			rewriteErr = errors.Join(rewriteErr, fmt.Errorf("rewrite recovery digest: %w", err))
 		}
@@ -701,12 +852,12 @@ func rewriteRecoveryArtifacts(bundleDir string, record *runrecord.Record, d *dig
 		rewriteErr = errors.Join(rewriteErr, fmt.Errorf("rewrite recovery run record: %w", err))
 	}
 	if d != nil {
-		if err := actaevents.WriteForRecordWithPrompt(bundleDir, record, d, capturedPrompt); err != nil {
+		if err := writeFinalEvents(bundleDir, record, d, capturedPrompt); err != nil {
 			fmt.Fprintf(stderr, "acta: rewrite recovery events failed: %v\n", err)
 			rewriteErr = errors.Join(rewriteErr, fmt.Errorf("rewrite recovery events: %w", err))
 			FinalizeRecordOutcome(record, errors.Join(errors.New(record.Error), rewriteErr))
 			digest.ReconcileRecord(record, d)
-			if digestErr := digest.Write(bundleDir, d); digestErr != nil {
+			if digestErr := writeFinalDigest(bundleDir, d); digestErr != nil {
 				rewriteErr = errors.Join(rewriteErr, fmt.Errorf("rewrite final recovery digest: %w", digestErr))
 			}
 			if recordErr := WriteRecord(bundleDir, record); recordErr != nil {
@@ -715,6 +866,13 @@ func rewriteRecoveryArtifacts(bundleDir string, record *runrecord.Record, d *dig
 		}
 	}
 	return rewriteErr
+}
+
+func rewriteTelemetryArtifacts(bundleDir string, record *runrecord.Record, d *digest.Digest, capturedPrompt string) error {
+	if err := writeFinalProjection(bundleDir, record, d, capturedPrompt); err != nil {
+		return fmt.Errorf("commit reconciled projection: %w", err)
+	}
+	return nil
 }
 
 // FinalizeRecordOutcome applies runner/Acta failures without overwriting a
@@ -776,16 +934,9 @@ func validateGitEvidenceExcludes(values []string) error {
 }
 
 func WriteRecord(runDir string, record *runrecord.Record) error {
-	if err := record.Validate(); err != nil {
-		return fmt.Errorf("validate run record: %w", err)
-	}
-	payload, err := json.MarshalIndent(record, "", "  ")
+	payload, err := runrecord.MarshalFile(record)
 	if err != nil {
-		return fmt.Errorf("marshal run record: %w", err)
-	}
-	payload = append(payload, '\n')
-	if int64(len(payload)) > runrecord.MaxRecordBytes {
-		return fmt.Errorf("run record exceeds %d-byte limit", runrecord.MaxRecordBytes)
+		return err
 	}
 	path := filepath.Join(runDir, "run.json")
 	if err := securefile.WriteFile(path, payload); err != nil {
@@ -832,7 +983,21 @@ func reportMode(opts Options) string {
 }
 
 func agentEnvironment(opts Options) []string {
-	return environmentWithoutKeys(os.Environ(), opts.ReportTokenEnv)
+	return prepareAgentEnvironment(os.Environ(), opts.ReportTokenEnv)
+}
+
+func prepareAgentEnvironment(environment []string, reportTokenEnv string) []string {
+	reportTokenEnv = strings.TrimSpace(reportTokenEnv)
+	filtered := make([]string, 0, len(environment))
+	for _, entry := range environment {
+		key, _, valid := strings.Cut(entry, "=")
+		if valid && reportTokenEnv != "" && key == reportTokenEnv ||
+			strings.HasPrefix(strings.ToUpper(strings.TrimSpace(key)), "OTEL_") {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
 }
 
 func probeAgentVersion(ctx context.Context, adapter agents.Adapter, spec agents.CommandSpec, environment []string) (string, error) {
@@ -930,31 +1095,6 @@ func pathContains(root string, candidate string) (bool, error) {
 		return false, fmt.Errorf("compare agent writable directory boundaries: %w", err)
 	}
 	return relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative)), nil
-}
-
-func environmentWithoutKeys(env []string, keys ...string) []string {
-	blocked := make(map[string]struct{}, len(keys))
-	for _, key := range keys {
-		key = strings.TrimSpace(key)
-		if key != "" {
-			blocked[key] = struct{}{}
-		}
-	}
-	if len(blocked) == 0 {
-		return append([]string(nil), env...)
-	}
-
-	filtered := make([]string, 0, len(env))
-	for _, entry := range env {
-		key, _, ok := strings.Cut(entry, "=")
-		if ok {
-			if _, found := blocked[key]; found {
-				continue
-			}
-		}
-		filtered = append(filtered, entry)
-	}
-	return filtered
 }
 
 func taskTitle(opts Options) string {

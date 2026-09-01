@@ -1,6 +1,8 @@
 package runrecord
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -32,6 +34,86 @@ func validRecord() Record {
 		OTLPStatus:         "not_configured",
 		ProcessContainment: "posix_process_group",
 		AgentConfigMode:    "ambient_ephemeral",
+	}
+}
+
+func TestParseVersionedOTLPStatus(t *testing.T) {
+	tests := []struct {
+		name          string
+		schemaVersion int
+		otlpStatus    string
+		wantError     bool
+	}{
+		{name: "v2 record", schemaVersion: 2, otlpStatus: "not_configured"},
+		{name: "v3 not sampled", schemaVersion: 3, otlpStatus: "not_sampled"},
+		{name: "v3 pending", schemaVersion: 3, otlpStatus: "pending"},
+		{name: "v2 rejects not sampled", schemaVersion: 2, otlpStatus: "not_sampled", wantError: true},
+		{name: "v2 rejects pending", schemaVersion: 2, otlpStatus: "pending", wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			record := validRecord()
+			record.SchemaVersion = test.schemaVersion
+			record.OTLPStatus = test.otlpStatus
+			if test.otlpStatus == "pending" {
+				record.TraceID = "0123456789abcdef0123456789abcdef"
+			}
+			payload, err := json.Marshal(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var parsed Record
+			if err := json.Unmarshal(payload, &parsed); err != nil {
+				t.Fatal(err)
+			}
+			err = parsed.Validate()
+			if test.wantError && err == nil {
+				t.Fatal("versioned parser accepted incompatible OTLP status")
+			}
+			if !test.wantError && err != nil {
+				t.Fatalf("versioned parser rejected record: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateVersionGatesV3Fields(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+		edit  func(*Record)
+	}{
+		{
+			name:  "reasoning redaction state",
+			field: "reasoning_redaction_state",
+			edit:  func(record *Record) { record.ReasoningRedactionState = "redacted" },
+		},
+		{
+			name:  "published bundle",
+			field: "published_bundle",
+			edit: func(record *Record) {
+				record.PublishedBundle = &PublishedBundle{ArtifactID: "bundle-1", SHA256: strings.Repeat("a", 64)}
+			},
+		},
+	}
+	for _, test := range tests {
+		for _, schemaVersion := range []int{2, 3} {
+			t.Run(fmt.Sprintf("%s/v%d", test.name, schemaVersion), func(t *testing.T) {
+				record := validRecord()
+				record.SchemaVersion = schemaVersion
+				test.edit(&record)
+				err := record.Validate()
+				if schemaVersion == 2 {
+					if err == nil || !strings.Contains(err.Error(), test.field) {
+						t.Fatalf("Validate() error = %v, want unsupported %s", err, test.field)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("Validate() rejected v3 %s: %v", test.field, err)
+				}
+			})
+		}
 	}
 }
 

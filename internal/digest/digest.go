@@ -18,12 +18,15 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/nobbettt/acta/internal/contextio"
+	"github.com/nobbettt/acta/internal/reasoning"
 	"github.com/nobbettt/acta/internal/runrecord"
+	"github.com/nobbettt/acta/internal/schemaversion"
 	"github.com/nobbettt/acta/internal/securefile"
 )
 
 const (
-	SchemaVersion    = 2
+	SchemaVersion    = 3
 	MinSchemaVersion = 2
 
 	OutcomeCompleted   = "completed"
@@ -51,7 +54,7 @@ const MaxEventInputChars = 8_000
 
 // MaxEventTextBytes bounds every free-form normalized string. Raw provider
 // streams remain the full-fidelity evidence source.
-const MaxEventTextBytes = 64 << 10
+const MaxEventTextBytes = reasoning.MaxTextBytes
 
 // Projection limits prevent an arbitrarily long provider stream from being
 // retained in memory twice (as Digest and then as encoded Acta events).
@@ -135,6 +138,8 @@ type Event struct {
 	OutputChars     int                    `json:"output_chars,omitempty"`
 	OutputTruncated bool                   `json:"output_truncated,omitempty"`
 	Text            string                 `json:"text,omitempty"`
+	TextChars       int                    `json:"text_chars,omitempty"`
+	TextTruncated   bool                   `json:"text_truncated,omitempty"`
 	Query           string                 `json:"query,omitempty"`
 	Action          json.RawMessage        `json:"action,omitempty"`
 	Files           []string               `json:"files,omitempty"`
@@ -146,12 +151,131 @@ type Event struct {
 	FilePatchErrors []string               `json:"file_patch_errors,omitempty"`
 	Details         json.RawMessage        `json:"details,omitempty"`
 	RawEventLines   []int                  `json:"raw_event_lines,omitempty"`
+	Redacted        bool                   `json:"redacted,omitempty"`
 
 	srcLine       int // raw JSONL line that produced this event, for the sidecar join
 	inputFilePath string
 	inputPath     string
 	completedLine int
 	fileSnapshots []fileWriteSnapshot
+	// localReasoningText is deliberately excluded from digest serialization.
+	// It exists only long enough to build the local normalized event stream.
+	localReasoningText string
+}
+
+// LocalReasoningText returns provider-private reasoning for the local event
+// projection. Callers must never use it for telemetry, digests, summaries, or
+// evaluation inputs.
+func (e Event) LocalReasoningText() string {
+	return e.localReasoningText
+}
+
+// RedactReasoning removes provider-private reasoning from the in-memory local
+// projection before a redacted bundle is persisted. Structural events and raw
+// line references remain intact. It reports whether every payload was safely
+// inspected; unverifiable payloads are still conservatively masked.
+func RedactReasoning(d *Digest) bool {
+	if d == nil {
+		return true
+	}
+	verified := true
+	for i := range d.Timeline {
+		event := &d.Timeline[i]
+		if isReasoningEvent(*event) {
+			redactEventPayload(event)
+			continue
+		}
+		if isKnownEventKind(event.Kind) {
+			details, changed, detailsVerified := redactEventDetails(event.Kind, event.ProviderEvent, event.Details)
+			verified = detailsVerified && verified
+			if changed {
+				event.Details = details
+				event.Redacted = true
+			}
+			continue
+		}
+		redactEventPayload(event)
+		event.Details = json.RawMessage(`"` + reasoning.RedactedMarker + `"`)
+	}
+	return verified
+}
+
+func redactEventPayload(event *Event) {
+	event.Redacted = true
+	event.Text = ""
+	event.localReasoningText = ""
+	event.Input = nil
+	event.Result = nil
+	event.Command = ""
+	event.ErrorMessage = ""
+	event.Output = ""
+	event.Query = ""
+	event.Action = nil
+	event.Details = nil
+}
+
+func isReasoningEvent(event Event) bool {
+	if event.Kind == KindReasoning {
+		return true
+	}
+	var details struct {
+		Type string `json:"type"`
+	}
+	if len(event.Details) > 0 {
+		if err := reasoning.ValidateUniqueObjectKeys(event.Details); err != nil {
+			return false
+		}
+		_ = json.Unmarshal(event.Details, &details)
+	}
+	return reasoning.IsNormalizedEvent(event.Kind, event.ProviderEvent, details.Type)
+}
+
+func isKnownEventKind(kind string) bool {
+	switch kind {
+	case KindToolCall, KindToolResult, KindCommand, KindMessage, KindUserInput,
+		KindReasoning, KindFileEdit, KindTodo, KindWebSearch, KindTask,
+		KindPermission, KindRuntime, KindLifecycle, KindRateLimit,
+		KindStructuredOutput, KindError, KindUnsupported:
+		return true
+	default:
+		return false
+	}
+}
+
+// redactEventDetails retains inspectable normalized details while applying the
+// shared exact and generic reasoning passes to raw-backed payloads regardless
+// of whether their event kind is known. Unverifiable details are replaced with
+// an explicit marker and reported to the caller.
+func redactEventDetails(kind, providerEvent string, raw json.RawMessage) (json.RawMessage, bool, bool) {
+	if len(raw) == 0 {
+		return raw, false, true
+	}
+	var value any
+	if err := reasoning.UnmarshalValue(raw, &value); err != nil {
+		return json.RawMessage(`"` + reasoning.RedactedMarker + `"`), true, false
+	}
+	payload := map[string]any{
+		"kind":           kind,
+		"provider_event": providerEvent,
+		"details":        value,
+	}
+	var changed, verified bool
+	if kind == KindUnsupported {
+		_, changed, verified = reasoning.RedactUnsupportedPayload(payload)
+	} else {
+		changed, verified = reasoning.RedactValue(payload, reasoning.NormalizedTraversal(""))
+	}
+	if !verified {
+		return json.RawMessage(`"` + reasoning.RedactedMarker + `"`), true, false
+	}
+	if !changed {
+		return raw, false, true
+	}
+	redacted, err := json.Marshal(payload["details"])
+	if err != nil {
+		return json.RawMessage(`"` + reasoning.RedactedMarker + `"`), true, false
+	}
+	return redacted, true, true
 }
 
 type FileMutation struct {
@@ -279,6 +403,49 @@ type Digest struct {
 
 	projectionBytes      int
 	projectionLimitBytes int
+	presentV3Fields      []string
+}
+
+// UnmarshalJSON retains explicit v3-only field presence even when omitempty
+// would hide a decoded false or zero value during validation.
+func (d *Digest) UnmarshalJSON(data []byte) error {
+	type plainDigest Digest
+	var decoded plainDigest
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	fields, err := schemaversion.PresentV3OnlyFieldsJSON(schemaversion.Digest, data)
+	if err != nil {
+		return err
+	}
+	*d = Digest(decoded)
+	d.presentV3Fields = fields
+	return nil
+}
+
+// Validate checks the versioned fields that readers must interpret before
+// using a persisted digest. Schema v3 adds not_sampled without changing the
+// closed v2 OTLP status vocabulary.
+func (d *Digest) Validate() error {
+	if d == nil {
+		return fmt.Errorf("digest is nil")
+	}
+	if d.SchemaVersion < MinSchemaVersion || d.SchemaVersion > SchemaVersion {
+		return fmt.Errorf("unsupported digest schema_version %d (supported %d..%d)", d.SchemaVersion, MinSchemaVersion, SchemaVersion)
+	}
+	if !runrecord.SupportsV3Fields(d.SchemaVersion) {
+		field, found, err := schemaversion.FirstPresentV3OnlyField(schemaversion.Digest, d, d.presentV3Fields)
+		if err != nil {
+			return fmt.Errorf("inspect digest versioned fields: %w", err)
+		}
+		if found {
+			return fmt.Errorf("digest schema_version %d does not support %s", d.SchemaVersion, field)
+		}
+	}
+	if d.OTLPStatus != "" && !runrecord.SupportsOTLPStatus(d.SchemaVersion, d.OTLPStatus) {
+		return fmt.Errorf("digest schema_version %d has invalid otlp_status %q", d.SchemaVersion, d.OTLPStatus)
+	}
+	return nil
 }
 
 func (d *Digest) projectionLimit() int {
@@ -290,15 +457,36 @@ func (d *Digest) projectionLimit() int {
 
 func (d *Digest) appendEvent(event Event) bool {
 	normalizeEvent(&event)
-	encoded, err := json.Marshal(event)
-	if err != nil || len(d.Timeline) >= MaxTimelineEvents || d.projectionBytes+len(encoded) > d.projectionLimit() {
+	eventBytes, err := eventProjectionBytes(event)
+	if err != nil || len(d.Timeline) >= MaxTimelineEvents || d.projectionBytes+eventBytes > d.projectionLimit() {
 		d.Metrics.DroppedEvents++
 		d.Metrics.ProjectionTruncated = true
 		return false
 	}
-	d.projectionBytes += len(encoded)
+	d.projectionBytes += eventBytes
 	d.Timeline = append(d.Timeline, event)
 	return true
+}
+
+// eventProjectionBytes accounts for the encoded event plus local-only
+// reasoning exactly as if that text occupied the normalized event's text
+// field. Reasoning is excluded from digest JSON, but it is retained in memory
+// and copied into the local Acta event stream, so it shares the same projection
+// budget as every other retained string.
+func eventProjectionBytes(event Event) (int, error) {
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		return 0, err
+	}
+	size := len(encoded)
+	if event.localReasoningText != "" {
+		reasoning, err := json.Marshal(event.localReasoningText)
+		if err != nil {
+			return 0, err
+		}
+		size += len(`,"text":`) + len(reasoning)
+	}
+	return size, nil
 }
 
 func normalizeEvent(event *Event) {
@@ -306,9 +494,20 @@ func normalizeEvent(event *Event) {
 	for _, value := range []*string{
 		&event.ProviderEvent, &event.ID, &event.ParentID, &event.ThreadID, &event.SessionID,
 		&event.TaskID, &event.Phase, &event.Status, &event.Visibility, &event.Tool,
-		&event.Server, &event.Command, &event.ErrorMessage, &event.Output, &event.Text, &event.Query,
+		&event.Server, &event.Command, &event.ErrorMessage, &event.Output, &event.Query,
 	} {
 		capString(value)
+	}
+	if event.Redacted && event.Kind == KindReasoning {
+		// A re-digested redacted block may carry the original metadata stamped
+		// by the raw-stream redactor. Never replace it with marker metadata.
+		event.Text = ""
+		event.localReasoningText = ""
+	} else {
+		event.Text, event.TextChars, event.TextTruncated = capText(event.Text)
+		if event.localReasoningText != "" {
+			event.localReasoningText, event.TextChars, event.TextTruncated = capText(event.localReasoningText)
+		}
 	}
 	event.Input = capInput(event.Input)
 	event.Result = capInput(event.Result)
@@ -426,8 +625,8 @@ func ResolveOutcome(record *runrecord.Record, d *Digest) OutcomeResolution {
 	return result
 }
 
-// ReconcileRecord applies ResolveOutcome to the record before run.json and
-// terminal Acta events are written.
+// ReconcileRecord applies ResolveOutcome and settled record metadata before
+// digest.json, run.json, and terminal Acta events are written.
 func ReconcileRecord(record *runrecord.Record, d *Digest) {
 	if record == nil {
 		return
@@ -437,6 +636,9 @@ func ReconcileRecord(record *runrecord.Record, d *Digest) {
 	record.TerminationReason = resolved.TerminationReason
 	record.Error = resolved.Error
 	if d != nil {
+		d.SchemaVersion = SchemaVersion
+		d.OTLPStatus = record.OTLPStatus
+		d.OTLPError = record.OTLPError
 		d.Status = resolved.Status
 		d.Error = resolved.Error
 		d.Termination.RunnerReason = resolved.TerminationReason
@@ -500,13 +702,13 @@ func FromRunDirContext(ctx context.Context, runDir string, workspaceDir string) 
 	}
 	defer raw.Close()
 
-	d, parseErr := parse(contextReader{ctx: ctx, reader: raw}, ws)
+	d, parseErr := parse(contextio.Reader{Context: ctx, Reader: raw}, ws)
 	if d == nil {
 		return nil, parseErr // fatal: unreadable stream or unknown structure
 	}
 	applyRecord(d, &record, runDir)
 	// Re-digestion is a new Acta-owned projection even when the execution
-	// record already uses schema v2. Attribute the derived artifacts to the
+	// record already uses a supported published schema. Attribute the derived artifacts to the
 	// binary performing this projection, never to the historical producer.
 	d.Producer = runrecord.CurrentProducer()
 	markUnavailableFilePatches(d)
@@ -525,18 +727,6 @@ func FromRunDirContext(ctx context.Context, runDir string, workspaceDir string) 
 		return d, err
 	}
 	return d, nil
-}
-
-type contextReader struct {
-	ctx    context.Context
-	reader io.Reader
-}
-
-func (r contextReader) Read(payload []byte) (int, error) {
-	if err := r.ctx.Err(); err != nil {
-		return 0, err
-	}
-	return r.reader.Read(payload)
 }
 
 // applyRecord stamps run-record metadata and the assembled file summary onto a
@@ -685,14 +875,14 @@ func (sd *StreamDigester) Line(raw []byte, at time.Time) {
 	switch {
 	case sd.codex != nil:
 		var event CodexEvent
-		if err := json.Unmarshal(raw, &event); err != nil {
+		if err := reasoning.UnmarshalProviderLine(raw, &event); err != nil {
 			sd.codex.d.countParseError(raw)
 			return
 		}
 		sd.codex.consume(&event, sd.lineNo, at)
 	case sd.claude != nil:
 		var item ClaudeItem
-		if err := json.Unmarshal(raw, &item); err != nil {
+		if err := reasoning.UnmarshalProviderLine(raw, &item); err != nil {
 			sd.claude.d.countParseError(raw)
 			return
 		}
@@ -736,18 +926,41 @@ func (sd *StreamDigester) Finalize(record *runrecord.Record, runDir string) *Dig
 
 // Write serializes the digest to digest.json inside the run bundle.
 func Write(runDir string, d *Digest) error {
-	payload, err := json.MarshalIndent(d, "", "  ")
+	payload, err := MarshalFile(d)
 	if err != nil {
-		return fmt.Errorf("marshal digest: %w", err)
-	}
-	if len(payload)+1 > MaxDigestBytes {
-		return fmt.Errorf("digest is %d bytes; maximum is %d", len(payload)+1, MaxDigestBytes)
+		return err
 	}
 	path := filepath.Join(runDir, "digest.json")
-	if err := securefile.WriteFile(path, append(payload, '\n')); err != nil {
+	if err := securefile.WriteFile(path, payload); err != nil {
 		return fmt.Errorf("write digest: %w", err)
 	}
 	return nil
+}
+
+// MarshalFile returns the bounded bytes written to digest.json.
+func MarshalFile(d *Digest) ([]byte, error) {
+	payload, err := MarshalEvaluation(d)
+	if err != nil {
+		return nil, fmt.Errorf("marshal digest: %w", err)
+	}
+	payload = append(payload, '\n')
+	if len(payload) > MaxDigestBytes {
+		return nil, fmt.Errorf("digest is %d bytes; maximum is %d", len(payload), MaxDigestBytes)
+	}
+	return payload, nil
+}
+
+// MarshalEvaluation serializes the structural/evaluation view of a digest.
+// Provider-private reasoning text is removed even when the input originated
+// from an older in-memory or decoded digest representation.
+func MarshalEvaluation(d *Digest) ([]byte, error) {
+	if d == nil {
+		return nil, fmt.Errorf("digest is nil")
+	}
+	copy := *d
+	copy.Timeline = append([]Event(nil), d.Timeline...)
+	RedactReasoning(&copy)
+	return json.MarshalIndent(&copy, "", "  ")
 }
 
 func statusFromRecord(record runrecord.Record) string {
@@ -862,7 +1075,7 @@ func applyEventTimesContext(ctx context.Context, runDir string, timeline []Event
 
 	times := make(map[int]time.Time, len(wanted))
 	var parseErr error
-	if err := forEachLine(contextReader{ctx: ctx, reader: f}, func(_ int, line []byte) {
+	if err := forEachLine(contextio.Reader{Context: ctx, Reader: f}, func(_ int, line []byte) {
 		if parseErr != nil {
 			return
 		}
@@ -915,6 +1128,13 @@ func Truncate(s string, limit int) string {
 // size in characters. The field is output_chars, so count runes, not bytes.
 func capOutput(text string) (string, int) {
 	return Truncate(text, MaxEventOutputChars), utf8.RuneCountInString(text)
+}
+
+// capText applies the normalized free-text byte limit while preserving the
+// original character count and an explicit structural truncation marker.
+func capText(text string) (string, int, bool) {
+	bounded := Truncate(text, MaxEventTextBytes)
+	return bounded, utf8.RuneCountInString(text), len(bounded) < len(text)
 }
 
 func setEventOutput(event *Event, text string) {

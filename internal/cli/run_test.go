@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -98,6 +99,90 @@ func TestExecuteRunEndToEnd(t *testing.T) {
 				t.Errorf("first event = %#v, want captured prompt %q", promptEvent, c.wantPrompt)
 			}
 		})
+	}
+}
+
+func TestExecuteRunUsesDistinctTelemetryOnlyExitCode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agent requires /bin/sh")
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(fakeCodexScript(
+		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n",
+	)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	runsDir := filepath.Join(t.TempDir(), "runs")
+	var stderr bytes.Buffer
+	code := Execute(context.Background(), []string{
+		"run", "--agent", "codex", "--prompt", "test", "--runs-dir", runsDir,
+		"--otlp-endpoint", "http://127.0.0.1:1/v1/traces",
+		"--otlp-export-failure-policy", "required",
+	}, strings.NewReader(""), io.Discard, &stderr)
+	if code != runner.TelemetryOnlyFailureExitCode {
+		t.Fatalf("exit code = %d, want %d; stderr=%q", code, runner.TelemetryOnlyFailureExitCode, stderr.String())
+	}
+	records, err := filepath.Glob(filepath.Join(runsDir, "*", "run.json"))
+	if err != nil || len(records) != 1 {
+		t.Fatalf("run records = %#v, err=%v", records, err)
+	}
+	var record struct {
+		OK         bool   `json:"ok"`
+		OTLPStatus string `json:"otlp_status"`
+	}
+	payload, err := os.ReadFile(records[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(payload, &record); err != nil {
+		t.Fatal(err)
+	}
+	if !record.OK || record.OTLPStatus != "failed" {
+		t.Fatalf("run record = %#v, want successful outcome plus OTLP failure", record)
+	}
+}
+
+func TestExecuteRunRejectsConflictingOTLPPolicyFlagsAtStartup(t *testing.T) {
+	var stderr bytes.Buffer
+	code := Execute(context.Background(), []string{
+		"run", "--otlp-best-effort", "--otlp-export-failure-policy", "required",
+	}, strings.NewReader(""), io.Discard, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "--otlp-best-effort") || !strings.Contains(stderr.String(), "--otlp-export-failure-policy") {
+		t.Fatalf("exit = %d, stderr = %q; want startup conflict naming both flags", code, stderr.String())
+	}
+}
+
+func TestExecuteRunRejectsInvalidOTLPPolicyDespiteDeprecatedBestEffort(t *testing.T) {
+	var stderr bytes.Buffer
+	code := Execute(context.Background(), []string{
+		"run", "--agent", "codex", "--prompt", "test", "--cwd", t.TempDir(),
+		"--otlp-best-effort", "--otlp-export-failure-policy", "garbage",
+	}, strings.NewReader(""), io.Discard, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "--otlp-export-failure-policy must be") {
+		t.Fatalf("exit = %d, stderr = %q; want invalid policy error", code, stderr.String())
+	}
+}
+
+func TestExecuteRunDeprecatedOTLPBestEffortWarnsAndRuns(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agent requires /bin/sh")
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(fakeCodexScript(
+		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n",
+	)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stderr bytes.Buffer
+	code := Execute(context.Background(), []string{
+		"run", "--agent", "codex", "--prompt", "test", "--cwd", t.TempDir(),
+		"--runs-dir", t.TempDir(), "--stream=false", "--otlp-best-effort",
+	}, strings.NewReader(""), io.Discard, &stderr)
+	if code != 0 || !strings.Contains(stderr.String(), "--otlp-best-effort is deprecated") {
+		t.Fatalf("exit = %d, stderr = %q; want successful run with deprecation warning", code, stderr.String())
 	}
 }
 

@@ -80,7 +80,11 @@ func runCommand(ctx context.Context, args []string, stdin io.Reader, stdout io.W
 	fs.StringVar(&opts.ClaudePermissionMode, "claude-permission-mode", "acceptEdits", "Claude permission mode")
 	fs.StringVar(&opts.OTLPEndpoint, "otlp-endpoint", "", "OTLP/HTTP endpoint URL for live trace export (OTEL_EXPORTER_OTLP_* env also honored)")
 	fs.BoolVar(&opts.OTLPIncludeOutput, "otlp-include-output", false, "include tool outputs and message text in exported spans")
-	fs.BoolVar(&opts.OTLPBestEffort, "otlp-best-effort", false, "allow agent execution to succeed while recording a configured OTLP export failure")
+	fs.StringVar(&opts.OTLPExportFailurePolicy, "otlp-export-failure-policy", runner.OTLPExportFailurePolicyBestEffort, "configured OTLP exporter failure policy: best-effort or required")
+	fs.BoolVar(&opts.OTLPBestEffort, "otlp-best-effort", false, "deprecated alias for --otlp-export-failure-policy=best-effort")
+	fs.BoolVar(&opts.OTLPForceRoot, "otlp-force-root", false, "ignore TRACEPARENT/TRACESTATE and start a new trace")
+	fs.BoolVar(&opts.RedactReasoning, "redact-reasoning", false, "remove provider-private reasoning text from raw and normalized bundle streams")
+	fs.BoolVar(&opts.AllowUnredactedRemoteReasoning, "allow-unredacted-remote-reasoning", false, "explicitly allow private reasoning text in remote uploads; local bundles are unchanged")
 	fs.StringVar(&opts.RunID, "run-id", "", "optional stable run id; defaults to a generated id")
 	fs.StringVar(&opts.BackendURL, "backend-url", "", "backend API base URL for report upload")
 	fs.StringVar(&opts.ReportToken, "report-token", "", "bearer token for report upload")
@@ -92,6 +96,7 @@ func runCommand(ctx context.Context, args []string, stdin io.Reader, stdout io.W
 	fs.StringVar(&opts.ReportMode, "report-mode", "local", "report mode: local, hybrid, or stream")
 	fs.DurationVar(&opts.UploadTimeout, "upload-timeout", runner.DefaultUploadTimeout, "hybrid upload timeout such as 30s or 2m; 0 disables the upload deadline")
 	fs.Int64Var(&opts.MaxUploadBytes, "max-upload-bytes", reporting.DefaultMaxUploadBytes, "total immutable upload snapshot byte limit; 0 explicitly disables the limit")
+	fs.IntVar(&opts.MaxRedactionLineBytes, "max-redaction-line-bytes", reporting.DefaultMaxRedactionLineBytes, "maximum JSONL line size accepted while redacting reasoning")
 	fs.BoolVar(&opts.AllowInsecureHTTP, "allow-insecure-http", false, "allow plaintext HTTP report upload to a non-loopback backend")
 	fs.Func("git-evidence-exclude", "workspace-relative generated/control path to omit from Git evidence; repeatable", func(value string) error {
 		opts.GitEvidenceExcludes = append(opts.GitEvidenceExcludes, value)
@@ -103,6 +108,13 @@ func runCommand(ctx context.Context, args []string, stdin io.Reader, stdout io.W
 			return 0
 		}
 		return 2
+	}
+	if opts.OTLPBestEffort && strings.EqualFold(strings.TrimSpace(opts.OTLPExportFailurePolicy), runner.OTLPExportFailurePolicyRequired) {
+		fmt.Fprintf(stderr, "--otlp-best-effort cannot be combined with --otlp-export-failure-policy=%s\n", runner.OTLPExportFailurePolicyRequired)
+		return 2
+	}
+	if opts.OTLPBestEffort {
+		fmt.Fprintln(stderr, "acta: warning: --otlp-best-effort is deprecated; use --otlp-export-failure-policy=best-effort")
 	}
 	if opts.Timeout < 0 {
 		fmt.Fprintln(stderr, "--timeout must not be negative")
@@ -122,6 +134,10 @@ func runCommand(ctx context.Context, args []string, stdin io.Reader, stdout io.W
 	}
 	if opts.MaxUploadBytes < 0 {
 		fmt.Fprintln(stderr, "--max-upload-bytes must not be negative")
+		return 2
+	}
+	if opts.MaxRedactionLineBytes < 0 {
+		fmt.Fprintln(stderr, "--max-redaction-line-bytes must not be negative")
 		return 2
 	}
 	if err := applyUploadAliases(&opts.ReportToken, ingestToken, &reportTokenEnv, ingestTokenEnv, &opts.ReportMode); err != nil {
@@ -182,6 +198,9 @@ func runCommand(ctx context.Context, args []string, stdin io.Reader, stdout io.W
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "acta run failed: %v\n", err)
+		if errors.Is(err, runner.ErrTelemetryOnlyFailure) {
+			return runner.TelemetryOnlyFailureExitCode
+		}
 		if record != nil && record.ExitCode != nil && *record.ExitCode > 0 {
 			return *record.ExitCode
 		}
@@ -204,7 +223,9 @@ func uploadCommand(ctx context.Context, args []string, stdout io.Writer, stderr 
 	var repositoryID string
 	var timeout time.Duration
 	var maxUploadBytes int64
+	var maxRedactionLineBytes int
 	var allowInsecureHTTP bool
+	var allowUnredactedRemoteReasoning bool
 	fs.StringVar(&runDir, "run-dir", "", "Acta run bundle directory; can also be passed as the single argument")
 	fs.StringVar(&backendURL, "backend-url", "", "backend API base URL for report upload")
 	fs.StringVar(&reportToken, "report-token", "", "bearer token for report upload")
@@ -215,7 +236,9 @@ func uploadCommand(ctx context.Context, args []string, stdout io.Writer, stderr 
 	fs.StringVar(&repositoryID, "repository-id", "", "repository UUID for scoped report upload")
 	fs.DurationVar(&timeout, "timeout", 2*time.Minute, "upload timeout such as 30s or 2m; 0 disables timeout")
 	fs.Int64Var(&maxUploadBytes, "max-upload-bytes", reporting.DefaultMaxUploadBytes, "total immutable upload snapshot byte limit; 0 explicitly disables the limit")
+	fs.IntVar(&maxRedactionLineBytes, "max-redaction-line-bytes", reporting.DefaultMaxRedactionLineBytes, "maximum JSONL line size accepted while redacting reasoning")
 	fs.BoolVar(&allowInsecureHTTP, "allow-insecure-http", false, "allow plaintext HTTP upload to a non-loopback backend")
+	fs.BoolVar(&allowUnredactedRemoteReasoning, "allow-unredacted-remote-reasoning", false, "explicitly allow private reasoning text in the remote upload")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -229,6 +252,10 @@ func uploadCommand(ctx context.Context, args []string, stdout io.Writer, stderr 
 	}
 	if maxUploadBytes < 0 {
 		fmt.Fprintln(stderr, "--max-upload-bytes must not be negative")
+		return 2
+	}
+	if maxRedactionLineBytes < 0 {
+		fmt.Fprintln(stderr, "--max-redaction-line-bytes must not be negative")
 		return 2
 	}
 	if err := applyUploadAliases(&reportToken, ingestToken, &reportTokenEnv, ingestTokenEnv, nil); err != nil {
@@ -273,12 +300,14 @@ func uploadCommand(ctx context.Context, args []string, stdout io.Writer, stderr 
 	defer cancel()
 
 	if err := reporting.UploadRun(uploadCtx, reporting.Config{
-		BackendURL:        backendURL,
-		ReportToken:       reportToken,
-		OrganizationID:    organizationID,
-		RepositoryID:      repositoryID,
-		MaxUploadBytes:    maxUploadBytes,
-		AllowInsecureHTTP: allowInsecureHTTP,
+		BackendURL:                     backendURL,
+		ReportToken:                    reportToken,
+		OrganizationID:                 organizationID,
+		RepositoryID:                   repositoryID,
+		MaxUploadBytes:                 maxUploadBytes,
+		MaxRedactionLineBytes:          maxRedactionLineBytes,
+		AllowInsecureHTTP:              allowInsecureHTTP,
+		AllowUnredactedRemoteReasoning: allowUnredactedRemoteReasoning,
 	}, record); err != nil {
 		fmt.Fprintf(stderr, "acta upload failed: %v\n", err)
 		return 1
@@ -318,7 +347,7 @@ func digestCommand(ctx context.Context, args []string, stdout io.Writer, stderr 
 		fmt.Fprintln(stderr, "digest: existing derived artifacts were left unchanged; pass --allow-partial to replace them with a degraded projection")
 		return 1
 	}
-	if err := actaevents.WriteProjectionForRunDir(runDir, d); err != nil {
+	if err := actaevents.WriteProjectionForRunDirContext(ctx, runDir, d); err != nil {
 		fmt.Fprintf(stderr, "digest: %v\n", err)
 		return 1
 	}

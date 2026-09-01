@@ -41,6 +41,7 @@ func TestExecuteRejectsNegativeTimeouts(t *testing.T) {
 		{"run", "--agent", "codex", "--prompt", "x", "--timeout", "-1s"},
 		{"upload", "--run-dir", "run", "--backend-url", "http://localhost", "--ingest-token", "x", "--timeout", "-1s"},
 		{"upload", "--run-dir", "run", "--backend-url", "http://localhost", "--ingest-token", "x", "--max-upload-bytes", "-1"},
+		{"upload", "--run-dir", "run", "--backend-url", "http://localhost", "--ingest-token", "x", "--max-redaction-line-bytes", "-1"},
 	} {
 		var stdout, stderr bytes.Buffer
 		if code := Execute(context.Background(), args, strings.NewReader(""), &stdout, &stderr); code != 2 {
@@ -61,6 +62,7 @@ func TestExecuteRunRejectsNegativeCaptureLimits(t *testing.T) {
 		{"--max-workspace-diff-bytes", "-1"},
 		{"--upload-timeout", "-1s"},
 		{"--max-upload-bytes", "-1"},
+		{"--max-redaction-line-bytes", "-1"},
 	} {
 		var stdout, stderr bytes.Buffer
 		code := Execute(context.Background(), []string{

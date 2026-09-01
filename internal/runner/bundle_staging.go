@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/nobbettt/acta/internal/securefile"
 )
@@ -33,6 +34,15 @@ func createBundleStagingDir(cwd string, writableDirs []string) (string, error) {
 		result = errors.Join(result, fmt.Errorf("resolve user home directory: %w", err))
 	} else {
 		candidates = append(candidates, filepath.Join(homeDir, ".acta", "staging"))
+	}
+	// Honor the standard cross-platform cache override as a fallback even on
+	// platforms where os.UserCacheDir resolves only the native home cache.
+	if cacheDir := strings.TrimSpace(os.Getenv("XDG_CACHE_HOME")); cacheDir != "" {
+		if filepath.IsAbs(cacheDir) {
+			candidates = append(candidates, filepath.Join(cacheDir, "acta", "staging"))
+		} else {
+			result = errors.Join(result, fmt.Errorf("XDG_CACHE_HOME must be absolute"))
+		}
 	}
 	if len(candidates) == 0 {
 		return "", fmt.Errorf("resolve protected bundle staging roots: %w", result)

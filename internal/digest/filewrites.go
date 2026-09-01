@@ -240,20 +240,20 @@ func attachCapturedFilePatches(d *Digest) {
 	// Digest directly get the same exact budget accounting as the live builder.
 	d.projectionBytes = 0
 	for index := range d.Timeline {
-		encoded, _ := json.Marshal(d.Timeline[index])
-		d.projectionBytes += len(encoded)
+		eventBytes, _ := eventProjectionBytes(d.Timeline[index])
+		d.projectionBytes += eventBytes
 	}
 	for index := range d.Timeline {
 		event := &d.Timeline[index]
 		if event.Kind != KindFileEdit {
 			continue
 		}
-		originalEncoded, _ := json.Marshal(event)
+		originalBytes, _ := eventProjectionBytes(*event)
 		if len(event.fileSnapshots) == 0 {
 			event.FilePatchStatus = "unavailable"
 			event.FilePatchErrors = append(event.FilePatchErrors, "write snapshot was unavailable or no content change was observed")
-			finalEncoded, _ := json.Marshal(event)
-			d.projectionBytes = d.projectionBytes - len(originalEncoded) + len(finalEncoded)
+			finalBytes, _ := eventProjectionBytes(*event)
+			d.projectionBytes = d.projectionBytes - originalBytes + finalBytes
 			continue
 		}
 		totalBytes := 0
@@ -285,23 +285,23 @@ func attachCapturedFilePatches(d *Digest) {
 		default:
 			event.FilePatchStatus = "unavailable"
 		}
-		finalEncoded, marshalErr := json.Marshal(event)
-		if marshalErr != nil || d.projectionBytes-len(originalEncoded)+len(finalEncoded) > d.projectionLimit() {
+		finalBytes, marshalErr := eventProjectionBytes(*event)
+		if marshalErr != nil || d.projectionBytes-originalBytes+finalBytes > d.projectionLimit() {
 			event.FilePatches = nil
 			event.FilePatchStatus = "unavailable"
 			event.FilePatchErrors = []string{"patch evidence exceeded the normalized projection budget"}
-			finalEncoded, _ = json.Marshal(event)
+			finalBytes, _ = eventProjectionBytes(*event)
 			d.Metrics.ProjectionTruncated = true
 			d.Termination.Outcome = OutcomeDegraded
 			d.Termination.ProviderReason = "write_evidence_projection_limit"
 			d.Termination.ErrorMessage = "per-write patch evidence exceeded the normalized projection budget"
-			if d.projectionBytes-len(originalEncoded)+len(finalEncoded) > d.projectionLimit() {
+			if d.projectionBytes-originalBytes+finalBytes > d.projectionLimit() {
 				event.FilePatchStatus = ""
 				event.FilePatchErrors = nil
-				finalEncoded = originalEncoded
+				finalBytes = originalBytes
 			}
 		}
-		d.projectionBytes = d.projectionBytes - len(originalEncoded) + len(finalEncoded)
+		d.projectionBytes = d.projectionBytes - originalBytes + finalBytes
 		event.fileSnapshots = nil
 	}
 }
@@ -348,8 +348,8 @@ func restoreCapturedFilePatches(ctx context.Context, runDir string, d *Digest) e
 		d.PatchPreservation = PatchPreservation{Status: "invalid", Error: err.Error()}
 		return fmt.Errorf("parse prior digest for write evidence: %w", err)
 	}
-	if prior.SchemaVersion < MinSchemaVersion || prior.SchemaVersion > SchemaVersion {
-		err := fmt.Errorf("unsupported prior digest schema_version %d", prior.SchemaVersion)
+	if err := prior.Validate(); err != nil {
+		err = fmt.Errorf("validate prior digest: %w", err)
 		d.PatchPreservation = PatchPreservation{Status: "invalid", Error: err.Error()}
 		return err
 	}

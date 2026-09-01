@@ -6,10 +6,12 @@ package actaevents
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -18,14 +20,20 @@ import (
 
 	"github.com/nobbettt/acta/internal/digest"
 	"github.com/nobbettt/acta/internal/runrecord"
+	"github.com/nobbettt/acta/internal/schemaversion"
 	"github.com/nobbettt/acta/internal/securefile"
+	"github.com/nobbettt/acta/schemas"
 )
 
 const (
-	SchemaVersion    = 2
+	SchemaVersion    = 3
 	MinSchemaVersion = 2
-	Source           = "acta"
-	Filename         = "acta-events.jsonl"
+	// ProjectionSchemaVersion versions projection.json independently from the
+	// digest and event contracts it binds by hash.
+	ProjectionSchemaVersion    = 3
+	MinProjectionSchemaVersion = 2
+	Source                     = "acta"
+	Filename                   = "acta-events.jsonl"
 	// MaxEventsRequestBytes is the complete upload-request budget. MaxEventBytes
 	// reserves the JSON array envelope so every writer-valid individual event is
 	// also uploadable as a one-event batch.
@@ -33,6 +41,17 @@ const (
 	MaxEventBytes         = MaxEventsRequestBytes - len(`{"events":[]}`)
 	MaxStreamBytes        = 256 << 20
 )
+
+// ProjectionManifest binds one atomically published projection generation to
+// the hashes of its artifacts.
+type ProjectionManifest struct {
+	SchemaVersion int                `json:"schema_version"`
+	Producer      runrecord.Producer `json:"producer"`
+	Generation    string             `json:"generation"`
+	RunSHA256     string             `json:"run_sha256"`
+	DigestSHA256  string             `json:"digest_sha256"`
+	EventsSHA256  string             `json:"events_sha256"`
+}
 
 const (
 	TypeRunStarted             = "run.started"
@@ -69,22 +88,50 @@ const (
 	TypeTokensReported         = "tokens.reported"
 )
 
+const (
+	ArtifactStatusWithheld           = "withheld"
+	ArtifactRedactionStateUnverified = "unverified"
+)
+
 type ArtifactRef struct {
-	Kind  string `json:"kind"`
-	Path  string `json:"path"`
-	Lines []int  `json:"lines,omitempty"`
+	Kind           string `json:"kind"`
+	Path           string `json:"path"`
+	Lines          []int  `json:"lines,omitempty"`
+	Status         string `json:"status,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+	RedactionState string `json:"redaction_state,omitempty"`
 }
 
 type Event struct {
-	SchemaVersion int                `json:"schema_version"`
-	Producer      runrecord.Producer `json:"producer,omitempty"`
-	RunID         string             `json:"run_id"`
-	Sequence      int                `json:"sequence"`
-	Timestamp     time.Time          `json:"timestamp"`
-	Source        string             `json:"source"`
-	Type          string             `json:"type"`
-	Payload       json.RawMessage    `json:"payload"`
-	ArtifactRefs  []ArtifactRef      `json:"artifact_refs,omitempty"`
+	SchemaVersion int                 `json:"schema_version"`
+	Producer      runrecord.Producer  `json:"producer,omitempty"`
+	RegeneratedBy *runrecord.Producer `json:"regenerated_by,omitempty"`
+	RunID         string              `json:"run_id"`
+	Sequence      int                 `json:"sequence"`
+	Timestamp     time.Time           `json:"timestamp"`
+	Source        string              `json:"source"`
+	Type          string              `json:"type"`
+	Payload       json.RawMessage     `json:"payload"`
+	ArtifactRefs  []ArtifactRef       `json:"artifact_refs,omitempty"`
+
+	presentV3Fields []string
+}
+
+// UnmarshalJSON retains explicit v3-only field presence independently of Go
+// zero values so replay validation enforces the labeled schema version.
+func (e *Event) UnmarshalJSON(data []byte) error {
+	type plainEvent Event
+	var decoded plainEvent
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	fields, err := schemaversion.PresentV3OnlyFieldsJSON(schemaversion.Event, data)
+	if err != nil {
+		return err
+	}
+	*e = Event(decoded)
+	e.presentV3Fields = fields
+	return nil
 }
 
 // ValidateEnvelope checks the stable identity and ordering fields shared by
@@ -96,8 +143,25 @@ func ValidateEnvelope(event Event, runID string, expectedSequence int) error {
 	if event.SchemaVersion < MinSchemaVersion || event.SchemaVersion > SchemaVersion {
 		return fmt.Errorf("event sequence %d has unsupported schema_version %d (supported %d..%d)", event.Sequence, event.SchemaVersion, MinSchemaVersion, SchemaVersion)
 	}
+	if !runrecord.SupportsV3Fields(event.SchemaVersion) {
+		field, found, err := schemaversion.FirstPresentV3OnlyField(schemaversion.Event, event, event.presentV3Fields)
+		if err != nil {
+			return fmt.Errorf("inspect event sequence %d versioned fields: %w", event.Sequence, err)
+		}
+		if found {
+			return fmt.Errorf("event sequence %d schema_version %d does not support %s", event.Sequence, event.SchemaVersion, field)
+		}
+	}
 	if event.SchemaVersion >= 2 && (strings.TrimSpace(event.Producer.Name) == "" || strings.TrimSpace(event.Producer.Version) == "") {
 		return fmt.Errorf("event sequence %d schema_version %d requires producer name and version", event.Sequence, event.SchemaVersion)
+	}
+	if event.RegeneratedBy != nil {
+		if strings.TrimSpace(event.RegeneratedBy.Name) == "" || strings.TrimSpace(event.RegeneratedBy.Version) == "" {
+			return fmt.Errorf("event sequence %d regenerated_by requires producer name and version", event.Sequence)
+		}
+		if event.RegeneratedBy.Name != "acta" {
+			return fmt.Errorf("event sequence %d regenerated_by producer name must be acta", event.Sequence)
+		}
 	}
 	if event.Source != Source {
 		return fmt.Errorf("event sequence %d has invalid source %q", event.Sequence, event.Source)
@@ -108,16 +172,17 @@ func ValidateEnvelope(event Event, runID string, expectedSequence int) error {
 	return nil
 }
 
-// IsKnownType reports whether typ belongs to the published Acta v2 event
-// vocabulary. Provider event names are payload metadata, never envelope types.
-func IsKnownType(typ string) bool {
+// IsReasoningFreeType reports whether typ has a payload whose documented
+// content is safe to retain after a defensive recursive reasoning pass. The
+// list is deliberately explicit so newly introduced types fail closed.
+func IsReasoningFreeType(typ string) bool {
 	switch typ {
 	case TypeRunStarted, TypeRunCompleted, TypeRunFailed, TypeAgentPrompt,
-		TypeAgentInput, TypeAgentMessage, TypeAgentReasoning, TypeAgentTodo,
+		TypeAgentInput, TypeAgentMessage, TypeAgentTodo,
 		TypeAgentTodoUpdated, TypeAgentTaskStarted, TypeAgentTaskProgress,
 		TypeAgentTaskCompleted, TypeAgentTaskIncomplete, TypeAgentPermissionDenied,
 		TypeAgentRuntimeConfigured, TypeAgentStructuredOutput, TypeAgentRateLimitObserved,
-		TypeAgentError, TypeAgentEventUnsupported, TypeAgentLifecycle,
+		TypeAgentError, TypeAgentLifecycle,
 		TypeToolCallCompleted, TypeToolCallIncomplete, TypeToolResultOrphaned,
 		TypeShellCommandComplete, TypeShellCommandIncomplete, TypeWebSearchCompleted,
 		TypeWebSearchIncomplete, TypeFileRead, TypeFileWritten, TypeFileWriteIncomplete,
@@ -128,15 +193,56 @@ func IsKnownType(typ string) bool {
 	}
 }
 
+// IsKnownType reports whether typ belongs to the published Acta event
+// vocabulary. Provider event names are payload metadata, never envelope types.
+func IsKnownType(typ string) bool {
+	return IsReasoningFreeType(typ) || typ == TypeAgentReasoning || typ == TypeAgentEventUnsupported
+}
+
 func ValidateEvent(event Event, runID string, expectedSequence int) error {
 	if err := ValidateEnvelope(event, runID, expectedSequence); err != nil {
 		return err
 	}
 	if event.SchemaVersion >= 2 && !IsKnownType(event.Type) {
-		return fmt.Errorf("event sequence %d has unknown v2 type %q", event.Sequence, event.Type)
+		return fmt.Errorf("event sequence %d has unknown schema-v%d type %q", event.Sequence, event.SchemaVersion, event.Type)
 	}
 	if len(event.Payload) == 0 || !json.Valid(event.Payload) {
 		return fmt.Errorf("event sequence %d has invalid payload", event.Sequence)
+	}
+	if event.Type == TypeRunStarted {
+		var payload struct {
+			OTLPStatus string `json:"otlp_status"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return fmt.Errorf("event sequence %d has invalid run.started payload: %w", event.Sequence, err)
+		}
+		if payload.OTLPStatus != "" && !runrecord.SupportsOTLPStatus(event.SchemaVersion, payload.OTLPStatus) {
+			return fmt.Errorf("event sequence %d schema_version %d has invalid run.started otlp_status %q", event.Sequence, event.SchemaVersion, payload.OTLPStatus)
+		}
+	}
+	for _, ref := range event.ArtifactRefs {
+		if strings.TrimSpace(ref.Kind) == "" || strings.TrimSpace(ref.Path) == "" {
+			return fmt.Errorf("event sequence %d has an invalid artifact reference", event.Sequence)
+		}
+		switch ref.Status {
+		case "":
+			if ref.Reason != "" || ref.RedactionState != "" {
+				return fmt.Errorf("event sequence %d artifact %q has status metadata without a status", event.Sequence, ref.Path)
+			}
+		case ArtifactStatusWithheld:
+			if strings.TrimSpace(ref.Reason) == "" || ref.RedactionState != ArtifactRedactionStateUnverified {
+				return fmt.Errorf("event sequence %d withheld artifact %q requires a reason and redaction_state unverified", event.Sequence, ref.Path)
+			}
+		default:
+			return fmt.Errorf("event sequence %d artifact %q has invalid status %q", event.Sequence, ref.Path, ref.Status)
+		}
+	}
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("marshal event sequence %d for schema validation: %w", event.Sequence, err)
+	}
+	if err := schemas.ValidateEvent(event.SchemaVersion, encoded); err != nil {
+		return fmt.Errorf("event sequence %d does not match the published schema: %w", event.Sequence, err)
 	}
 	return nil
 }
@@ -144,6 +250,7 @@ func ValidateEvent(event Event, runID string, expectedSequence int) error {
 type builder struct {
 	runID         string
 	producer      runrecord.Producer
+	regeneratedBy *runrecord.Producer
 	bundleDir     string
 	schemaVersion int
 	next          int
@@ -169,6 +276,10 @@ func BuildWithPrompt(record *runrecord.Record, d *digest.Digest, prompt string) 
 // BuildForBundle reads artifact presence from bundleDir while keeping the
 // logical final paths from record.RunDir in normalized references.
 func BuildForBundle(bundleDir string, record *runrecord.Record, d *digest.Digest, prompt string) ([]Event, error) {
+	return buildForBundle(bundleDir, record, d, prompt, nil)
+}
+
+func buildForBundle(bundleDir string, record *runrecord.Record, d *digest.Digest, prompt string, regeneratedBy *runrecord.Producer) ([]Event, error) {
 	if record == nil {
 		return nil, fmt.Errorf("run record is nil")
 	}
@@ -183,8 +294,10 @@ func BuildForBundle(bundleDir string, record *runrecord.Record, d *digest.Digest
 	if record.ID == "" || d.RunID != "" && d.RunID != record.ID {
 		return nil, fmt.Errorf("digest run_id %q does not match record run_id %q", d.RunID, record.ID)
 	}
-	if d.SchemaVersion != 0 && (d.SchemaVersion < digest.MinSchemaVersion || d.SchemaVersion > digest.SchemaVersion) {
-		return nil, fmt.Errorf("unsupported digest schema_version %d", d.SchemaVersion)
+	if d.SchemaVersion != 0 {
+		if err := d.Validate(); err != nil {
+			return nil, fmt.Errorf("validate digest: %w", err)
+		}
 	}
 	resolved := digest.ResolveOutcome(record, d)
 	if resolved.OK != record.OK {
@@ -201,7 +314,7 @@ func BuildForBundle(bundleDir string, record *runrecord.Record, d *digest.Digest
 	if strings.TrimSpace(producer.Name) == "" {
 		producer = runrecord.CurrentProducer()
 	}
-	b := &builder{runID: record.ID, producer: producer, bundleDir: bundleDir, schemaVersion: SchemaVersion, next: 1}
+	b := &builder{runID: record.ID, producer: producer, regeneratedBy: regeneratedBy, bundleDir: bundleDir, schemaVersion: SchemaVersion, next: 1}
 	if prompt != "" {
 		if _, err := b.append(TypeAgentPrompt, record.StartedAt, agentPromptPayload{
 			Text:   prompt,
@@ -235,6 +348,7 @@ func BuildForBundle(bundleDir string, record *runrecord.Record, d *digest.Digest
 		ProcessContainment:      record.ProcessContainment,
 		AgentConfigMode:         record.AgentConfigMode,
 		RuntimeBundleSHA256:     record.RuntimeBundleSHA256,
+		ReasoningRedactionState: record.ReasoningRedactionState,
 	}); err != nil {
 		return nil, err
 	}
@@ -365,12 +479,15 @@ func buildEventsForRunDir(runDir string, d *digest.Digest) ([]Event, error) {
 	if err := json.Unmarshal(payload, &record); err != nil {
 		return nil, fmt.Errorf("parse run record: %w", err)
 	}
-	// Re-digestion is a new projection. Legacy run records remain immutable,
-	// while newly written events carry the current schema and producer.
-	if strings.TrimSpace(d.Producer.Name) != "" {
-		record.Producer = d.Producer
-	} else {
+	// The event producer remains the immutable execution producer recorded in
+	// run.json. Re-digestion is attributed separately to the binary performing
+	// the new projection. Pre-schema records have no original identity to keep.
+	if strings.TrimSpace(record.Producer.Name) == "" {
 		record.Producer = runrecord.CurrentProducer()
+	}
+	regeneratedBy := d.Producer
+	if strings.TrimSpace(regeneratedBy.Name) == "" {
+		regeneratedBy = runrecord.CurrentProducer()
 	}
 	if record.RawStdoutArtifact == "" {
 		record.RawStdoutArtifact = artifactPath(record.RunDir, record.RawStdoutPath)
@@ -396,45 +513,136 @@ func buildEventsForRunDir(runDir string, d *digest.Digest) ([]Event, error) {
 			return nil, fmt.Errorf("captured prompt is missing from existing event stream")
 		}
 	}
-	return BuildForBundle(runDir, &record, d, prompt)
+	return buildForBundle(runDir, &record, d, prompt, &regeneratedBy)
 }
 
-// WriteProjectionForRunDir prebuilds and validates digest.json and the event
-// stream, stages both on the bundle filesystem, and publishes them as one
-// rollback-protected generation. projection.json is committed last and is the
-// completion marker for consumers that require pair consistency.
-func WriteProjectionForRunDir(runDir string, d *digest.Digest) error {
-	events, err := buildEventsForRunDir(runDir, d)
-	if err != nil {
+// WriteProjectionForRunDirContext prebuilds and validates digest.json and the
+// event stream, stages both on the bundle filesystem, and publishes them as one
+// rollback-protected generation. projection.json is committed last and binds
+// the immutable run record to the derived pair.
+func WriteProjectionForRunDirContext(ctx context.Context, runDir string, d *digest.Digest) error {
+	generation := fmt.Sprintf("%d", time.Now().UnixNano())
+	finals := []string{"digest.json", Filename, "projection.json"}
+	payloads := make([][]byte, len(finals))
+	return commitProjectionContext(ctx, runDir, generation, finals, payloads, func() error {
+		// run.json is now part of the generation identity. Re-read and reconcile
+		// it only after taking the projection lock so a post-publication final
+		// telemetry commit cannot race this re-projection.
+		runPayload, err := securefile.ReadRegularFile(runDir, filepath.Join(runDir, "run.json"), runrecord.MaxRecordBytes)
+		if err != nil {
+			return fmt.Errorf("read run record: %w", err)
+		}
+		events, err := buildEventsForRunDir(runDir, d)
+		if err != nil {
+			return err
+		}
+		payloads[0], err = digest.MarshalFile(d)
+		if err != nil {
+			return err
+		}
+		payloads[1], err = encodeEvents(events)
+		if err != nil {
+			return err
+		}
+		payloads[2], err = marshalProjectionManifest(d.Producer, generation, runPayload, payloads[0], payloads[1])
 		return err
+	})
+}
+
+// WriteProjectionForRecord atomically reconciles every mutable local result
+// after publication. The prior generation remains authoritative unless all
+// three artifacts and their manifest commit successfully under the bundle
+// projection lock.
+func WriteProjectionForRecord(runDir string, record *runrecord.Record, d *digest.Digest, prompt string) error {
+	return WriteProjectionForRecordContext(context.Background(), runDir, record, d, prompt)
+}
+
+func WriteProjectionForRecordContext(ctx context.Context, runDir string, record *runrecord.Record, d *digest.Digest, prompt string) error {
+	if record == nil {
+		return errors.New("run record is nil")
 	}
-	digestPayload, err := json.MarshalIndent(d, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal digest: %w", err)
-	}
-	digestPayload = append(digestPayload, '\n')
-	if len(digestPayload) > digest.MaxDigestBytes {
-		return fmt.Errorf("digest is %d bytes; maximum is %d", len(digestPayload), digest.MaxDigestBytes)
-	}
-	eventPayload, err := encodeEvents(events)
-	if err != nil {
-		return err
+	if d == nil {
+		return errors.New("digest is nil")
 	}
 	generation := fmt.Sprintf("%d", time.Now().UnixNano())
-	manifestPayload, err := json.MarshalIndent(struct {
-		SchemaVersion int                `json:"schema_version"`
-		Producer      runrecord.Producer `json:"producer"`
-		Generation    string             `json:"generation"`
-		DigestSHA256  string             `json:"digest_sha256"`
-		EventsSHA256  string             `json:"events_sha256"`
-	}{SchemaVersion: SchemaVersion, Producer: d.Producer, Generation: generation,
-		DigestSHA256: fmt.Sprintf("%x", sha256.Sum256(digestPayload)), EventsSHA256: fmt.Sprintf("%x", sha256.Sum256(eventPayload))}, "", "  ")
-	if err != nil {
+	finals := []string{"run.json", "digest.json", Filename, "projection.json"}
+	payloads := make([][]byte, len(finals))
+	return commitProjectionContext(ctx, runDir, generation, finals, payloads, func() error {
+		digest.ReconcileRecord(record, d)
+		events, err := BuildForBundle(runDir, record, d, prompt)
+		if err != nil {
+			return err
+		}
+		payloads[0], err = runrecord.MarshalFile(record)
+		if err != nil {
+			return err
+		}
+		payloads[1], err = digest.MarshalFile(d)
+		if err != nil {
+			return err
+		}
+		payloads[2], err = encodeEvents(events)
+		if err != nil {
+			return err
+		}
+		payloads[3], err = marshalProjectionManifest(d.Producer, generation, payloads[0], payloads[1], payloads[2])
 		return err
+	})
+}
+
+func marshalProjectionManifest(producer runrecord.Producer, generation string, runPayload, digestPayload, eventPayload []byte) ([]byte, error) {
+	payload, err := json.MarshalIndent(ProjectionManifest{
+		SchemaVersion: ProjectionSchemaVersion,
+		Producer:      producer,
+		Generation:    generation,
+		RunSHA256:     fmt.Sprintf("%x", sha256.Sum256(runPayload)),
+		DigestSHA256:  fmt.Sprintf("%x", sha256.Sum256(digestPayload)),
+		EventsSHA256:  fmt.Sprintf("%x", sha256.Sum256(eventPayload)),
+	}, "", "  ")
+	if err != nil {
+		return nil, err
 	}
-	manifestPayload = append(manifestPayload, '\n')
-	finals := []string{"digest.json", Filename, "projection.json"}
-	payloads := [][]byte{digestPayload, eventPayload, manifestPayload}
+	return append(payload, '\n'), nil
+}
+
+// Fault-injection seams; after-hook errors bypass rollback to model process death.
+var (
+	projectionReplace             = securefile.ReplaceFile
+	projectionLink                = os.Link
+	projectionAfterBackup         = func() error { return nil }
+	projectionAfterPublish        = func(string) error { return nil }
+	projectionAfterDataSync       = func() error { return nil }
+	projectionAfterManifestSync   = func() error { return nil }
+	projectionAfterCopyBackupOpen = func(*os.File) error { return nil }
+)
+
+type projectionScratchFile struct {
+	path       string
+	name       string
+	generation string
+}
+
+var projectionArtifactNames = []string{"run.json", "digest.json", Filename, "projection.json"}
+
+const projectionCopyBackupTemporaryPrefix = ".projection-copy-backup-"
+
+func commitProjectionContext(ctx context.Context, runDir, generation string, finals []string, payloads [][]byte, afterLock func() error) (returnErr error) {
+	lock, err := AcquireProjectionLockContext(ctx, runDir)
+	if err != nil {
+		return fmt.Errorf("lock projection commit: %w", err)
+	}
+	defer func() {
+		returnErr = errors.Join(returnErr, lock.Close())
+	}()
+	if _, err := RecoverProjectionCommit(runDir); err != nil {
+		return fmt.Errorf("recover projection commit: %w", err)
+	}
+	if afterLock != nil {
+		if err := afterLock(); err != nil {
+			return fmt.Errorf("prepare projection commit: %w", err)
+		}
+	}
+
 	staged := make([]string, len(finals))
 	backups := make([]string, len(finals))
 	for index := range finals {
@@ -449,12 +657,15 @@ func WriteProjectionForRunDir(runDir string, d *digest.Digest) error {
 	}
 	rollback := func(published int) error {
 		var rollbackErr error
-		for index := 0; index < published; index++ {
-			_ = os.Remove(filepath.Join(runDir, finals[index]))
-		}
 		for index := range finals {
 			if _, err := os.Stat(backups[index]); err == nil {
-				rollbackErr = errors.Join(rollbackErr, os.Rename(backups[index], filepath.Join(runDir, finals[index])))
+				if index < published {
+					rollbackErr = errors.Join(rollbackErr, projectionReplace(backups[index], filepath.Join(runDir, finals[index])))
+				} else {
+					rollbackErr = errors.Join(rollbackErr, os.Remove(backups[index]))
+				}
+			} else if index < published {
+				rollbackErr = errors.Join(rollbackErr, os.Remove(filepath.Join(runDir, finals[index])))
 			}
 			_ = os.Remove(staged[index])
 		}
@@ -463,28 +674,373 @@ func WriteProjectionForRunDir(runDir string, d *digest.Digest) error {
 	for index, name := range finals {
 		finalPath := filepath.Join(runDir, name)
 		if _, err := os.Stat(finalPath); err == nil {
-			if err := os.Rename(finalPath, backups[index]); err != nil {
+			if err := backupProjectionArtifact(runDir, finalPath, backups[index]); err != nil {
 				return errors.Join(fmt.Errorf("backup projection %s: %w", name, err), rollback(0))
 			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return errors.Join(fmt.Errorf("stat projection %s for backup: %w", name, err), rollback(0))
 		}
 	}
-	for index, name := range finals {
-		if err := os.Rename(staged[index], filepath.Join(runDir, name)); err != nil {
+	if err := securefile.SyncDirectory(runDir); err != nil {
+		return errors.Join(fmt.Errorf("sync projection backups: %w", err), rollback(0))
+	}
+	if err := projectionAfterBackup(); err != nil {
+		return fmt.Errorf("projection commit interrupted after backup: %w", err)
+	}
+	manifestIndex := len(finals) - 1
+	// Publish and sync every data replacement before the commit-point manifest:
+	// manifest durable ⇒ its data durable.
+	for index, name := range finals[:manifestIndex] {
+		if err := projectionReplace(staged[index], filepath.Join(runDir, name)); err != nil {
 			return errors.Join(fmt.Errorf("publish projection %s: %w", name, err), rollback(index))
 		}
+		if err := projectionAfterPublish(name); err != nil {
+			return fmt.Errorf("projection commit interrupted after publishing %s: %w", name, err)
+		}
+	}
+	if err := securefile.SyncDirectory(runDir); err != nil {
+		rollbackErr := rollback(manifestIndex)
+		_ = securefile.SyncDirectory(runDir)
+		return errors.Join(fmt.Errorf("sync published projection data directory: %w", err), rollbackErr)
+	}
+	if err := projectionAfterDataSync(); err != nil {
+		return fmt.Errorf("projection commit interrupted after syncing data: %w", err)
+	}
+	manifestName := finals[manifestIndex]
+	if err := projectionReplace(staged[manifestIndex], filepath.Join(runDir, manifestName)); err != nil {
+		return errors.Join(fmt.Errorf("publish projection %s: %w", manifestName, err), rollback(manifestIndex))
+	}
+	if err := projectionAfterPublish(manifestName); err != nil {
+		return fmt.Errorf("projection commit interrupted after publishing %s: %w", manifestName, err)
 	}
 	if err := securefile.SyncDirectory(runDir); err != nil {
 		rollbackErr := rollback(len(finals))
 		_ = securefile.SyncDirectory(runDir)
-		return errors.Join(fmt.Errorf("sync published projection directory: %w", err), rollbackErr)
+		return errors.Join(fmt.Errorf("sync published projection manifest directory: %w", err), rollbackErr)
 	}
-	for _, backup := range backups {
-		_ = os.Remove(backup)
+	if err := projectionAfterManifestSync(); err != nil {
+		return fmt.Errorf("projection commit interrupted after syncing manifest: %w", err)
 	}
 	// The projection generation is already durable. Backup cleanup is
-	// best-effort and does not invalidate the committed manifest.
-	_ = securefile.SyncDirectory(runDir)
+	// validated but best-effort and does not invalidate the committed manifest.
+	removedBackup := false
+	for index, backup := range backups {
+		wantHash := fmt.Sprintf("%x", sha256.Sum256(payloads[index]))
+		intact, _ := projectionArtifactIntact(runDir, filepath.Join(runDir, finals[index]), wantHash)
+		if intact {
+			if err := os.Remove(backup); err == nil {
+				removedBackup = true
+			}
+		}
+	}
+	if removedBackup {
+		_ = securefile.SyncDirectory(runDir)
+	}
 	return nil
+}
+
+// backupProjectionArtifact first tries a hardlink backup. Filesystems which do
+// not support links fall back to a byte-for-byte copy that is fsynced and
+// atomically published; the source remains in place in either case.
+// EEXIST remains an error because it indicates an unexpected backup collision.
+func backupProjectionArtifact(runDir, sourcePath, backupPath string) error {
+	if err := projectionLink(sourcePath, backupPath); err == nil {
+		return nil
+	} else if errors.Is(err, os.ErrExist) {
+		return err
+	}
+
+	source, err := securefile.OpenRegular(runDir, sourcePath)
+	if err != nil {
+		return fmt.Errorf("open projection backup source: %w", err)
+	}
+	defer source.Close()
+	backup, err := securefile.CreateTemp(runDir, projectionCopyBackupTemporaryPrefix+"*")
+	if err != nil {
+		return fmt.Errorf("create projection copy backup temporary: %w", err)
+	}
+	temporaryPath := backup.Name()
+	removeTemporary := true
+	defer func() {
+		_ = backup.Close()
+		if removeTemporary {
+			_ = os.Remove(temporaryPath)
+		}
+	}()
+	if err := projectionAfterCopyBackupOpen(backup); err != nil {
+		// Fault-injection errors model process death and deliberately preserve
+		// the unrecognized partial temporary for recovery cleanup.
+		removeTemporary = false
+		return fmt.Errorf("projection copy backup interrupted: %w", err)
+	}
+	if _, err := io.Copy(backup, source); err != nil {
+		return fmt.Errorf("copy projection backup: %w", err)
+	}
+	if err := backup.Sync(); err != nil {
+		return fmt.Errorf("sync projection copy backup: %w", err)
+	}
+	if err := backup.Close(); err != nil {
+		return fmt.Errorf("close projection copy backup: %w", err)
+	}
+	if _, err := os.Lstat(backupPath); err == nil {
+		return fmt.Errorf("publish projection copy backup: %w", os.ErrExist)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect projection copy backup destination: %w", err)
+	}
+	if err := projectionReplace(temporaryPath, backupPath); err != nil {
+		return fmt.Errorf("publish projection copy backup: %w", err)
+	}
+	removeTemporary = false
+	return nil
+}
+
+// RecoverProjectionCommit runs only while the bundle projection lock is held.
+// Staged files and incomplete copied-backup temporaries never define a
+// generation and are always discarded. The current manifest is the generation
+// pointer: targets which do not match it are restored from a matching hardlink
+// or copied backup. A backup is removed only
+// after its target exists as a regular file and, when the manifest supplies a
+// digest, matches that digest. If no manifest exists, the newest backup set is
+// rolled back deterministically before unmanifested backups are cleaned. The
+// boolean result reports whether any recognized commit scratch files were found.
+func RecoverProjectionCommit(runDir string) (bool, error) {
+	staged, backups, err := projectionScratchFiles(runDir)
+	if err != nil {
+		return false, err
+	}
+	recoveryRequired := len(staged) > 0 || len(backups) > 0
+	changed := false
+	for _, scratch := range staged {
+		if err := os.Remove(scratch.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return recoveryRequired, fmt.Errorf("discard staged projection %s: %w", scratch.name, err)
+		}
+		changed = true
+	}
+	if len(backups) == 0 {
+		if changed {
+			return recoveryRequired, securefile.SyncDirectory(runDir)
+		}
+		return recoveryRequired, nil
+	}
+
+	manifest, manifestErr := readProjectionManifest(runDir, filepath.Join(runDir, "projection.json"))
+	if manifestErr != nil {
+		generation := projectionBackupGeneration(runDir, backups)
+		for _, name := range projectionArtifactNames {
+			for _, backup := range backups {
+				if backup.generation != generation || backup.name != name {
+					continue
+				}
+				targetPath := filepath.Join(runDir, name)
+				targetInfo, targetErr := os.Stat(targetPath)
+				backupInfo, backupErr := os.Stat(backup.path)
+				if targetErr == nil && backupErr == nil && os.SameFile(targetInfo, backupInfo) {
+					break
+				}
+				if err := projectionReplace(backup.path, targetPath); err != nil {
+					return recoveryRequired, fmt.Errorf("restore interrupted projection %s: %w", name, err)
+				}
+				changed = true
+				break
+			}
+		}
+		manifest, manifestErr = readProjectionManifest(runDir, filepath.Join(runDir, "projection.json"))
+	}
+
+	expected := map[string]string{}
+	if manifestErr == nil {
+		expected["run.json"] = manifest.RunSHA256
+		expected["digest.json"] = manifest.DigestSHA256
+		expected[Filename] = manifest.EventsSHA256
+		for _, name := range []string{"run.json", "digest.json", Filename} {
+			wantHash := expected[name]
+			if wantHash == "" && name == "run.json" {
+				continue
+			}
+			intact, targetErr := projectionArtifactIntact(runDir, filepath.Join(runDir, name), wantHash)
+			if intact {
+				continue
+			}
+			restored := false
+			for index := len(backups) - 1; index >= 0; index-- {
+				backup := backups[index]
+				if backup.name != name {
+					continue
+				}
+				matches, _ := projectionArtifactIntact(runDir, backup.path, wantHash)
+				if !matches {
+					continue
+				}
+				if err := projectionReplace(backup.path, filepath.Join(runDir, name)); err != nil {
+					return recoveryRequired, fmt.Errorf("restore manifested projection %s: %w", name, err)
+				}
+				changed = true
+				restored = true
+				break
+			}
+			if !restored {
+				if targetErr != nil {
+					return recoveryRequired, fmt.Errorf("validate manifested projection %s: %w", name, targetErr)
+				}
+				return recoveryRequired, fmt.Errorf("manifested projection %s has no intact target or backup", name)
+			}
+		}
+	}
+
+	for _, backup := range backups {
+		if _, err := os.Stat(backup.path); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return recoveryRequired, fmt.Errorf("stat projection backup %s: %w", backup.name, err)
+		}
+		intact := false
+		if backup.name == "projection.json" && manifestErr == nil {
+			_, err = readProjectionManifest(runDir, filepath.Join(runDir, backup.name))
+			intact = err == nil
+		} else {
+			intact, err = projectionArtifactIntact(runDir, filepath.Join(runDir, backup.name), expected[backup.name])
+		}
+		if !intact {
+			if err != nil {
+				return recoveryRequired, fmt.Errorf("validate projection target %s before backup cleanup: %w", backup.name, err)
+			}
+			return recoveryRequired, fmt.Errorf("projection target %s is not intact; preserving backup", backup.name)
+		}
+		if err := os.Remove(backup.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return recoveryRequired, fmt.Errorf("remove projection backup %s: %w", backup.name, err)
+		}
+		changed = true
+	}
+	if changed {
+		return recoveryRequired, securefile.SyncDirectory(runDir)
+	}
+	return recoveryRequired, nil
+}
+
+// ProjectionCommitRecoveryPending reports whether runDir contains scratch
+// files recognized by RecoverProjectionCommit without modifying the bundle.
+func ProjectionCommitRecoveryPending(runDir string) (bool, error) {
+	staged, backups, err := projectionScratchFiles(runDir)
+	return len(staged) > 0 || len(backups) > 0, err
+}
+
+func projectionScratchFiles(runDir string) ([]projectionScratchFile, []projectionScratchFile, error) {
+	entries, err := os.ReadDir(runDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	var staged, backups []projectionScratchFile
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), projectionCopyBackupTemporaryPrefix) {
+			staged = append(staged, projectionScratchFile{path: filepath.Join(runDir, entry.Name()), name: "copy backup temporary"})
+			continue
+		}
+		for _, artifact := range projectionArtifactNames {
+			temporaryPrefix := ".." + artifact + ".staged-"
+			if strings.HasPrefix(entry.Name(), temporaryPrefix) {
+				generation, _, found := strings.Cut(strings.TrimPrefix(entry.Name(), temporaryPrefix), ".tmp-")
+				if found && generation != "" && strings.Trim(generation, "0123456789") == "" {
+					staged = append(staged, projectionScratchFile{path: filepath.Join(runDir, entry.Name()), name: artifact, generation: generation})
+				}
+			}
+			for _, kind := range []string{"staged", "backup"} {
+				prefix := "." + artifact + "." + kind + "-"
+				if !strings.HasPrefix(entry.Name(), prefix) {
+					continue
+				}
+				generation := strings.TrimPrefix(entry.Name(), prefix)
+				if generation == "" || strings.Trim(generation, "0123456789") != "" {
+					continue
+				}
+				scratch := projectionScratchFile{path: filepath.Join(runDir, entry.Name()), name: artifact, generation: generation}
+				if kind == "staged" {
+					staged = append(staged, scratch)
+				} else {
+					backups = append(backups, scratch)
+				}
+			}
+		}
+	}
+	return staged, backups, nil
+}
+
+func projectionBackupGeneration(runDir string, backups []projectionScratchFile) string {
+	newest := ""
+	newestManifest := ""
+	for _, backup := range backups {
+		if len(backup.generation) > len(newest) || len(backup.generation) == len(newest) && backup.generation > newest {
+			newest = backup.generation
+		}
+		if backup.name == "projection.json" {
+			if _, err := readProjectionManifest(runDir, backup.path); err == nil &&
+				(len(backup.generation) > len(newestManifest) || len(backup.generation) == len(newestManifest) && backup.generation > newestManifest) {
+				newestManifest = backup.generation
+			}
+		}
+	}
+	if newestManifest != "" {
+		return newestManifest
+	}
+	return newest
+}
+
+func readProjectionManifest(runDir, path string) (ProjectionManifest, error) {
+	payload, err := securefile.ReadRegularFile(runDir, path, 64<<10)
+	if err != nil {
+		return ProjectionManifest{}, err
+	}
+	var manifest ProjectionManifest
+	if err := json.Unmarshal(payload, &manifest); err != nil {
+		return ProjectionManifest{}, err
+	}
+	if err := ValidateProjectionManifest(manifest); err != nil {
+		return ProjectionManifest{}, err
+	}
+	if manifest.SchemaVersion == ProjectionSchemaVersion && !validProjectionHash(manifest.RunSHA256) {
+		return ProjectionManifest{}, errors.New("projection manifest contains an invalid run digest")
+	}
+	return manifest, nil
+}
+
+// ValidateProjectionManifest checks the projection fields shared by local
+// recovery and remote upload readers. Caller-specific producer and run hash
+// rules remain at their respective trust boundaries.
+func ValidateProjectionManifest(manifest ProjectionManifest) error {
+	if manifest.SchemaVersion < MinProjectionSchemaVersion || manifest.SchemaVersion > ProjectionSchemaVersion {
+		return fmt.Errorf("unsupported projection schema_version %d", manifest.SchemaVersion)
+	}
+	if manifest.Generation == "" || strings.Trim(manifest.Generation, "0123456789") != "" {
+		return errors.New("projection generation must contain only digits")
+	}
+	if !validProjectionHash(manifest.DigestSHA256) || !validProjectionHash(manifest.EventsSHA256) {
+		return errors.New("projection manifest contains an invalid artifact digest")
+	}
+	return nil
+}
+
+func validProjectionHash(value string) bool {
+	return len(value) == sha256.Size*2 && strings.Trim(value, "0123456789abcdef") == ""
+}
+
+func projectionArtifactIntact(runDir, path, expectedHash string) (bool, error) {
+	limit := int64(MaxStreamBytes)
+	base := filepath.Base(path)
+	switch {
+	case base == "run.json" || strings.HasPrefix(base, ".run.json."):
+		limit = runrecord.MaxRecordBytes
+	case base == "digest.json" || strings.HasPrefix(base, ".digest.json."):
+		limit = int64(digest.MaxDigestBytes)
+	case base == "projection.json" || strings.HasPrefix(base, ".projection.json."):
+		limit = 64 << 10
+	}
+	payload, err := securefile.ReadRegularFile(runDir, path, limit)
+	if err != nil {
+		return false, err
+	}
+	if expectedHash == "" {
+		return true, nil
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(payload)) == expectedHash, nil
 }
 
 func capturedPromptFromEventStream(runDir, runID string) (string, error) {
@@ -527,6 +1083,10 @@ func capturedPromptFromEventStream(runDir, runID string) (string, error) {
 func (b *builder) appendTimelineEvent(record *runrecord.Record, item digest.Event) error {
 	typ := timelineType(item)
 	eventTime := timelineTimes(record, item)
+	text := item.Text
+	if item.Kind == digest.KindReasoning {
+		text = item.LocalReasoningText()
+	}
 	seq, err := b.append(typ, eventTime, timelinePayload{
 		Kind: item.Kind, ProviderEvent: item.ProviderEvent,
 		ID: item.ID, ParentID: item.ParentID, ThreadID: item.ThreadID,
@@ -539,10 +1099,11 @@ func (b *builder) appendTimelineEvent(record *runrecord.Record, item digest.Even
 		Command: item.Command, ExitCode: item.ExitCode, IsError: item.IsError,
 		ErrorMessage: item.ErrorMessage,
 		Output:       item.Output, OutputChars: item.OutputChars, OutputTruncated: item.OutputTruncated,
-		Text: item.Text, Query: item.Query, Action: item.Action,
+		Text: text, TextChars: item.TextChars, TextTruncated: item.TextTruncated,
+		Query: item.Query, Action: item.Action,
 		Files: item.Files, Changes: item.Changes, Spans: item.Spans,
 		Patches: item.FilePatches,
-		Details: item.Details, RawEventLines: item.RawEventLines,
+		Details: item.Details, RawEventLines: item.RawEventLines, Redacted: item.Redacted,
 	}, rawTimelineArtifactRefs(b.bundleDir, record, item)...)
 	if err != nil {
 		return err
@@ -615,6 +1176,7 @@ func (b *builder) append(typ string, timestamp time.Time, payload any, refs ...A
 	b.events = append(b.events, Event{
 		SchemaVersion: b.schemaVersion,
 		Producer:      b.producer,
+		RegeneratedBy: b.regeneratedBy,
 		RunID:         b.runID,
 		Sequence:      seq,
 		Timestamp:     normalizeTime(timestamp),
@@ -805,6 +1367,7 @@ type runStartedPayload struct {
 	ProcessContainment      string   `json:"process_containment,omitempty"`
 	AgentConfigMode         string   `json:"agent_config_mode,omitempty"`
 	RuntimeBundleSHA256     string   `json:"runtime_bundle_sha256,omitempty"`
+	ReasoningRedactionState string   `json:"reasoning_redaction_state,omitempty"`
 }
 
 type agentPromptPayload struct {
@@ -841,6 +1404,8 @@ type timelinePayload struct {
 	OutputChars     int                      `json:"output_chars,omitempty"`
 	OutputTruncated bool                     `json:"output_truncated,omitempty"`
 	Text            string                   `json:"text,omitempty"`
+	TextChars       int                      `json:"text_chars,omitempty"`
+	TextTruncated   bool                     `json:"text_truncated,omitempty"`
 	Query           string                   `json:"query,omitempty"`
 	Action          json.RawMessage          `json:"action,omitempty"`
 	Files           []string                 `json:"files,omitempty"`
@@ -849,6 +1414,7 @@ type timelinePayload struct {
 	Patches         []digest.FilePatch       `json:"patches,omitempty"`
 	Details         json.RawMessage          `json:"details,omitempty"`
 	RawEventLines   []int                    `json:"raw_event_lines,omitempty"`
+	Redacted        bool                     `json:"redacted,omitempty"`
 }
 
 type fileReadPayload struct {

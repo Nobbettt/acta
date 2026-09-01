@@ -3,8 +3,11 @@ package runner
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,9 +18,17 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
+
+	collectortracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/nobbettt/acta/internal/actaevents"
 	"github.com/nobbettt/acta/internal/agents"
+	"github.com/nobbettt/acta/internal/digest"
+	"github.com/nobbettt/acta/internal/reasoning"
+	"github.com/nobbettt/acta/internal/reporting"
 	"github.com/nobbettt/acta/internal/runrecord"
 )
 
@@ -447,12 +458,50 @@ cat >/dev/null
 printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}\n'
 `)
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	originalProjectionWriter := writeFinalProjection
+	projectionCommits := 0
+	writeFinalProjection = func(bundleDir string, record *runrecord.Record, d *digest.Digest, prompt string) error {
+		projectionCommits++
+		return originalProjectionWriter(bundleDir, record, d, prompt)
+	}
+	t.Cleanup(func() { writeFinalProjection = originalProjectionWriter })
 
 	var paths []string
+	var uploadedStatuses []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.URL.Path)
 		if r.Header.Get("Authorization") != "Bearer token-1" {
 			t.Fatalf("Authorization header = %q, want bearer token", r.Header.Get("Authorization"))
+		}
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/events"):
+			var request struct {
+				Events []actaevents.Event `json:"events"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			for _, event := range request.Events {
+				if event.Type == actaevents.TypeRunStarted {
+					status, _, err := telemetryFromStartedEvent(event)
+					if err != nil {
+						t.Fatal(err)
+					}
+					uploadedStatuses = append(uploadedStatuses, status)
+				}
+			}
+		case strings.HasSuffix(r.URL.Path, "/artifacts") && r.URL.Query().Get("filename") == "run.json":
+			var uploaded runrecord.Record
+			if err := json.NewDecoder(r.Body).Decode(&uploaded); err != nil {
+				t.Fatal(err)
+			}
+			uploadedStatuses = append(uploadedStatuses, uploaded.OTLPStatus)
+		case strings.HasSuffix(r.URL.Path, "/artifacts") && r.URL.Query().Get("filename") == "digest.json":
+			var uploaded digest.Digest
+			if err := json.NewDecoder(r.Body).Decode(&uploaded); err != nil {
+				t.Fatal(err)
+			}
+			uploadedStatuses = append(uploadedStatuses, uploaded.OTLPStatus)
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -473,6 +522,17 @@ printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":2,"to
 	}
 	if !record.OK {
 		t.Fatalf("record.OK = false, record = %#v", record)
+	}
+	if projectionCommits != 1 {
+		t.Fatalf("final projection commits = %d, want exactly one", projectionCommits)
+	}
+	if len(uploadedStatuses) != 3 {
+		t.Fatalf("uploaded generation statuses = %v, want run/events/digest", uploadedStatuses)
+	}
+	for _, status := range uploadedStatuses {
+		if status != "not_configured" {
+			t.Fatalf("uploaded generation statuses = %v, want one not_configured generation", uploadedStatuses)
+		}
 	}
 
 	if len(paths) < 4 {
@@ -803,10 +863,7 @@ func TestRunCapturesWorkspaceDiff(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fakeBin := t.TempDir()
-	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
-		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	installSuccessfulCodex(t)
 
 	record, err := runForTest(context.Background(), Options{
 		Agent:        "codex",
@@ -921,10 +978,7 @@ func TestRunExcludesBundleWhenRunsDirIsWorkspaceRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fakeBin := t.TempDir()
-	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
-		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	installSuccessfulCodex(t)
 
 	record, err := runForTest(context.Background(), Options{
 		Agent: "codex", CWD: cwd, RunsDir: ".", Prompt: "x", PromptSource: "test", Stream: false,
@@ -1011,27 +1065,149 @@ func gitCmd(t *testing.T, dir string, args ...string) {
 	}
 }
 
-// An explicit --otlp-endpoint that can't deliver must fail the run (the user
-// asked for traces), not exit 0 with only a warning. The bundle is still saved.
-func TestRunFailsOnExplicitOTLPExportFailure(t *testing.T) {
+func TestRunOTLPSetupFailurePolicy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	certificateServer := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer certificateServer.Close()
+	certificate := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificateServer.Certificate().Raw})
+	if certificate == nil {
+		t.Fatal("encode test certificate")
+	}
+	certificatePath := filepath.Join(t.TempDir(), "collector.pem")
+	if err := os.WriteFile(certificatePath, certificate, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name             string
+		policy           string
+		withCertificate  bool
+		wantSetupFailure bool
+		wantAgentStarted bool
+		wantStatus       string
+		wantExport       bool
+	}{
+		{
+			name:             "required setup failure aborts before agent start",
+			policy:           OTLPExportFailurePolicyRequired,
+			withCertificate:  true,
+			wantSetupFailure: true,
+		},
+		{
+			name:             "best effort setup failure runs with degradation",
+			policy:           OTLPExportFailurePolicyBestEffort,
+			withCertificate:  true,
+			wantAgentStarted: true,
+			wantStatus:       "failed",
+		},
+		{
+			name:             "required healthy setup runs and exports",
+			policy:           OTLPExportFailurePolicyRequired,
+			wantAgentStarted: true,
+			wantStatus:       "exported",
+			wantExport:       true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			for _, name := range []string{
+				"OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG",
+				"OTEL_EXPORTER_OTLP_CERTIFICATE", "OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE",
+				"OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE", "OTEL_EXPORTER_OTLP_CLIENT_KEY",
+				"OTEL_EXPORTER_OTLP_TRACES_CLIENT_CERTIFICATE", "OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY",
+				"TRACEPARENT", "TRACESTATE",
+			} {
+				t.Setenv(name, "")
+			}
+			if test.withCertificate {
+				t.Setenv("OTEL_EXPORTER_OTLP_CERTIFICATE", certificatePath)
+			}
+
+			requests := make(chan struct{}, 1)
+			collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				select {
+				case requests <- struct{}{}:
+				default:
+				}
+				w.Header().Set("Content-Type", "application/x-protobuf")
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer collector.Close()
+
+			cwd := t.TempDir()
+			fakeBin := t.TempDir()
+			agentMarker := filepath.Join(t.TempDir(), "agent-started")
+			writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\nprintf started > \"$ACTA_TEST_AGENT_MARKER\"\ncat >/dev/null\n"+
+				`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
+			t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("ACTA_TEST_AGENT_MARKER", agentMarker)
+			stderr := bytes.NewBuffer(nil)
+
+			record, err := runForTest(context.Background(), Options{
+				Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test", OTLPEndpoint: collector.URL,
+				OTLPExportFailurePolicy: test.policy,
+			}, io.Discard, stderr)
+			_, markerErr := os.Stat(agentMarker)
+			if markerErr != nil && !os.IsNotExist(markerErr) {
+				t.Fatal(markerErr)
+			}
+			if agentStarted := markerErr == nil; agentStarted != test.wantAgentStarted {
+				t.Fatalf("agent started = %v, want %v", agentStarted, test.wantAgentStarted)
+			}
+
+			if test.wantSetupFailure {
+				if record != nil || err == nil || !errors.Is(err, ErrTelemetryOnlyFailure) ||
+					!strings.Contains(err.Error(), "during OTLP exporter setup") ||
+					!strings.Contains(err.Error(), "insecure HTTP endpoint cannot use TLS client configuration") {
+					t.Fatalf("required setup failure = record %#v, error %v", record, err)
+				}
+				return
+			}
+			if err != nil || record == nil || !record.OK || record.OTLPStatus != test.wantStatus {
+				t.Fatalf("run result = record %#v, error %v", record, err)
+			}
+			if test.wantStatus == "failed" {
+				if !strings.Contains(record.OTLPError, "insecure HTTP endpoint cannot use TLS client configuration") ||
+					!strings.Contains(stderr.String(), "acta: OTLP export disabled") {
+					t.Fatalf("best-effort degradation = OTLP error %q, stderr %q", record.OTLPError, stderr.String())
+				}
+				assertFileContains(t, filepath.Join(record.RunDir, "run.json"), `"otlp_status": "failed"`)
+			}
+			select {
+			case <-requests:
+				if !test.wantExport {
+					t.Fatal("unexpected OTLP export request")
+				}
+			default:
+				if test.wantExport {
+					t.Fatal("missing OTLP export request")
+				}
+			}
+		})
+	}
+}
+
+// Required telemetry is an operational requirement: export failure exits
+// non-zero only after the successful agent outcome and bundle are durable.
+func TestRunRequiredOTLPExportFailurePreservesOutcomeAndBundle(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake shell agents require /bin/sh")
 	}
 	cwd := t.TempDir()
-	fakeBin := t.TempDir()
-	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
-		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	installSuccessfulCodex(t)
 
 	record, err := runForTest(context.Background(), Options{
-		Agent:        "codex",
-		CWD:          cwd,
-		Prompt:       "x",
-		PromptSource: "test",
-		Stream:       false,
-		OTLPEndpoint: "http://127.0.0.1:1/v1/traces", // refused
+		Agent:                   "codex",
+		CWD:                     cwd,
+		Prompt:                  "x",
+		PromptSource:            "test",
+		Stream:                  false,
+		OTLPEndpoint:            "http://127.0.0.1:1/v1/traces", // refused
+		OTLPExportFailurePolicy: OTLPExportFailurePolicyRequired,
 	}, bytes.NewBuffer(nil), bytes.NewBuffer(nil))
-	if err == nil {
+	if err == nil || !errors.Is(err, ErrTelemetryOnlyFailure) || !strings.Contains(err.Error(), "required OTLP export failed") {
 		t.Fatal("expected the failed OTLP export to fail the run")
 	}
 	if record == nil {
@@ -1039,6 +1215,1206 @@ func TestRunFailsOnExplicitOTLPExportFailure(t *testing.T) {
 		return
 	}
 	assertJSONFile(t, filepath.Join(record.RunDir, "run.json"))
+	if !record.OK || record.TerminationReason != "completed" || record.OTLPStatus != "failed" {
+		t.Fatalf("record outcome changed by telemetry failure: %#v", record)
+	}
+}
+
+func TestRunRequiredOTLPRejectsImpossibleDeliveryAtStartup(t *testing.T) {
+	tests := []struct {
+		name        string
+		endpoint    string
+		environment map[string]string
+		want        string
+	}{
+		{
+			name: "SDK disabled", endpoint: "http://127.0.0.1:4318/v1/traces",
+			environment: map[string]string{"OTEL_SDK_DISABLED": "true"},
+			want:        "OTEL_SDK_DISABLED=true disables OpenTelemetry",
+		},
+		{
+			name: "trace exporter disabled", endpoint: "http://127.0.0.1:4318/v1/traces",
+			environment: map[string]string{"OTEL_TRACES_EXPORTER": "none"},
+			want:        "OTEL_TRACES_EXPORTER=none disables trace export",
+		},
+		{
+			name: "no endpoint",
+			want: "no OTLP endpoint is configured",
+		},
+		{
+			name: "invalid endpoint", endpoint: "%invalid",
+			want: "--otlp-endpoint must be an absolute http(s) URL with a host",
+		},
+		{
+			name: "invalid environment endpoint",
+			environment: map[string]string{
+				"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "%invalid",
+			},
+			want: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT must be an absolute http(s) URL with a host",
+		},
+		{
+			name: "sampling disabled", endpoint: "http://127.0.0.1:4318/v1/traces",
+			environment: map[string]string{"OTEL_TRACES_SAMPLER": "always_off"},
+			want:        "OTEL_TRACES_SAMPLER=always_off disables sampling",
+		},
+		{
+			name: "root sampling disabled without inbound parent", endpoint: "http://127.0.0.1:4318/v1/traces",
+			environment: map[string]string{"OTEL_TRACES_SAMPLER": "parentbased_always_off"},
+			want:        "OTEL_TRACES_SAMPLER=parentbased_always_off disables sampling without a sampled inbound parent context",
+		},
+		{
+			name: "root sampling disabled with unsampled inbound parent", endpoint: "http://127.0.0.1:4318/v1/traces",
+			environment: map[string]string{
+				"OTEL_TRACES_SAMPLER": "parentbased_always_off",
+				"TRACEPARENT":         "00-11111111111111111111111111111111-2222222222222222-00",
+			},
+			want: "OTEL_TRACES_SAMPLER=parentbased_always_off disables sampling without a sampled inbound parent context",
+		},
+		{
+			name: "parent-based ratio disables root sampling without inbound parent", endpoint: "http://127.0.0.1:4318/v1/traces",
+			environment: map[string]string{"OTEL_TRACES_SAMPLER": "parentbased_traceidratio", "OTEL_TRACES_SAMPLER_ARG": "0"},
+			want:        "OTEL_TRACES_SAMPLER=parentbased_traceidratio",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			for _, name := range []string{
+				"OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG",
+				"OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "TRACEPARENT", "TRACESTATE",
+			} {
+				t.Setenv(name, "")
+			}
+			for name, value := range test.environment {
+				t.Setenv(name, value)
+			}
+			record, err := Run(context.Background(), Options{
+				OTLPEndpoint: test.endpoint, OTLPExportFailurePolicy: OTLPExportFailurePolicyRequired,
+			}, io.Discard, io.Discard)
+			if record != nil || err == nil || !strings.Contains(err.Error(), "--otlp-export-failure-policy required cannot deliver traces") || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("startup result = record %#v, error %v; want clear impossible-delivery error containing %q", record, err, test.want)
+			}
+		})
+	}
+}
+
+func TestRunRequiredOTLPUnsampledRootPreservesOutcomeAndBundle(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	requests := make(chan struct{}, 1)
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case requests <- struct{}{}:
+		default:
+		}
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer collector.Close()
+
+	cwd := t.TempDir()
+	installSuccessfulCodex(t)
+	t.Setenv("OTEL_TRACES_SAMPLER", "parentbased_always_on")
+	t.Setenv("TRACEPARENT", "00-0123456789abcdef0123456789abcdef-0123456789abcdef-00")
+
+	record, err := runForTest(context.Background(), Options{
+		Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test", OTLPEndpoint: collector.URL,
+		OTLPExportFailurePolicy: OTLPExportFailurePolicyRequired,
+	}, io.Discard, io.Discard)
+	if err == nil || !errors.Is(err, ErrTelemetryOnlyFailure) || !strings.Contains(err.Error(), "root span was not sampled") {
+		t.Fatalf("required unsampled run error = %v, want telemetry-only failure", err)
+	}
+	if record == nil || !record.OK || record.TerminationReason != "completed" || record.OTLPStatus != "not_sampled" || record.TraceID != "" {
+		t.Fatalf("required unsampled record = %#v, want preserved successful outcome and truthful telemetry status", record)
+	}
+	if err := verifyCompleteBundle(record.RunDir, record); err != nil {
+		t.Fatalf("required unsampled run did not preserve a complete bundle: %v", err)
+	}
+	assertFileContains(t, filepath.Join(record.RunDir, "digest.json"), `"otlp_status": "not_sampled"`)
+	assertFileContains(t, filepath.Join(record.RunDir, actaevents.Filename), `"otlp_status":"not_sampled"`)
+	select {
+	case <-requests:
+		t.Fatal("unsampled root unexpectedly exported a trace")
+	default:
+	}
+}
+
+func TestRunBestEffortOTLPExportFailureIsDefault(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	cwd := t.TempDir()
+	installSuccessfulCodex(t)
+	t.Setenv("OTEL_TRACES_SAMPLER", "always_on")
+	stderr := bytes.NewBuffer(nil)
+	record, err := runForTest(context.Background(), Options{
+		Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test",
+		OTLPEndpoint: "http://127.0.0.1:1/v1/traces",
+	}, io.Discard, stderr)
+	if err != nil || record == nil || !record.OK || record.OTLPStatus != "failed" {
+		t.Fatalf("default best-effort run = record %#v, err %v", record, err)
+	}
+	if !strings.Contains(stderr.String(), "OTLP flush failed") {
+		t.Fatalf("stderr = %q, want Finish flush failure", stderr.String())
+	}
+	persistedDigest := assertTelemetryArtifactsMatchRecord(t, record)
+	redigested, err := digest.FromRunDir(record.RunDir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if redigested.SchemaVersion != persistedDigest.SchemaVersion ||
+		redigested.OTLPStatus != persistedDigest.OTLPStatus || redigested.OTLPError != persistedDigest.OTLPError {
+		t.Fatalf("re-digested OTLP = schema %d, %q/%q; persisted digest = schema %d, %q/%q",
+			redigested.SchemaVersion, redigested.OTLPStatus, redigested.OTLPError,
+			persistedDigest.SchemaVersion, persistedDigest.OTLPStatus, persistedDigest.OTLPError)
+	}
+}
+
+type telemetryGeneration struct {
+	recordStatus string
+	recordError  string
+	digestStatus string
+	digestError  string
+	eventStatus  string
+	eventError   string
+	runHash      [sha256.Size]byte
+	digestHash   [sha256.Size]byte
+	eventsHash   [sha256.Size]byte
+}
+
+func readTelemetryGeneration(runDir string) (telemetryGeneration, error) {
+	var generation telemetryGeneration
+	runPayload, err := os.ReadFile(filepath.Join(runDir, "run.json"))
+	if err != nil {
+		return generation, err
+	}
+	var record runrecord.Record
+	if err := json.Unmarshal(runPayload, &record); err != nil {
+		return generation, err
+	}
+	digestPayload, err := os.ReadFile(filepath.Join(runDir, "digest.json"))
+	if err != nil {
+		return generation, err
+	}
+	var d digest.Digest
+	if err := json.Unmarshal(digestPayload, &d); err != nil {
+		return generation, err
+	}
+	eventsPayload, err := os.ReadFile(filepath.Join(runDir, actaevents.Filename))
+	if err != nil {
+		return generation, err
+	}
+	eventStatus, eventError, err := telemetryFromEvents(eventsPayload)
+	if err != nil {
+		return generation, err
+	}
+	return telemetryGeneration{
+		recordStatus: record.OTLPStatus,
+		recordError:  record.OTLPError,
+		digestStatus: d.OTLPStatus,
+		digestError:  d.OTLPError,
+		eventStatus:  eventStatus,
+		eventError:   eventError,
+		runHash:      sha256.Sum256(runPayload),
+		digestHash:   sha256.Sum256(digestPayload),
+		eventsHash:   sha256.Sum256(eventsPayload),
+	}, nil
+}
+
+func telemetryFromEvents(payload []byte) (string, string, error) {
+	for _, line := range bytes.Split(bytes.TrimSpace(payload), []byte("\n")) {
+		var event actaevents.Event
+		if err := json.Unmarshal(line, &event); err != nil {
+			return "", "", err
+		}
+		if event.Type == actaevents.TypeRunStarted {
+			return telemetryFromStartedEvent(event)
+		}
+	}
+	return "", "", errors.New("run.started event missing")
+}
+
+func telemetryFromStartedEvent(event actaevents.Event) (string, string, error) {
+	var started struct {
+		OTLPStatus string `json:"otlp_status"`
+		OTLPError  string `json:"otlp_error"`
+	}
+	if err := json.Unmarshal(event.Payload, &started); err != nil {
+		return "", "", err
+	}
+	return started.OTLPStatus, started.OTLPError, nil
+}
+
+func TestRunPublishesPendingTelemetryThenCommitsFailedGeneration(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	clearOTELTraceEnv(t)
+	t.Setenv("OTEL_TRACES_SAMPLER", "always_on")
+
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "injected export failure", http.StatusBadRequest)
+	}))
+	defer collector.Close()
+
+	type uploadedTelemetry struct {
+		status string
+		err    string
+	}
+	uploadedEvents := make(chan uploadedTelemetry, 1)
+	uploadedDigest := make(chan uploadedTelemetry, 1)
+	uploadHandlerErr := make(chan error, 1)
+	reportHandlerErr := func(err error) {
+		select {
+		case uploadHandlerErr <- err:
+		default:
+		}
+	}
+	uploadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		payload, err := io.ReadAll(request.Body)
+		if err != nil {
+			reportHandlerErr(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/events"):
+			var batch struct {
+				Events []actaevents.Event `json:"events"`
+			}
+			if err := json.Unmarshal(payload, &batch); err != nil {
+				reportHandlerErr(err)
+				break
+			}
+			for _, event := range batch.Events {
+				if event.Type != actaevents.TypeRunStarted {
+					continue
+				}
+				status, telemetryErr, err := telemetryFromStartedEvent(event)
+				if err != nil {
+					reportHandlerErr(err)
+				} else {
+					uploadedEvents <- uploadedTelemetry{status: status, err: telemetryErr}
+				}
+			}
+		case strings.HasSuffix(request.URL.Path, "/artifacts") && request.URL.Query().Get("filename") == "digest.json":
+			var d digest.Digest
+			if err := json.Unmarshal(payload, &d); err != nil {
+				reportHandlerErr(err)
+			} else {
+				uploadedDigest <- uploadedTelemetry{status: d.OTLPStatus, err: d.OTLPError}
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer uploadServer.Close()
+
+	cwd := t.TempDir()
+	const runID = "telemetry-publication-boundary"
+	runDir := filepath.Join(cwd, ".acta", "runs", runID)
+	installSuccessfulCodex(t)
+
+	withPublicationHooks(t)
+	originalRename := publishRename
+	uploadDone := make(chan struct{})
+	publishRename = func(oldPath, newPath string) error {
+		err := originalRename(oldPath, newPath)
+		if err == nil && filepath.Clean(newPath) == filepath.Clean(runDir) {
+			select {
+			case <-uploadDone:
+			case <-time.After(10 * time.Second):
+			}
+		}
+		return err
+	}
+
+	type visibilityObservation struct {
+		generation telemetryGeneration
+		err        error
+	}
+	observed := make(chan visibilityObservation, 1)
+	go func() {
+		defer close(uploadDone)
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			if _, err := os.Stat(runDir); err == nil {
+				break
+			} else if !errors.Is(err, os.ErrNotExist) {
+				observed <- visibilityObservation{err: err}
+				return
+			}
+			if time.Now().After(deadline) {
+				observed <- visibilityObservation{err: errors.New("published bundle did not become visible")}
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		generation, err := readTelemetryGeneration(runDir)
+		if err == nil {
+			redigested, digestErr := digest.FromRunDir(runDir, "")
+			if digestErr != nil {
+				err = digestErr
+			} else if redigested.OTLPStatus != "pending" || redigested.OTLPError != "" {
+				err = fmt.Errorf("pre-commit re-digestion OTLP = %q/%q, want pending/empty", redigested.OTLPStatus, redigested.OTLPError)
+			}
+		}
+		if err == nil {
+			persisted, readErr := ReadRecord(runDir)
+			if readErr != nil {
+				err = readErr
+			} else {
+				err = reporting.UploadRun(context.Background(), reporting.Config{
+					BackendURL: uploadServer.URL, ReportToken: "token", HTTPClient: uploadServer.Client(), RetryDelays: []time.Duration{},
+				}, persisted)
+			}
+		}
+		select {
+		case handlerErr := <-uploadHandlerErr:
+			err = errors.Join(err, handlerErr)
+		default:
+		}
+		observed <- visibilityObservation{generation: generation, err: err}
+	}()
+
+	type runResult struct {
+		record *runrecord.Record
+		err    error
+	}
+	runDone := make(chan runResult, 1)
+	go func() {
+		record, err := runForTest(context.Background(), Options{
+			Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test", RunID: runID,
+			OTLPEndpoint: collector.URL, OTLPExportFailurePolicy: OTLPExportFailurePolicyRequired,
+		}, io.Discard, io.Discard)
+		runDone <- runResult{record: record, err: err}
+	}()
+
+	observation := <-observed
+	if observation.err != nil {
+		t.Fatal(observation.err)
+	}
+	result := <-runDone
+	if result.err == nil || !errors.Is(result.err, ErrTelemetryOnlyFailure) {
+		t.Fatalf("Run() error = %v, want required telemetry-only failure", result.err)
+	}
+	if result.record == nil || result.record.OTLPStatus != "failed" || !result.record.OK {
+		t.Fatalf("Run() record = %#v, want successful outcome with failed telemetry", result.record)
+	}
+
+	if observation.generation.recordStatus != "pending" || observation.generation.recordError != "" {
+		t.Fatalf("initial visible generation = %q/%q, want pending with no error", observation.generation.recordStatus, observation.generation.recordError)
+	}
+	for source, telemetry := range map[string]uploadedTelemetry{
+		"visible run.json": {status: observation.generation.recordStatus, err: observation.generation.recordError},
+		"visible digest":   {status: observation.generation.digestStatus, err: observation.generation.digestError},
+		"visible events":   {status: observation.generation.eventStatus, err: observation.generation.eventError},
+	} {
+		if telemetry.status != "pending" || telemetry.err != "" {
+			t.Errorf("%s telemetry = %q/%q, want pending/empty", source, telemetry.status, telemetry.err)
+		}
+	}
+	for source, uploaded := range map[string]<-chan uploadedTelemetry{
+		"events request":  uploadedEvents,
+		"digest artifact": uploadedDigest,
+	} {
+		select {
+		case telemetry := <-uploaded:
+			if telemetry.status != "pending" || telemetry.err != "" {
+				t.Errorf("uploaded %s telemetry = %q/%q, want pending/empty", source, telemetry.status, telemetry.err)
+			}
+		default:
+			t.Errorf("concurrent upload did not capture %s", source)
+		}
+	}
+	finalGeneration, err := readTelemetryGeneration(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalGeneration == observation.generation {
+		t.Fatal("final telemetry generation did not replace the pending generation")
+	}
+	redigested, err := digest.FromRunDir(runDir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if redigested.OTLPStatus != finalGeneration.digestStatus || redigested.OTLPError != finalGeneration.digestError {
+		t.Fatalf("post-commit re-digestion OTLP = %q/%q, final generation = %q/%q",
+			redigested.OTLPStatus, redigested.OTLPError, finalGeneration.digestStatus, finalGeneration.digestError)
+	}
+	for source, telemetry := range map[string]uploadedTelemetry{
+		"final run.json":  {status: finalGeneration.recordStatus, err: finalGeneration.recordError},
+		"final digest":    {status: finalGeneration.digestStatus, err: finalGeneration.digestError},
+		"final events":    {status: finalGeneration.eventStatus, err: finalGeneration.eventError},
+		"returned record": {status: result.record.OTLPStatus, err: result.record.OTLPError},
+	} {
+		if telemetry.status != "failed" || telemetry.err == "" || telemetry.err != result.record.OTLPError {
+			t.Errorf("%s telemetry = %q/%q, want failed/%q", source, telemetry.status, telemetry.err, result.record.OTLPError)
+		}
+	}
+}
+
+func TestRunSurfacesGenerationCommitFailureUnderBestEffort(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	cwd := t.TempDir()
+	installSuccessfulCodex(t)
+
+	originalProjectionWriter := writeFinalProjection
+	var before telemetryGeneration
+	writeFinalProjection = func(bundleDir string, _ *runrecord.Record, _ *digest.Digest, _ string) error {
+		var err error
+		before, err = readTelemetryGeneration(bundleDir)
+		if err != nil {
+			return err
+		}
+		return errors.New("injected generation commit failure")
+	}
+	t.Cleanup(func() { writeFinalProjection = originalProjectionWriter })
+
+	record, err := runForTest(context.Background(), Options{
+		Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test",
+		OTLPExportFailurePolicy: OTLPExportFailurePolicyBestEffort,
+	}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "record final telemetry generation") ||
+		!strings.Contains(err.Error(), "injected generation commit failure") {
+		t.Fatalf("Run() error = %v, want surfaced recording failure", err)
+	}
+	if record == nil || record.OK || record.TerminationReason != "acta_error" {
+		t.Fatalf("returned record = %#v, want non-success recording classification", record)
+	}
+	after, readErr := readTelemetryGeneration(record.RunDir)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if after != before {
+		t.Fatalf("failed generation commit changed visible artifacts: before=%+v after=%+v", before, after)
+	}
+	persisted, readErr := ReadRecord(record.RunDir)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !persisted.OK || persisted.TerminationReason != "completed" {
+		t.Fatalf("previous consistent generation was not retained: %#v", persisted)
+	}
+}
+
+func TestRunBestEffortSkipsInvalidOTLPEndpointWithoutAmbientFallback(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	requests := make(chan struct{}, 1)
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests <- struct{}{}
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer collector.Close()
+
+	cwd := t.TempDir()
+	installSuccessfulCodex(t)
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", collector.URL)
+	stderr := bytes.NewBuffer(nil)
+	record, err := runForTest(context.Background(), Options{
+		Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test", OTLPEndpoint: "%invalid",
+	}, io.Discard, stderr)
+	if err != nil || record == nil || !record.OK || record.OTLPStatus != "failed" || record.OTLPError == "" || record.TraceID != "" {
+		t.Fatalf("best-effort invalid endpoint result = record %#v, err %v", record, err)
+	}
+	if !strings.Contains(record.OTLPError, "--otlp-endpoint must be an absolute http(s) URL with a host") {
+		t.Fatalf("best-effort invalid endpoint error = %q", record.OTLPError)
+	}
+	assertFileContains(t, filepath.Join(record.RunDir, "run.json"), `"otlp_status": "failed"`)
+	assertFileContains(t, filepath.Join(record.RunDir, "run.json"), `"otlp_error": "--otlp-endpoint`)
+	if got := stderr.String(); !strings.Contains(got, "acta: OTLP export disabled") ||
+		!strings.Contains(got, "--otlp-endpoint must be an absolute http(s) URL with a host") {
+		t.Fatalf("best-effort warning = %q, want invalid endpoint skip", got)
+	}
+	select {
+	case <-requests:
+		t.Fatal("invalid explicit endpoint fell back to the ambient collector")
+	default:
+	}
+}
+
+func TestRunBestEffortRecordsInvalidEnvironmentOTLPEndpointFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	cwd := t.TempDir()
+	installSuccessfulCodex(t)
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "%invalid")
+
+	record, err := runForTest(context.Background(), Options{
+		Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test",
+	}, io.Discard, io.Discard)
+	if err != nil || record == nil || !record.OK || record.OTLPStatus != "failed" ||
+		!strings.Contains(record.OTLPError, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") || record.TraceID != "" {
+		t.Fatalf("best-effort invalid environment endpoint result = record %#v, err %v", record, err)
+	}
+}
+
+func TestNormalizeOTLPExportFailurePolicyRejectsDeprecatedRequiredConflict(t *testing.T) {
+	_, err := normalizeOTLPExportFailurePolicy(Options{
+		OTLPBestEffort:          true,
+		OTLPExportFailurePolicy: OTLPExportFailurePolicyRequired,
+	})
+	if err == nil || !strings.Contains(err.Error(), "--otlp-best-effort") || !strings.Contains(err.Error(), "--otlp-export-failure-policy") {
+		t.Fatalf("conflicting OTLP policy error = %v, want both flag names", err)
+	}
+
+	policy, err := normalizeOTLPExportFailurePolicy(Options{OTLPBestEffort: true})
+	if err != nil || policy != OTLPExportFailurePolicyBestEffort {
+		t.Fatalf("deprecated flag policy = %q, error = %v", policy, err)
+	}
+}
+
+func TestNormalizeOTLPExportFailurePolicyRejectsInvalidPolicyBeforeDeprecatedOverride(t *testing.T) {
+	_, err := normalizeOTLPExportFailurePolicy(Options{
+		OTLPBestEffort:          true,
+		OTLPExportFailurePolicy: "garbage",
+	})
+	if err == nil || !strings.Contains(err.Error(), "--otlp-export-failure-policy must be") {
+		t.Fatalf("invalid OTLP policy error = %v, want enum validation error", err)
+	}
+}
+
+func TestPrepareAgentEnvironmentForwardsOnlyTraceCorrelationTelemetry(t *testing.T) {
+	environment := []string{
+		"PATH=/bin",
+		"ACTA_REPORT_TOKEN=private",
+		"ACTA_REPORT_TOKEN",
+		"OTEL_EXPORTER_OTLP_ENDPOINT=https://collector.example/private-token",
+		"OTEL_EXPORTER_OTLP_TRACES_HEADERS=Authorization=Bearer private",
+		"OTEL_TRACES_SAMPLER=always_off",
+		"otel_sdk_disabled=true",
+		"OTEL_MALFORMED",
+		"MALFORMED",
+		"TRACEPARENT=00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+		"TRACESTATE=vendor=opaque",
+		"TRACEPARENT",
+	}
+	got := prepareAgentEnvironment(environment, "ACTA_REPORT_TOKEN")
+	want := []string{
+		"PATH=/bin",
+		"ACTA_REPORT_TOKEN",
+		"MALFORMED",
+		"TRACEPARENT=00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+		"TRACESTATE=vendor=opaque",
+		"TRACEPARENT",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("agent environment = %q, want %q", got, want)
+	}
+}
+
+func TestRunKeepsAllOTELEnvironmentOutOfAgentSubprocess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	requests := make(chan string, 1)
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests <- request.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer collector.Close()
+
+	cwd := t.TempDir()
+	fakeBin := t.TempDir()
+	writeFakeAgent(t, fakeBin, "codex", `#!/bin/sh
+if env | grep -q '^OTEL_'; then
+  echo 'OTEL configuration leaked to coding agent' >&2
+  exit 23
+fi
+cat >/dev/null
+printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'
+`)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "Authorization=Bearer secret-otlp-token")
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://collector.example/private-token")
+	t.Setenv("OTEL_TRACES_SAMPLER", "always_on")
+
+	record, err := runForTest(context.Background(), Options{
+		Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test", OTLPEndpoint: collector.URL,
+	}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !record.OK || record.OTLPStatus != "exported" || record.TraceID == "" {
+		t.Fatalf("record = %#v, want successful exported trace", record)
+	}
+	assertTelemetryArtifactsMatchRecord(t, record)
+	select {
+	case authorization := <-requests:
+		if authorization != "Bearer secret-otlp-token" {
+			t.Fatalf("collector Authorization = %q, want Acta exporter credential", authorization)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Acta exporter did not reach collector")
+	}
+}
+
+func TestRunRecordsAlwaysOffSamplerAsNotSampled(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	requests := make(chan struct{}, 1)
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case requests <- struct{}{}:
+		default:
+		}
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer collector.Close()
+
+	cwd := t.TempDir()
+	installSuccessfulCodex(t)
+	t.Setenv("OTEL_TRACES_SAMPLER", "always_off")
+
+	record, err := runForTest(context.Background(), Options{
+		Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test", OTLPEndpoint: collector.URL,
+	}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !record.OK || record.OTLPStatus != "not_sampled" || record.TraceID != "" {
+		t.Fatalf("record = %#v, want successful unsampled trace without trace_id", record)
+	}
+	select {
+	case <-requests:
+		t.Fatal("always_off sampler unexpectedly exported a trace")
+	default:
+	}
+}
+
+func TestRunRedactReasoningRemovesTextFromEntireBundle(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	const secretReasoning = "private-chain-of-thought-7419"
+	cwd := t.TempDir()
+	fakeBin := t.TempDir()
+	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
+		`printf '{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","text":"`+secretReasoning+`"}}\n'`+"\n"+
+		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	record, err := runForTest(context.Background(), Options{
+		Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test", RedactReasoning: true,
+	}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.ReasoningRedactionState != "redacted" {
+		t.Fatalf("reasoning redaction state = %q", record.ReasoningRedactionState)
+	}
+	err = filepath.Walk(record.RunDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil || info.IsDir() {
+			return walkErr
+		}
+		payload, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if strings.Contains(string(payload), secretReasoning) {
+			return fmt.Errorf("reasoning text leaked into %s", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+type exportedRootOutcome struct {
+	ok              bool
+	foundOK         bool
+	status          tracepb.Status_StatusCode
+	statusMessage   string
+	bundlePublished bool
+}
+
+func newRootTraceCollector(t *testing.T, runJSON string) (*httptest.Server, <-chan exportedRootOutcome) {
+	t.Helper()
+	outcomes := make(chan exportedRootOutcome, 1)
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		payload, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Error(err)
+		} else {
+			var exported collectortracepb.ExportTraceServiceRequest
+			if err := proto.Unmarshal(payload, &exported); err != nil {
+				t.Error(err)
+			} else {
+				for _, resource := range exported.ResourceSpans {
+					for _, scope := range resource.ScopeSpans {
+						for _, span := range scope.Spans {
+							if span.Name != "invoke_agent codex" {
+								continue
+							}
+							outcome := exportedRootOutcome{status: span.Status.GetCode(), statusMessage: span.Status.GetMessage()}
+							if runJSON != "" {
+								_, err := os.Stat(runJSON)
+								outcome.bundlePublished = err == nil
+							}
+							for _, attr := range span.Attributes {
+								if attr.Key == "acta.run.ok" {
+									outcome.ok = attr.Value.GetBoolValue()
+									outcome.foundOK = true
+								}
+							}
+							outcomes <- outcome
+						}
+					}
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		w.WriteHeader(http.StatusOK)
+	}))
+	return collector, outcomes
+}
+
+func TestRunFinishesRootTraceAfterReasoningRedaction(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	clearOTELTraceEnv(t)
+	tests := []struct {
+		name       string
+		provider   string
+		wantOK     bool
+		wantStatus tracepb.Status_StatusCode
+	}{
+		{
+			name:       "failed redaction",
+			provider:   `printf '"private reasoning"\n'`,
+			wantStatus: tracepb.Status_STATUS_CODE_ERROR,
+		},
+		{
+			name:       "successful redaction",
+			provider:   `printf '{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","text":"private reasoning"}}\n'`,
+			wantOK:     true,
+			wantStatus: tracepb.Status_STATUS_CODE_OK,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			collector, outcomes := newRootTraceCollector(t, "")
+			defer collector.Close()
+
+			cwd := t.TempDir()
+			fakeBin := t.TempDir()
+			writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+test.provider+"\n"+
+				`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
+			t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			record, err := runForTest(context.Background(), Options{
+				Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test", RedactReasoning: true,
+				OTLPEndpoint: collector.URL,
+			}, io.Discard, io.Discard)
+			if test.wantOK && err != nil {
+				t.Fatal(err)
+			}
+			if !test.wantOK && (err == nil || !strings.Contains(err.Error(), "reasoning redaction failed")) {
+				t.Fatalf("failed-redaction error = %v", err)
+			}
+			if record == nil || record.OK != test.wantOK {
+				t.Fatalf("record outcome = %#v, want OK=%v", record, test.wantOK)
+			}
+			select {
+			case outcome := <-outcomes:
+				if !outcome.foundOK || outcome.ok != record.OK || outcome.status != test.wantStatus {
+					t.Fatalf("root outcome = %+v, record OK=%v; want status=%v", outcome, record.OK, test.wantStatus)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("root span was not exported")
+			}
+		})
+	}
+}
+
+func TestRunFinishesRootTraceAfterLocalBundleFinalization(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	clearOTELTraceEnv(t)
+	tests := []struct {
+		name      string
+		runID     string
+		inject    string
+		wantOK    bool
+		wantError string
+	}{
+		{name: "successful run", runID: "trace-finalization-success", wantOK: true},
+		{name: "final Git capture failure", runID: "trace-finalization-git", inject: "git", wantError: "not a repository at completion"},
+		{name: "digest write failure", runID: "trace-finalization-digest", inject: "digest", wantError: "injected digest write failure"},
+		{name: "event write failure", runID: "trace-finalization-events", inject: "events", wantError: "injected event write failure"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cwd := t.TempDir()
+			if test.inject == "git" {
+				gitCmd(t, cwd, "init", "-q")
+				gitCmd(t, cwd, "commit", "-q", "--allow-empty", "-m", "initial")
+			}
+
+			originalDigestWriter := writeFinalDigest
+			originalEventWriter := writeFinalEvents
+			switch test.inject {
+			case "digest":
+				calls := 0
+				writeFinalDigest = func(runDir string, d *digest.Digest) error {
+					calls++
+					if calls == 1 {
+						return errors.New("injected digest write failure")
+					}
+					return originalDigestWriter(runDir, d)
+				}
+			case "events":
+				calls := 0
+				writeFinalEvents = func(runDir string, record *runrecord.Record, d *digest.Digest, prompt string) error {
+					calls++
+					if calls == 1 {
+						return errors.New("injected event write failure")
+					}
+					return originalEventWriter(runDir, record, d, prompt)
+				}
+			}
+			t.Cleanup(func() {
+				writeFinalDigest = originalDigestWriter
+				writeFinalEvents = originalEventWriter
+			})
+
+			runJSON := filepath.Join(cwd, ".acta", "runs", test.runID, "run.json")
+			collector, outcomes := newRootTraceCollector(t, runJSON)
+			defer collector.Close()
+
+			fakeBin := t.TempDir()
+			script := "#!/bin/sh\ncat >/dev/null\n"
+			if test.inject == "git" {
+				script += "rm -rf \"$PWD/.git\"\n"
+			}
+			script += `printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'` + "\n"
+			writeFakeAgent(t, fakeBin, "codex", script)
+			t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			record, err := runForTest(context.Background(), Options{
+				Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test",
+				RunID: test.runID, OTLPEndpoint: collector.URL,
+			}, io.Discard, io.Discard)
+			if test.wantOK && err != nil {
+				t.Fatal(err)
+			}
+			if !test.wantOK && (err == nil || !strings.Contains(err.Error(), test.wantError)) {
+				t.Fatalf("Run() error = %v, want failure containing %q", err, test.wantError)
+			}
+			if record == nil || record.OK != test.wantOK {
+				t.Fatalf("record outcome = %#v, want OK=%v", record, test.wantOK)
+			}
+			persisted, readErr := ReadRecord(record.RunDir)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if persisted.OK != record.OK {
+				t.Fatalf("run.json OK=%v, returned record OK=%v", persisted.OK, record.OK)
+			}
+
+			wantStatus := tracepb.Status_STATUS_CODE_ERROR
+			if test.wantOK {
+				wantStatus = tracepb.Status_STATUS_CODE_OK
+			}
+			select {
+			case outcome := <-outcomes:
+				if !outcome.bundlePublished || !outcome.foundOK || outcome.ok != persisted.OK || outcome.status != wantStatus {
+					t.Fatalf("root outcome = %+v, run.json OK=%v; want status=%v after publication", outcome, persisted.OK, wantStatus)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("root span was not exported")
+			}
+		})
+	}
+}
+
+func TestRunPublicationRenameFailureIsExportedAndReconciledInRecoveryBundle(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	clearOTELTraceEnv(t)
+	t.Setenv("OTEL_TRACES_SAMPLER", "always_on")
+
+	cwd := t.TempDir()
+	const runID = "publication-rename-trace-failure"
+	runDir := filepath.Join(cwd, ".acta", "runs", runID)
+	collector, outcomes := newRootTraceCollector(t, filepath.Join(runDir, "run.json"))
+	defer collector.Close()
+	installSuccessfulCodex(t)
+
+	withPublicationHooks(t)
+	publishRename = func(_, _ string) error { return errors.New("injected publication rename failure") }
+	record, err := runForTest(context.Background(), Options{
+		Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test", RunID: runID,
+		OTLPEndpoint: collector.URL,
+	}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "injected publication rename failure") {
+		t.Fatalf("Run() error = %v, want publication rename failure", err)
+	}
+	if record == nil || record.OK || record.RecoveryDir == "" || record.OTLPStatus != "exported" {
+		t.Fatalf("returned recovery record = %#v", record)
+	}
+	select {
+	case outcome := <-outcomes:
+		if outcome.bundlePublished || !outcome.foundOK || outcome.ok || outcome.status != tracepb.Status_STATUS_CODE_ERROR ||
+			!strings.Contains(outcome.statusMessage, "injected publication rename failure") {
+			t.Fatalf("exported publication-failure outcome = %+v", outcome)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("root span was not exported")
+	}
+	persisted, readErr := ReadRecord(record.RecoveryDir)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if persisted.OK || !strings.Contains(persisted.Error, "injected publication rename failure") {
+		t.Fatalf("persisted recovery outcome = %#v", persisted)
+	}
+	if err := verifyCompleteBundle(record.RecoveryDir, persisted); err != nil {
+		t.Fatalf("recovery bundle is incomplete: %v", err)
+	}
+	assertTelemetryArtifactsMatchRecord(t, persisted)
+}
+
+func TestRunRedactReasoningScrubsUnsupportedFutureEventFromEntireBundle(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	const secretReasoning = "private-future-event-thinking-8426"
+	cwd := t.TempDir()
+	fakeBin := t.TempDir()
+	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
+		`printf '{"type":"future.event","thinking":"`+secretReasoning+`"}\n'`+"\n"+
+		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	record, err := runForTest(context.Background(), Options{
+		Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test", RedactReasoning: true,
+	}, io.Discard, io.Discard)
+	if err == nil || record == nil || !strings.Contains(err.Error(), "unsupported event") {
+		t.Fatalf("record=%+v error=%v, want retained bundle with unsupported-event failure", record, err)
+	}
+	if record.ReasoningRedactionState != "redacted" {
+		t.Fatalf("reasoning redaction state = %q, want redacted", record.ReasoningRedactionState)
+	}
+	for _, name := range []string{record.RawStdoutArtifact, "digest.json", actaevents.Filename} {
+		payload, readErr := os.ReadFile(filepath.Join(record.RunDir, name))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if strings.Contains(string(payload), secretReasoning) ||
+			!strings.Contains(string(payload), reasoning.RedactedMarker) {
+			t.Errorf("unsupported future reasoning was not redacted in %s: %s", name, payload)
+		}
+	}
+}
+
+func TestRunRedactedReasoningRedigestsWithStableMetadata(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	reasoningText := strings.Repeat("ø", digest.MaxEventTextBytes/2+17)
+	wantChars := utf8.RuneCountInString(reasoningText)
+	tests := map[string]string{
+		"codex":  `{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","text":"` + reasoningText + `"}}`,
+		"claude": `{"type":"assistant","message":{"id":"message-1","content":[{"type":"thinking","thinking":"` + reasoningText + `"}]}}`,
+	}
+	for agent, providerEvent := range tests {
+		t.Run(agent, func(t *testing.T) {
+			cwd := t.TempDir()
+			fakeBin := t.TempDir()
+			script := "#!/bin/sh\nprintf '%s\\n' '" + providerEvent + "'\n"
+			if agent == "codex" {
+				script += `printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'` + "\n"
+			}
+			writeFakeAgent(t, fakeBin, agent, script)
+			t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			record, err := runForTest(context.Background(), Options{
+				Agent: agent, CWD: cwd, Prompt: "x", PromptSource: "test", RedactReasoning: true,
+			}, io.Discard, io.Discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			persistedPayload, err := os.ReadFile(filepath.Join(record.RunDir, "digest.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var persisted digest.Digest
+			if err := json.Unmarshal(persistedPayload, &persisted); err != nil {
+				t.Fatal(err)
+			}
+			persistedReasoning := findDigestReasoningEvent(t, &persisted)
+			if !persistedReasoning.Redacted || persistedReasoning.TextChars != wantChars || !persistedReasoning.TextTruncated {
+				t.Fatalf("persisted reasoning event = %+v, want redacted chars=%d truncated=true", persistedReasoning, wantChars)
+			}
+
+			redigested, err := digest.FromRunDir(record.RunDir, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			redigestedReasoning := findDigestReasoningEvent(t, redigested)
+			if !redigestedReasoning.Redacted || redigestedReasoning.LocalReasoningText() != "" ||
+				redigestedReasoning.TextChars != persistedReasoning.TextChars ||
+				redigestedReasoning.TextTruncated != persistedReasoning.TextTruncated {
+				t.Fatalf("re-digested reasoning event = %+v / %q, persisted = %+v",
+					redigestedReasoning, redigestedReasoning.LocalReasoningText(), persistedReasoning)
+			}
+		})
+	}
+}
+
+func findDigestReasoningEvent(t *testing.T, d *digest.Digest) *digest.Event {
+	t.Helper()
+	for index := range d.Timeline {
+		if d.Timeline[index].Kind == digest.KindReasoning {
+			return &d.Timeline[index]
+		}
+	}
+	t.Fatalf("reasoning event missing from timeline: %+v", d.Timeline)
+	return nil
+}
+
+func TestRunRedactReasoningScrubsIDLessUnsupportedReasoningFromEntireBundle(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	const secretReasoning = "private-chain-of-thought-7419"
+	const visibleUnsupported = "keep-unsupported-diagnostic-2184"
+	cwd := t.TempDir()
+	fakeBin := t.TempDir()
+	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
+		`printf '{"type":"item.completed","item":{"type":"reasoning","text":"`+secretReasoning+`"}}\n'`+"\n"+
+		`printf '{"type":"item.completed","item":{"id":"future-1","type":"rethinking","diagnostic":"`+visibleUnsupported+`"}}\n'`+"\n"+
+		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	record, err := runForTest(context.Background(), Options{
+		Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test", RedactReasoning: true,
+	}, io.Discard, io.Discard)
+	if err == nil || record == nil || !strings.Contains(err.Error(), "unsupported event") {
+		t.Fatalf("record=%+v error=%v, want retained bundle with unsupported-event failure", record, err)
+	}
+	if record.ReasoningRedactionState != "redacted" {
+		t.Fatalf("reasoning redaction state = %q", record.ReasoningRedactionState)
+	}
+	err = filepath.Walk(record.RunDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil || info.IsDir() {
+			return walkErr
+		}
+		payload, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if strings.Contains(string(payload), secretReasoning) {
+			return fmt.Errorf("reasoning text leaked into %s", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"digest.json", actaevents.Filename, record.RawStdoutArtifact} {
+		payload, readErr := os.ReadFile(filepath.Join(record.RunDir, name))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if !strings.Contains(string(payload), visibleUnsupported) {
+			t.Errorf("legitimate unsupported details were lost from %s: %s", name, payload)
+		}
+	}
+}
+
+func TestRunRedactionFailurePublishesUnredactedEvidenceAndRefusesDefaultUpload(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	const malformed = "malformed-private-evidence-not-json"
+	cwd := t.TempDir()
+	fakeBin := t.TempDir()
+	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
+		`printf '`+malformed+`\n'`+"\n"+
+		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	record, err := runForTest(context.Background(), Options{
+		Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test", RedactReasoning: true,
+	}, io.Discard, io.Discard)
+	if err == nil || record == nil || !strings.Contains(err.Error(), "reasoning redaction failed") {
+		t.Fatalf("record=%+v error=%v, want a clear retained-bundle redaction failure", record, err)
+	}
+	if record.ReasoningRedactionState != "failed" || record.RunDir == "" || record.RecoveryDir != "" {
+		t.Fatalf("redaction-failure record = %+v", record)
+	}
+	if err := verifyCompleteBundle(record.RunDir, record); err != nil {
+		t.Fatalf("published redaction-failure bundle is incomplete: %v", err)
+	}
+	wantRaw := strings.Join([]string{
+		`{"type":"thread.started","thread_id":"thread-test"}`,
+		`{"type":"turn.started"}`,
+		malformed,
+		`{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`,
+		"",
+	}, "\n")
+	if got := readFile(t, filepath.Join(record.RunDir, record.RawStdoutArtifact)); got != wantRaw {
+		t.Fatalf("retained raw evidence = %q, want byte-identical %q", got, wantRaw)
+	}
+	saved, readErr := ReadRecord(record.RunDir)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if saved.ReasoningRedactionState != "failed" || !strings.Contains(saved.Error, "reasoning redaction failed") {
+		t.Fatalf("saved redaction-failure record = %+v", saved)
+	}
+	assertFileContains(t, filepath.Join(record.RunDir, actaevents.Filename), `"type":"run.failed"`)
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	uploadErr := reporting.UploadRun(context.Background(), reporting.Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+	}, saved)
+	if uploadErr == nil || !strings.Contains(uploadErr.Error(), "remote upload refused") || requests != 0 {
+		t.Fatalf("default failed-redaction upload error=%v requests=%d", uploadErr, requests)
+	}
+}
+
+func TestRunRedactReasoningDoesNotReportScalarProviderRecordAsRedacted(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	const scalar = `"private reasoning"`
+	cwd := t.TempDir()
+	fakeBin := t.TempDir()
+	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
+		`printf '`+scalar+`\n'`+"\n"+
+		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	record, err := runForTest(context.Background(), Options{
+		Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test", RedactReasoning: true,
+	}, io.Discard, io.Discard)
+	if err == nil || record == nil {
+		t.Fatalf("record=%+v error=%v, want scalar-envelope redaction failure", record, err)
+	}
+	if record.ReasoningRedactionState != "failed" {
+		t.Fatalf("reasoning redaction state = %q, want failed", record.ReasoningRedactionState)
+	}
+	if raw := readFile(t, filepath.Join(record.RunDir, record.RawStdoutArtifact)); !strings.Contains(raw, scalar) {
+		t.Fatalf("failed redaction did not retain the scalar evidence: %q", raw)
+	}
 }
 
 // Run ids must be unique — the timestamp is only second-granular, so uniqueness
@@ -1116,6 +2492,7 @@ func TestRunRejectsNegativeResourceOptions(t *testing.T) {
 		{MaxRawOutputBytes: -1},
 		{MaxWorkspaceDiffBytes: -1},
 		{MaxUploadBytes: -1},
+		{MaxRedactionLineBytes: -1},
 	} {
 		if _, err := Run(context.Background(), opts, io.Discard, io.Discard); err == nil {
 			t.Fatalf("Run(%+v) accepted a negative resource option", opts)
@@ -1285,6 +2662,24 @@ func TestVerifyCompleteBundleRejectsMissingArtifact(t *testing.T) {
 	}
 }
 
+func installSuccessfulCodex(t *testing.T) {
+	t.Helper()
+	fakeBin := t.TempDir()
+	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
+		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func clearOTELTraceEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG",
+		"OTEL_EXPORTER_OTLP_COMPRESSION", "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION", "TRACEPARENT", "TRACESTATE",
+	} {
+		t.Setenv(name, "")
+	}
+}
+
 func writeFakeAgent(t *testing.T, dir string, name string, script string) {
 	t.Helper()
 	version := ""
@@ -1330,6 +2725,65 @@ func assertFileContains(t *testing.T, path string, want string) {
 	if !strings.Contains(string(data), want) {
 		t.Fatalf("%s does not contain %q; contents:\n%s", path, want, string(data))
 	}
+}
+
+func assertTelemetryArtifactsMatchRecord(t *testing.T, record *runrecord.Record) *digest.Digest {
+	t.Helper()
+	persistedRecord, err := ReadRecord(record.RunDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persistedRecord.OTLPStatus != record.OTLPStatus || persistedRecord.OTLPError != record.OTLPError {
+		t.Fatalf("run.json OTLP = %q/%q, returned record = %q/%q",
+			persistedRecord.OTLPStatus, persistedRecord.OTLPError, record.OTLPStatus, record.OTLPError)
+	}
+
+	payload, err := os.ReadFile(filepath.Join(record.RunDir, "digest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persistedDigest digest.Digest
+	if err := json.Unmarshal(payload, &persistedDigest); err != nil {
+		t.Fatal(err)
+	}
+	if err := persistedDigest.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if persistedDigest.SchemaVersion != digest.SchemaVersion ||
+		persistedDigest.OTLPStatus != persistedRecord.OTLPStatus || persistedDigest.OTLPError != persistedRecord.OTLPError {
+		t.Fatalf("digest.json = schema %d, OTLP %q/%q; run.json = OTLP %q/%q",
+			persistedDigest.SchemaVersion, persistedDigest.OTLPStatus, persistedDigest.OTLPError,
+			persistedRecord.OTLPStatus, persistedRecord.OTLPError)
+	}
+
+	eventStatus, eventError := readRunStartedOTLP(t, filepath.Join(record.RunDir, actaevents.Filename))
+	if eventStatus != persistedRecord.OTLPStatus || eventError != persistedRecord.OTLPError {
+		t.Fatalf("run.started OTLP = %q/%q, run.json = %q/%q",
+			eventStatus, eventError, persistedRecord.OTLPStatus, persistedRecord.OTLPError)
+	}
+	return &persistedDigest
+}
+
+func readRunStartedOTLP(t *testing.T, path string) (string, string) {
+	t.Helper()
+	for lineNumber, line := range strings.Split(strings.TrimSpace(readFile(t, path)), "\n") {
+		var event actaevents.Event
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("decode event line %d: %v", lineNumber+1, err)
+		}
+		if event.Type == actaevents.TypeRunStarted {
+			var payload struct {
+				OTLPStatus string `json:"otlp_status"`
+				OTLPError  string `json:"otlp_error"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode run.started payload: %v", err)
+			}
+			return payload.OTLPStatus, payload.OTLPError
+		}
+	}
+	t.Fatalf("run.started event missing from %s", path)
+	return "", ""
 }
 
 func readFile(t *testing.T, path string) string {

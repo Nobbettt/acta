@@ -1,17 +1,21 @@
 package runrecord
 
 import (
+	"encoding/json"
 	"fmt"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/nobbettt/acta/internal/schemaversion"
 	"github.com/nobbettt/acta/internal/version"
 )
 
 // MaxRecordBytes is the largest run.json payload Acta will write or read.
 const (
 	MaxRecordBytes   int64 = 4 << 20
-	SchemaVersion          = 2
+	SchemaVersion          = 3
 	MinSchemaVersion       = 2
 )
 
@@ -28,6 +32,19 @@ type Producer struct {
 func CurrentProducer() Producer {
 	build := version.Current()
 	return Producer{Name: "acta", Version: build.Version, Commit: build.Commit, Date: build.Date}
+}
+
+// SupportsV3Fields reports whether a run-record, digest, or event schema
+// version includes the fields and enum values introduced in schema v3.
+func SupportsV3Fields(schemaVersion int) bool {
+	return schemaVersion >= 3
+}
+
+// SupportsOTLPStatus reports whether status belongs to the closed vocabulary
+// for schemaVersion. Callers decide whether an empty status is allowed.
+func SupportsOTLPStatus(schemaVersion int, status string) bool {
+	return slices.Contains([]string{"not_configured", "exported", "failed"}, status) ||
+		SupportsV3Fields(schemaVersion) && slices.Contains([]string{"not_sampled", "pending"}, status)
 }
 
 type Record struct {
@@ -78,7 +95,47 @@ type Record struct {
 	ProcessContainment         string `json:"process_containment,omitempty"`
 	AgentConfigMode            string `json:"agent_config_mode,omitempty"`
 	RuntimeBundleSHA256        string `json:"runtime_bundle_sha256,omitempty"`
+	// ReasoningRedactionState records whether provider-private reasoning text
+	// remains in the local-only raw/normalized streams, was removed from the
+	// bundle entirely, could not be redacted, or has an ambiguous partial commit.
+	// Reasoning text is never written to digest.json or OTLP.
+	ReasoningRedactionState string `json:"reasoning_redaction_state,omitempty"`
+	// PublishedBundle is populated only by an Acta-owned publication path. A
+	// launcher may reuse this digest-bound reference instead of trusting a
+	// similarly shaped claim emitted by the coding agent.
+	PublishedBundle *PublishedBundle `json:"published_bundle,omitempty"`
+
+	presentV3Fields []string
 }
+
+// UnmarshalJSON remembers v3-only property presence independently of Go zero
+// values so Validate can reject, for example, an explicitly false future
+// boolean in a v2-labeled document.
+func (r *Record) UnmarshalJSON(data []byte) error {
+	type plainRecord Record
+	var decoded plainRecord
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	fields, err := schemaversion.PresentV3OnlyFieldsJSON(schemaversion.RunRecord, data)
+	if err != nil {
+		return err
+	}
+	*r = Record(decoded)
+	r.presentV3Fields = fields
+	return nil
+}
+
+type PublishedBundle struct {
+	ArtifactID string `json:"artifact_id"`
+	SHA256     string `json:"sha256"`
+}
+
+// PublishedBundleArtifactIDPattern is shared with the published run-record
+// schema and defines the complete machine-ID syntax.
+const PublishedBundleArtifactIDPattern = `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`
+
+var publishedBundleArtifactIDRegexp = regexp.MustCompile(PublishedBundleArtifactIDPattern)
 
 // Validate rejects records from schemas this build cannot interpret.
 func (r *Record) Validate() error {
@@ -88,6 +145,15 @@ func (r *Record) Validate() error {
 	if r.SchemaVersion < MinSchemaVersion || r.SchemaVersion > SchemaVersion {
 		return fmt.Errorf("unsupported run record schema_version %d (supported %d..%d)", r.SchemaVersion, MinSchemaVersion, SchemaVersion)
 	}
+	if !SupportsV3Fields(r.SchemaVersion) {
+		field, found, err := schemaversion.FirstPresentV3OnlyField(schemaversion.RunRecord, r, r.presentV3Fields)
+		if err != nil {
+			return fmt.Errorf("inspect run record versioned fields: %w", err)
+		}
+		if found {
+			return fmt.Errorf("run record schema_version %d does not support %s", r.SchemaVersion, field)
+		}
+	}
 	if r.SchemaVersion >= 2 && (strings.TrimSpace(r.Producer.Name) == "" || strings.TrimSpace(r.Producer.Version) == "") {
 		return fmt.Errorf("run record schema_version %d requires producer name and version", r.SchemaVersion)
 	}
@@ -95,7 +161,7 @@ func (r *Record) Validate() error {
 		if r.Producer.Name != "acta" {
 			return fmt.Errorf("run record producer name must be acta")
 		}
-		if !oneOf(r.Agent, "codex", "claude") || strings.TrimSpace(r.AgentVersion) == "" {
+		if !slices.Contains([]string{"codex", "claude"}, r.Agent) || strings.TrimSpace(r.AgentVersion) == "" {
 			return fmt.Errorf("run record requires a supported agent and agent_version")
 		}
 		if strings.TrimSpace(r.CWD) == "" || strings.TrimSpace(r.RunDir) == "" || len(r.Command) == 0 || strings.TrimSpace(r.Command[0]) == "" {
@@ -107,10 +173,10 @@ func (r *Record) Validate() error {
 		if r.StartedAt.IsZero() || r.CompletedAt.IsZero() || r.CompletedAt.Before(r.StartedAt) || r.DurationMillis < 0 {
 			return fmt.Errorf("run record has invalid timestamps or duration")
 		}
-		if !oneOf(r.PromptSource, "flag", "args", "stdin", "internal", "test") {
+		if !slices.Contains([]string{"flag", "args", "stdin", "internal", "test"}, r.PromptSource) {
 			return fmt.Errorf("run record has invalid prompt_source %q", r.PromptSource)
 		}
-		if !oneOf(r.TerminationReason, "completed", "timeout", "cancelled", "process_error", "resource_limit", "acta_error", "failed", "error", "interrupted", "degraded") {
+		if !slices.Contains([]string{"completed", "timeout", "cancelled", "process_error", "resource_limit", "acta_error", "failed", "error", "interrupted", "degraded"}, r.TerminationReason) {
 			return fmt.Errorf("run record has invalid termination_reason %q", r.TerminationReason)
 		}
 		if r.Timeout && (r.OK || r.TerminationReason != "timeout") || r.OK && r.TerminationReason != "completed" || !r.OK && r.TerminationReason == "completed" {
@@ -119,17 +185,29 @@ func (r *Record) Validate() error {
 		if r.OK && (r.ExitCode == nil || *r.ExitCode != 0) {
 			return fmt.Errorf("successful run record requires exit_code 0")
 		}
-		if !oneOf(r.OTLPStatus, "not_configured", "exported", "failed") || r.OTLPStatus == "failed" && strings.TrimSpace(r.OTLPError) == "" || r.OTLPStatus != "failed" && r.OTLPError != "" {
+		if !SupportsOTLPStatus(r.SchemaVersion, r.OTLPStatus) || r.OTLPStatus == "failed" && strings.TrimSpace(r.OTLPError) == "" || r.OTLPStatus != "failed" && r.OTLPError != "" {
 			return fmt.Errorf("run record OTLP status and error are inconsistent")
 		}
-		if r.OTLPStatus == "exported" && strings.TrimSpace(r.TraceID) == "" || r.OTLPStatus != "exported" && r.TraceID != "" {
+		if (r.OTLPStatus == "exported" || r.OTLPStatus == "pending") && strings.TrimSpace(r.TraceID) == "" ||
+			r.OTLPStatus != "exported" && r.OTLPStatus != "pending" && r.TraceID != "" {
 			return fmt.Errorf("run record OTLP status and trace_id are inconsistent")
 		}
-		if !oneOf(r.ProcessContainment, "posix_process_group", "windows_job", "direct_process") {
+		if !slices.Contains([]string{"posix_process_group", "windows_job", "direct_process"}, r.ProcessContainment) {
 			return fmt.Errorf("run record has invalid process_containment %q", r.ProcessContainment)
 		}
-		if !oneOf(r.AgentConfigMode, "ambient_ephemeral", "project_only_ephemeral", "authoritative_bundle") {
+		if !slices.Contains([]string{"ambient_ephemeral", "project_only_ephemeral", "authoritative_bundle"}, r.AgentConfigMode) {
 			return fmt.Errorf("run record has invalid agent_config_mode %q", r.AgentConfigMode)
+		}
+		if r.ReasoningRedactionState != "" && !slices.Contains([]string{"retained_local", "redacted", "failed", "partial"}, r.ReasoningRedactionState) {
+			return fmt.Errorf("run record has invalid reasoning_redaction_state %q", r.ReasoningRedactionState)
+		}
+		if r.PublishedBundle != nil {
+			if !validPublishedBundleArtifactID(r.PublishedBundle.ArtifactID) {
+				return fmt.Errorf("published_bundle.artifact_id is invalid")
+			}
+			if !isLowerHexSHA256(r.PublishedBundle.SHA256) {
+				return fmt.Errorf("published_bundle.sha256 must be 64 lowercase hexadecimal characters")
+			}
 		}
 		if r.AgentConfigMode == "authoritative_bundle" && r.RuntimeBundleSHA256 == "" || r.AgentConfigMode != "authoritative_bundle" && r.RuntimeBundleSHA256 != "" {
 			return fmt.Errorf("run record agent_config_mode and runtime_bundle_sha256 are inconsistent")
@@ -153,13 +231,24 @@ func (r *Record) Validate() error {
 	return nil
 }
 
-func oneOf(value string, allowed ...string) bool {
-	for _, candidate := range allowed {
-		if value == candidate {
-			return true
-		}
+// MarshalFile returns the validated, bounded bytes written to run.json.
+func MarshalFile(record *Record) ([]byte, error) {
+	if err := record.Validate(); err != nil {
+		return nil, fmt.Errorf("validate run record: %w", err)
 	}
-	return false
+	payload, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal run record: %w", err)
+	}
+	payload = append(payload, '\n')
+	if int64(len(payload)) > MaxRecordBytes {
+		return nil, fmt.Errorf("run record exceeds %d-byte limit", MaxRecordBytes)
+	}
+	return payload, nil
+}
+
+func validPublishedBundleArtifactID(value string) bool {
+	return publishedBundleArtifactIDRegexp.MatchString(value)
 }
 
 func isLowerHexSHA256(value string) bool {

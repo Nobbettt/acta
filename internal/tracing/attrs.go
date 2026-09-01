@@ -38,13 +38,13 @@ const (
 	attrFilePath        = attribute.Key("acta.file.path")
 	attrCommandExitCode = attribute.Key("acta.command.exit_code")
 	attrEventChars      = attribute.Key("acta.event.chars")
+	attrEventRedacted   = attribute.Key("acta.event.redacted")
 )
 
 // Attribute size caps. Content that can carry secrets or local paths —
-// tool-call arguments, file paths, results, message/reasoning text — is
-// exported only under --otlp-include-output; by default spans carry just
-// structural metadata (tool name, ids, exit codes, tokens, timing). Full
-// fidelity always stays in the local run bundle.
+// tool-call arguments, file paths, results, and surfaced message text is
+// exported only under --otlp-include-output. Provider-private reasoning text
+// is never exported; reasoning events carry structural counts only.
 const (
 	maxArgumentChars = 4_096
 	maxResultChars   = 8_192

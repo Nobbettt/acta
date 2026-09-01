@@ -8,14 +8,22 @@ package tracing
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math"
+	"net/url"
 	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
@@ -26,6 +34,7 @@ import (
 type Config struct {
 	Endpoint      string // --otlp-endpoint override; "" uses OTEL_EXPORTER_OTLP_* env
 	IncludeOutput bool   // export tool outputs and message text
+	ForceRoot     bool   // ignore TRACEPARENT/TRACESTATE and start a new trace
 	RunID         string
 	Agent         string // codex | claude
 	Provider      string // GenAI provider name (from the agent adapter)
@@ -38,20 +47,191 @@ type Config struct {
 // flag or one of the standard endpoint env vars. Otherwise no provider is
 // constructed and runs carry zero tracing overhead.
 func Enabled(endpointFlag string) bool {
-	return endpointFlag != "" ||
-		os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" ||
-		os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") != ""
+	if sdkDisabled() {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("OTEL_TRACES_EXPORTER")), "none") {
+		return false
+	}
+	return endpointConfigured(endpointFlag) && EndpointConfigurationError(endpointFlag) == nil
+}
+
+// EndpointConfigurationError reports whether the effective OTLP endpoint is
+// unsafe to pass to the exporter. The explicit flag takes precedence over the
+// traces-specific and generic environment variables, matching the exporter.
+func EndpointConfigurationError(endpointFlag string) error {
+	endpoint, source := configuredEndpoint(endpointFlag)
+	if endpoint == "" {
+		return nil
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("%s must be an absolute http(s) URL with a host and valid port", source)
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	hostname := parsed.Hostname()
+	port := parsed.Port()
+	if port == "" {
+		switch scheme {
+		case "http":
+			port = "80"
+		case "https":
+			port = "443"
+		}
+	}
+	portNumber, portErr := strconv.ParseUint(port, 10, 16)
+	if hostname == "" || portErr != nil || portNumber == 0 || (scheme != "http" && scheme != "https") {
+		return fmt.Errorf("%s must be an absolute http(s) URL with a host and valid port", source)
+	}
+	return nil
+}
+
+// DeliveryUnavailableReasonWithForceRoot also accounts for the caller
+// deliberately ignoring otherwise valid inbound trace context.
+func DeliveryUnavailableReasonWithForceRoot(endpointFlag string, forceRoot bool) string {
+	return deliveryUnavailableReason(endpointFlag, forceRoot)
+}
+
+func deliveryUnavailableReason(endpointFlag string, forceRoot bool) string {
+	if sdkDisabled() {
+		return "OTEL_SDK_DISABLED=true disables OpenTelemetry"
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("OTEL_TRACES_EXPORTER")), "none") {
+		return "OTEL_TRACES_EXPORTER=none disables trace export"
+	}
+	if !endpointConfigured(endpointFlag) {
+		return "no OTLP endpoint is configured; set --otlp-endpoint, OTEL_EXPORTER_OTLP_ENDPOINT, or OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
+	}
+	if err := EndpointConfigurationError(endpointFlag); err != nil {
+		return err.Error()
+	}
+	sampler := strings.ToLower(strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER")))
+	if sampler == "always_off" {
+		return "OTEL_TRACES_SAMPLER=always_off disables sampling"
+	}
+	if sampler == "parentbased_always_off" {
+		parent := inboundParentSpanContext()
+		if forceRoot || !parent.IsValid() || !parent.IsSampled() {
+			return "OTEL_TRACES_SAMPLER=parentbased_always_off disables sampling without a sampled inbound parent context"
+		}
+	}
+	if sampler == "traceidratio" && samplerRatioEffectivelyZero() {
+		return "OTEL_TRACES_SAMPLER=traceidratio with OTEL_TRACES_SAMPLER_ARG=0 disables sampling"
+	}
+	if sampler == "parentbased_traceidratio" && samplerRatioEffectivelyZero() {
+		parent := inboundParentSpanContext()
+		if forceRoot || !parent.IsValid() || !parent.IsSampled() {
+			return "OTEL_TRACES_SAMPLER=parentbased_traceidratio with an effectively zero root ratio disables sampling without a sampled inbound parent context"
+		}
+	}
+	return ""
+}
+
+func samplerRatioEffectivelyZero() bool {
+	ratio, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER_ARG")), 64)
+	return err == nil && ratio >= 0 && ratio <= 1 && uint64(ratio*(1<<63)) == 0
+}
+
+func sdkDisabled() bool {
+	disabled, err := strconv.ParseBool(strings.TrimSpace(os.Getenv("OTEL_SDK_DISABLED")))
+	return err == nil && disabled
+}
+
+func endpointConfigured(endpointFlag string) bool {
+	endpoint, _ := configuredEndpoint(endpointFlag)
+	return endpoint != ""
+}
+
+func configuredEndpoint(endpointFlag string) (endpoint, source string) {
+	if endpoint := strings.TrimSpace(endpointFlag); endpoint != "" {
+		return endpoint, "--otlp-endpoint"
+	}
+	if endpoint := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")); endpoint != "" {
+		return endpoint, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
+	}
+	if endpoint := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")); endpoint != "" {
+		return endpoint, "OTEL_EXPORTER_OTLP_ENDPOINT"
+	}
+	return "", ""
+}
+
+func inboundParentSpanContext() trace.SpanContext {
+	parentCtx := propagation.TraceContext{}.Extract(context.Background(), propagation.MapCarrier{
+		"traceparent": os.Getenv("TRACEPARENT"),
+		"tracestate":  os.Getenv("TRACESTATE"),
+	})
+	return trace.SpanContextFromContext(parentCtx)
 }
 
 // Run is one live-traced agent run. All methods are nil-receiver safe so the
 // runner can call them unconditionally.
 type Run struct {
 	provider      *sdktrace.TracerProvider
+	exportErrors  *errorCapturingExporter
+	spanDelivery  *dropCountingSpanProcessor
 	tracer        trace.Tracer
 	rootCtx       context.Context
 	root          trace.Span
+	sampled       bool
 	mapper        mapper
 	includeOutput bool
+}
+
+// errorCapturingExporter retains failures from batches exported by the
+// processor's background worker. The SDK reports those failures to its global
+// error handler instead of returning them from a later ForceFlush.
+type errorCapturingExporter struct {
+	sdktrace.SpanExporter
+	mu        sync.Mutex
+	err       error
+	forwarded atomic.Uint64
+}
+
+func (e *errorCapturingExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
+	e.forwarded.Add(uint64(len(spans)))
+	err := e.SpanExporter.ExportSpans(ctx, spans)
+	if err != nil {
+		e.mu.Lock()
+		e.err = errors.Join(e.err, err)
+		e.mu.Unlock()
+	}
+	return err
+}
+
+// dropCountingSpanProcessor compares every sampled span handed to the batch
+// processor with the spans that reach its exporter. The SDK's non-blocking
+// queue otherwise discards overflow without returning an error from OnEnd or
+// a later ForceFlush.
+type dropCountingSpanProcessor struct {
+	sdktrace.SpanProcessor
+	exporter *errorCapturingExporter
+	ended    atomic.Uint64
+}
+
+func (p *dropCountingSpanProcessor) OnEnd(span sdktrace.ReadOnlySpan) {
+	p.ended.Add(1)
+	p.SpanProcessor.OnEnd(span)
+}
+
+func (p *dropCountingSpanProcessor) DropError() error {
+	if p == nil || p.exporter == nil {
+		return nil
+	}
+	ended := p.ended.Load()
+	forwarded := p.exporter.forwarded.Load()
+	if ended <= forwarded {
+		return nil
+	}
+	return fmt.Errorf("batch span processor dropped %d of %d ended spans", ended-forwarded, ended)
+}
+
+func (e *errorCapturingExporter) Err() error {
+	if e == nil {
+		return nil
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.err
 }
 
 // mapper turns one raw agent output line into span operations.
@@ -62,9 +242,12 @@ type mapper interface {
 }
 
 func Setup(ctx context.Context, cfg Config) (*Run, error) {
+	if err := EndpointConfigurationError(cfg.Endpoint); err != nil {
+		return nil, fmt.Errorf("create OTLP exporter: %w", err)
+	}
 	var expOpts []otlptracehttp.Option
-	if cfg.Endpoint != "" {
-		expOpts = append(expOpts, otlptracehttp.WithEndpointURL(cfg.Endpoint))
+	if endpoint := strings.TrimSpace(cfg.Endpoint); endpoint != "" {
+		expOpts = append(expOpts, otlptracehttp.WithEndpointURL(endpoint))
 	}
 	exporter, err := otlptracehttp.New(ctx, expOpts...)
 	if err != nil {
@@ -77,12 +260,58 @@ func Setup(ctx context.Context, cfg Config) (*Run, error) {
 	if err != nil {
 		res = resource.Default()
 	}
+	capturingExporter := &errorCapturingExporter{SpanExporter: exporter}
+	batchProcessor := sdktrace.NewBatchSpanProcessor(capturingExporter)
+	dropCountingProcessor := &dropCountingSpanProcessor{
+		SpanProcessor: batchProcessor,
+		exporter:      capturingExporter,
+	}
 	provider := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter),
+		sdktrace.WithSpanProcessor(dropCountingProcessor),
 		sdktrace.WithResource(res),
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithSampler(samplerFromEnvironment()),
 	)
-	return newRun(ctx, provider, cfg)
+	run, err := newRun(ctx, provider, cfg)
+	if err != nil {
+		_ = provider.Shutdown(context.Background())
+		return nil, err
+	}
+	run.exportErrors = capturingExporter
+	run.spanDelivery = dropCountingProcessor
+	return run, nil
+}
+
+// samplerFromEnvironment implements the standard built-in
+// OTEL_TRACES_SAMPLER values. Unknown names and invalid ratio arguments use
+// the SDK default (parent-based always-on) instead of silently forcing a
+// different sampling policy.
+func samplerFromEnvironment() sdktrace.Sampler {
+	defaultSampler := sdktrace.ParentBased(sdktrace.AlwaysSample())
+	ratio := func() sdktrace.Sampler {
+		value, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER_ARG")), 64)
+		if err != nil || math.IsNaN(value) || value < 0 || value > 1 {
+			return defaultSampler
+		}
+		return sdktrace.TraceIDRatioBased(value)
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER"))) {
+	case "":
+		return defaultSampler
+	case "always_on":
+		return sdktrace.AlwaysSample()
+	case "always_off":
+		return sdktrace.NeverSample()
+	case "traceidratio":
+		return ratio()
+	case "parentbased_always_on":
+		return sdktrace.ParentBased(sdktrace.AlwaysSample())
+	case "parentbased_always_off":
+		return sdktrace.ParentBased(sdktrace.NeverSample())
+	case "parentbased_traceidratio":
+		return sdktrace.ParentBased(ratio())
+	default:
+		return defaultSampler
+	}
 }
 
 // newRun starts the root span on an existing provider (split from Setup so
@@ -114,17 +343,36 @@ func newRun(ctx context.Context, provider *sdktrace.TracerProvider, cfg Config) 
 	if cfg.Model != "" {
 		attrs = append(attrs, attrRequestModel.String(cfg.Model))
 	}
-	r.rootCtx, r.root = r.tracer.Start(ctx, "invoke_agent "+cfg.Agent,
+	startCtx := ctx
+	startOpts := []trace.SpanStartOption{
 		trace.WithTimestamp(cfg.StartedAt),
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(attrs...),
-	)
+	}
+	if cfg.ForceRoot {
+		startOpts = append(startOpts, trace.WithNewRoot())
+	} else if parent := inboundParentSpanContext(); parent.IsValid() {
+		startCtx = trace.ContextWithRemoteSpanContext(ctx, parent)
+	}
+	r.rootCtx, r.root = r.tracer.Start(startCtx, "invoke_agent "+cfg.Agent, startOpts...)
+	r.sampled = r.root.IsRecording() && r.root.SpanContext().IsSampled()
 	return r, nil
 }
 
-// TraceID returns the run's trace id for run.json correlation.
-func (r *Run) TraceID() string {
+// Sampled reports whether the root is recording and selected for export. It
+// must be checked before Finish ends the root span.
+func (r *Run) Sampled() bool {
 	if r == nil {
+		return false
+	}
+	return r.sampled
+}
+
+// TraceID returns the sampled run's trace id for run.json correlation. A
+// dropped root has a locally generated context but no remotely queryable
+// trace, so exposing that ID would be misleading.
+func (r *Run) TraceID() string {
+	if !r.Sampled() {
 		return ""
 	}
 	return r.root.SpanContext().TraceID().String()
@@ -166,16 +414,15 @@ func (r *Run) Finish(record *runrecord.Record, completedAt time.Time) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	// ForceFlush returns the exporter's error; Shutdown alone swallows export
-	// failures into otel's global error handler. The run recorded a trace_id, so
-	// a dropped export leaves it pointing at spans that never reached the
-	// backend — surface it.
+	// The wrappers retain errors from batches already handled by the background
+	// worker and detect spans discarded before reaching the exporter. ForceFlush
+	// and Shutdown cover the final batch and teardown. The run recorded a
+	// trace_id, so any lost span must be surfaced.
 	flushErr := r.provider.ForceFlush(ctx)
-	if err := r.provider.Shutdown(ctx); err != nil && flushErr == nil {
-		flushErr = err
-	}
-	if flushErr != nil {
-		return fmt.Errorf("flush traces: %w", flushErr)
+	shutdownErr := r.provider.Shutdown(ctx)
+	dropErr := r.spanDelivery.DropError()
+	if err := errors.Join(r.exportErrors.Err(), dropErr, flushErr, shutdownErr); err != nil {
+		return fmt.Errorf("flush traces: %w", err)
 	}
 	return nil
 }
@@ -194,13 +441,26 @@ func (r *Run) startToolSpan(tool string, at time.Time, attrs ...attribute.KeyVal
 	return span
 }
 
-// addTextEvent records assistant message/reasoning text as a span event on
-// the root span. Text content is exported only under --otlp-include-output;
-// the event itself (with size) is always recorded.
+// addTextEvent records surfaced assistant message text as a span event on the
+// root span. Provider-private reasoning uses addReasoningEvent and is never
+// attached to telemetry, even when output export is enabled.
 func (r *Run) addTextEvent(name, text string, at time.Time) {
 	attrs := []attribute.KeyValue{attrEventChars.Int(utf8.RuneCountInString(text))}
 	if r.includeOutput {
 		attrs = append(attrs, attribute.String("text", capString(text, maxResultChars)))
 	}
 	r.root.AddEvent(name, trace.WithTimestamp(at), trace.WithAttributes(attrs...))
+}
+
+func (r *Run) addReasoningEvent(text string, at time.Time) {
+	r.root.AddEvent("acta.reasoning", trace.WithTimestamp(at), trace.WithAttributes(
+		attrEventChars.Int(utf8.RuneCountInString(text)),
+	))
+}
+
+func (r *Run) addRedactedReasoningEvent(at time.Time) {
+	r.root.AddEvent("acta.reasoning", trace.WithTimestamp(at), trace.WithAttributes(
+		attrEventChars.Int(0),
+		attrEventRedacted.Bool(true),
+	))
 }

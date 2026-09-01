@@ -163,8 +163,8 @@ func writeUploadBundle(t *testing.T) string {
 		t.Fatal(err)
 	}
 	events := strings.Join([]string{
-		`{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":1,"timestamp":"2026-07-06T12:00:00Z","source":"acta","type":"run.started","payload":{"agent":"codex","agent_version":"test","agent_config_mode":"ambient_ephemeral"}}`,
-		`{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":2,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed","payload":{"status":"ok"},"artifact_refs":[{"kind":"run_record","path":"run.json"},{"kind":"digest","path":"digest.json"},{"kind":"event_stream","path":"acta-events.jsonl"}]}`,
+		`{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":1,"timestamp":"2026-07-06T12:00:00Z","source":"acta","type":"run.started","payload":{"agent":"codex","agent_version":"test","cwd":"` + filepath.ToSlash(runDir) + `","run_dir":"` + filepath.ToSlash(runDir) + `","agent_config_mode":"ambient_ephemeral"}}`,
+		`{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":2,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed","payload":{"status":"ok","ok":true,"timeout":false,"duration_ms":1000},"artifact_refs":[{"kind":"run_record","path":"run.json"},{"kind":"digest","path":"digest.json"},{"kind":"event_stream","path":"acta-events.jsonl"}]}`,
 		"",
 	}, "\n")
 	if err := os.WriteFile(filepath.Join(runDir, "acta-events.jsonl"), []byte(events), 0o644); err != nil {
