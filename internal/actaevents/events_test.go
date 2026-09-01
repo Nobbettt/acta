@@ -527,7 +527,7 @@ func TestConcurrentProjectionCommitsSerializeGenerations(t *testing.T) {
 	releaseFirst := make(chan struct{})
 	firstDone := make(chan error, 1)
 	go func() {
-		firstDone <- commitProjection(runDir, "100", firstFinals, firstPayloads, func() error {
+		firstDone <- commitProjectionContext(context.Background(), runDir, "100", firstFinals, firstPayloads, func() error {
 			close(firstLocked)
 			<-releaseFirst
 			return nil
@@ -538,7 +538,7 @@ func TestConcurrentProjectionCommitsSerializeGenerations(t *testing.T) {
 	secondLocked := make(chan struct{})
 	secondDone := make(chan error, 1)
 	go func() {
-		secondDone <- commitProjection(runDir, "200", secondFinals, secondPayloads, func() error {
+		secondDone <- commitProjectionContext(context.Background(), runDir, "200", secondFinals, secondPayloads, func() error {
 			close(secondLocked)
 			return nil
 		})
@@ -573,7 +573,7 @@ func TestProjectionCommitsForDifferentBundlesDoNotSerialize(t *testing.T) {
 	releaseFirst := make(chan struct{})
 	firstDone := make(chan error, 1)
 	go func() {
-		firstDone <- commitProjection(firstRunDir, "100", firstFinals, firstPayloads, func() error {
+		firstDone <- commitProjectionContext(context.Background(), firstRunDir, "100", firstFinals, firstPayloads, func() error {
 			close(firstLocked)
 			<-releaseFirst
 			return nil
@@ -584,7 +584,7 @@ func TestProjectionCommitsForDifferentBundlesDoNotSerialize(t *testing.T) {
 	secondLocked := make(chan struct{})
 	secondDone := make(chan error, 1)
 	go func() {
-		secondDone <- commitProjection(secondRunDir, "200", secondFinals, secondPayloads, func() error {
+		secondDone <- commitProjectionContext(context.Background(), secondRunDir, "200", secondFinals, secondPayloads, func() error {
 			close(secondLocked)
 			return nil
 		})
@@ -609,7 +609,7 @@ func TestProjectionCommitsForDifferentBundlesDoNotSerialize(t *testing.T) {
 
 func TestAcquireProjectionLockContextTimesOutWhileHeld(t *testing.T) {
 	runDir := t.TempDir()
-	held, err := AcquireProjectionLock(runDir)
+	held, err := AcquireProjectionLockContext(context.Background(), runDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -629,7 +629,7 @@ func TestAcquireProjectionLockContextTimesOutWhileHeld(t *testing.T) {
 
 func TestProjectionCommitContextTimesOutWhileHeld(t *testing.T) {
 	runDir := t.TempDir()
-	held, err := AcquireProjectionLock(runDir)
+	held, err := AcquireProjectionLockContext(context.Background(), runDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -651,7 +651,7 @@ func TestProjectionCommitContextTimesOutWhileHeld(t *testing.T) {
 
 func TestAcquireProjectionLockContextSucceedsAfterRelease(t *testing.T) {
 	runDir := t.TempDir()
-	held, err := AcquireProjectionLock(runDir)
+	held, err := AcquireProjectionLockContext(context.Background(), runDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -707,7 +707,7 @@ func TestAcquireProjectionLockContextUncontended(t *testing.T) {
 func TestProjectionCommitLockReleasedAfterFailure(t *testing.T) {
 	runDir := t.TempDir()
 	finals, failedPayloads := projectionCommitFixture(t, "100", "failed digest\n", "failed events\n")
-	err := commitProjection(runDir, "100", finals, failedPayloads, func() error {
+	err := commitProjectionContext(context.Background(), runDir, "100", finals, failedPayloads, func() error {
 		return errors.New("injected commit failure")
 	})
 	if err == nil || !strings.Contains(err.Error(), "injected commit failure") {
@@ -717,7 +717,7 @@ func TestProjectionCommitLockReleasedAfterFailure(t *testing.T) {
 	_, goodPayloads := projectionCommitFixture(t, "200", "good digest\n", "good events\n")
 	done := make(chan error, 1)
 	go func() {
-		done <- commitProjection(runDir, "200", finals, goodPayloads, nil)
+		done <- commitProjectionContext(context.Background(), runDir, "200", finals, goodPayloads, nil)
 	}()
 	select {
 	case err := <-done:
@@ -735,7 +735,7 @@ func TestProjectionCommitCrashAfterBackupPreservesRunAndRecovers(t *testing.T) {
 	finals, oldPayloads := projectionRecordCommitFixture(t, "100", `{"id":"old"}`+"\n", "old digest\n", "old events\n")
 	_, interruptedPayloads := projectionRecordCommitFixture(t, "200", `{"id":"interrupted"}`+"\n", "interrupted digest\n", "interrupted events\n")
 	_, recoveredPayloads := projectionRecordCommitFixture(t, "300", `{"id":"recovered"}`+"\n", "recovered digest\n", "recovered events\n")
-	if err := commitProjection(runDir, "100", finals, oldPayloads, nil); err != nil {
+	if err := commitProjectionContext(context.Background(), runDir, "100", finals, oldPayloads, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -757,7 +757,7 @@ func TestProjectionCommitCrashAfterBackupPreservesRunAndRecovers(t *testing.T) {
 		return errors.New("simulated kill")
 	}
 	t.Cleanup(func() { projectionAfterBackup = originalAfterBackup })
-	err := commitProjection(runDir, "200", finals, interruptedPayloads, nil)
+	err := commitProjectionContext(context.Background(), runDir, "200", finals, interruptedPayloads, nil)
 	projectionAfterBackup = originalAfterBackup
 	if err == nil || !strings.Contains(err.Error(), "simulated kill") {
 		t.Fatalf("commit error = %v, want simulated kill", err)
@@ -771,7 +771,7 @@ func TestProjectionCommitCrashAfterBackupPreservesRunAndRecovers(t *testing.T) {
 	}
 	assertProjectionFiles(t, runDir, finals, oldPayloads)
 
-	if err := commitProjection(runDir, "300", finals, recoveredPayloads, nil); err != nil {
+	if err := commitProjectionContext(context.Background(), runDir, "300", finals, recoveredPayloads, nil); err != nil {
 		t.Fatalf("projection commit after interrupted backup: %v", err)
 	}
 	assertProjectionFiles(t, runDir, finals, recoveredPayloads)
@@ -783,7 +783,7 @@ func TestProjectionCommitFallsBackToCopiedBackupsAndRecovers(t *testing.T) {
 	finals, oldPayloads := projectionRecordCommitFixture(t, "100", `{"id":"old"}`+"\n", "old digest\n", "old events\n")
 	_, committedPayloads := projectionRecordCommitFixture(t, "200", `{"id":"committed"}`+"\n", "committed digest\n", "committed events\n")
 	_, interruptedPayloads := projectionRecordCommitFixture(t, "300", `{"id":"interrupted"}`+"\n", "interrupted digest\n", "interrupted events\n")
-	if err := commitProjection(runDir, "100", finals, oldPayloads, nil); err != nil {
+	if err := commitProjectionContext(context.Background(), runDir, "100", finals, oldPayloads, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -816,7 +816,7 @@ func TestProjectionCommitFallsBackToCopiedBackupsAndRecovers(t *testing.T) {
 		return nil
 	}
 	t.Cleanup(func() { projectionAfterBackup = originalAfterBackup })
-	if err := commitProjection(runDir, "200", finals, committedPayloads, nil); err != nil {
+	if err := commitProjectionContext(context.Background(), runDir, "200", finals, committedPayloads, nil); err != nil {
 		t.Fatalf("projection commit with copied backups: %v", err)
 	}
 	projectionAfterBackup = originalAfterBackup
@@ -831,7 +831,7 @@ func TestProjectionCommitFallsBackToCopiedBackupsAndRecovers(t *testing.T) {
 		return nil
 	}
 	t.Cleanup(func() { projectionAfterPublish = originalAfterPublish })
-	err := commitProjection(runDir, "300", finals, interruptedPayloads, nil)
+	err := commitProjectionContext(context.Background(), runDir, "300", finals, interruptedPayloads, nil)
 	projectionAfterPublish = originalAfterPublish
 	if err == nil || !strings.Contains(err.Error(), "simulated kill with copied backups") {
 		t.Fatalf("commit error = %v, want simulated kill", err)
@@ -846,7 +846,7 @@ func TestProjectionCommitCrashDuringCopiedBackupLeavesTargetIntact(t *testing.T)
 	runDir := t.TempDir()
 	finals, oldPayloads := projectionRecordCommitFixture(t, "100", `{"id":"old"}`+"\n", "old digest\n", "old events\n")
 	_, newPayloads := projectionRecordCommitFixture(t, "300", `{"id":"new"}`+"\n", "new digest\n", "new events\n")
-	if err := commitProjection(runDir, "100", finals, oldPayloads, nil); err != nil {
+	if err := commitProjectionContext(context.Background(), runDir, "100", finals, oldPayloads, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -861,7 +861,7 @@ func TestProjectionCommitCrashDuringCopiedBackupLeavesTargetIntact(t *testing.T)
 		return errors.New("simulated kill during backup copy")
 	}
 	t.Cleanup(func() { projectionAfterCopyBackupOpen = originalAfterCopyBackupOpen })
-	err := commitProjection(runDir, "200", finals, newPayloads, nil)
+	err := commitProjectionContext(context.Background(), runDir, "200", finals, newPayloads, nil)
 	projectionAfterCopyBackupOpen = originalAfterCopyBackupOpen
 	if err == nil || !strings.Contains(err.Error(), "simulated kill during backup copy") {
 		t.Fatalf("commit error = %v, want simulated copy interruption", err)
@@ -889,7 +889,7 @@ func TestProjectionCommitCrashDuringCopiedBackupLeavesTargetIntact(t *testing.T)
 	assertProjectionFiles(t, runDir, finals, oldPayloads)
 	assertNoProjectionScratch(t, runDir)
 
-	if err := commitProjection(runDir, "300", finals, newPayloads, nil); err != nil {
+	if err := commitProjectionContext(context.Background(), runDir, "300", finals, newPayloads, nil); err != nil {
 		t.Fatalf("projection commit after copied-backup interruption: %v", err)
 	}
 	assertProjectionFiles(t, runDir, finals, newPayloads)
@@ -900,14 +900,14 @@ func TestProjectionCommitCrashAfterDataSyncRecoversOldGeneration(t *testing.T) {
 	runDir := t.TempDir()
 	finals, oldPayloads := projectionRecordCommitFixture(t, "100", `{"id":"old"}`+"\n", "old digest\n", "old events\n")
 	_, newPayloads := projectionRecordCommitFixture(t, "200", `{"id":"new"}`+"\n", "new digest\n", "new events\n")
-	if err := commitProjection(runDir, "100", finals, oldPayloads, nil); err != nil {
+	if err := commitProjectionContext(context.Background(), runDir, "100", finals, oldPayloads, nil); err != nil {
 		t.Fatal(err)
 	}
 
 	originalAfterDataSync := projectionAfterDataSync
 	projectionAfterDataSync = func() error { return errors.New("simulated kill after data sync") }
 	t.Cleanup(func() { projectionAfterDataSync = originalAfterDataSync })
-	err := commitProjection(runDir, "200", finals, newPayloads, nil)
+	err := commitProjectionContext(context.Background(), runDir, "200", finals, newPayloads, nil)
 	projectionAfterDataSync = originalAfterDataSync
 	if err == nil || !strings.Contains(err.Error(), "simulated kill after data sync") {
 		t.Fatalf("commit error = %v, want simulated post-data-sync interruption", err)
@@ -938,14 +938,14 @@ func TestProjectionCommitCrashAfterManifestSyncKeepsNewGeneration(t *testing.T) 
 	runDir := t.TempDir()
 	finals, oldPayloads := projectionRecordCommitFixture(t, "100", `{"id":"old"}`+"\n", "old digest\n", "old events\n")
 	_, newPayloads := projectionRecordCommitFixture(t, "200", `{"id":"new"}`+"\n", "new digest\n", "new events\n")
-	if err := commitProjection(runDir, "100", finals, oldPayloads, nil); err != nil {
+	if err := commitProjectionContext(context.Background(), runDir, "100", finals, oldPayloads, nil); err != nil {
 		t.Fatal(err)
 	}
 
 	originalAfterManifestSync := projectionAfterManifestSync
 	projectionAfterManifestSync = func() error { return errors.New("simulated kill after manifest sync") }
 	t.Cleanup(func() { projectionAfterManifestSync = originalAfterManifestSync })
-	err := commitProjection(runDir, "200", finals, newPayloads, nil)
+	err := commitProjectionContext(context.Background(), runDir, "200", finals, newPayloads, nil)
 	projectionAfterManifestSync = originalAfterManifestSync
 	if err == nil || !strings.Contains(err.Error(), "simulated kill after manifest sync") {
 		t.Fatalf("commit error = %v, want simulated post-manifest-sync interruption", err)
@@ -959,7 +959,7 @@ func TestProjectionCommitCrashAfterManifestSyncKeepsNewGeneration(t *testing.T) 
 
 func assertProjectionRecovered(t *testing.T, runDir, phase string) {
 	t.Helper()
-	lock, err := AcquireProjectionLock(runDir)
+	lock, err := AcquireProjectionLockContext(context.Background(), runDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -978,7 +978,7 @@ func TestProjectionCommitCrashBeforeManifestRecoversPinnedGeneration(t *testing.
 	finals, oldPayloads := projectionRecordCommitFixture(t, "100", `{"id":"old"}`+"\n", "old digest\n", "old events\n")
 	_, interruptedPayloads := projectionRecordCommitFixture(t, "200", `{"id":"interrupted"}`+"\n", "interrupted digest\n", "interrupted events\n")
 	_, recoveredPayloads := projectionRecordCommitFixture(t, "300", `{"id":"recovered"}`+"\n", "recovered digest\n", "recovered events\n")
-	if err := commitProjection(runDir, "100", finals, oldPayloads, nil); err != nil {
+	if err := commitProjectionContext(context.Background(), runDir, "100", finals, oldPayloads, nil); err != nil {
 		t.Fatal(err)
 	}
 	pinned := make([]*os.File, len(finals))
@@ -1000,7 +1000,7 @@ func TestProjectionCommitCrashBeforeManifestRecoversPinnedGeneration(t *testing.
 		return nil
 	}
 	t.Cleanup(func() { projectionAfterPublish = originalAfterPublish })
-	err = commitProjection(runDir, "200", finals, interruptedPayloads, nil)
+	err = commitProjectionContext(context.Background(), runDir, "200", finals, interruptedPayloads, nil)
 	projectionAfterPublish = originalAfterPublish
 	if !errors.Is(err, simulatedKill) {
 		t.Fatalf("commit error = %v, want simulated kill", err)
@@ -1023,7 +1023,7 @@ func TestProjectionCommitCrashBeforeManifestRecoversPinnedGeneration(t *testing.
 	}
 
 	checkedRecovery := false
-	if err := commitProjection(runDir, "300", finals, recoveredPayloads, func() error {
+	if err := commitProjectionContext(context.Background(), runDir, "300", finals, recoveredPayloads, func() error {
 		checkedRecovery = true
 		assertProjectionFiles(t, runDir, finals, oldPayloads)
 		return nil
@@ -1042,7 +1042,7 @@ func TestProjectionCommitMidPublishFailureRestoresWholeGeneration(t *testing.T) 
 	finals := []string{"run.json", "digest.json", Filename, "projection.json"}
 	oldPayloads := [][]byte{[]byte("old run\n"), []byte("old digest\n"), []byte("old events\n"), []byte("old manifest\n")}
 	newPayloads := [][]byte{[]byte("new run\n"), []byte("new digest\n"), []byte("new events\n"), []byte("new manifest\n")}
-	if err := commitProjection(runDir, "100", finals, oldPayloads, nil); err != nil {
+	if err := commitProjectionContext(context.Background(), runDir, "100", finals, oldPayloads, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1058,7 +1058,7 @@ func TestProjectionCommitMidPublishFailureRestoresWholeGeneration(t *testing.T) 
 	}
 	t.Cleanup(func() { projectionReplace = originalReplace })
 
-	err := commitProjection(runDir, "200", finals, newPayloads, nil)
+	err := commitProjectionContext(context.Background(), runDir, "200", finals, newPayloads, nil)
 	if err == nil || !strings.Contains(err.Error(), "injected mid-rename failure") {
 		t.Fatalf("commit error = %v, want injected mid-rename failure", err)
 	}

@@ -1783,17 +1783,25 @@ func TestPrepareAgentEnvironmentForwardsOnlyTraceCorrelationTelemetry(t *testing
 	environment := []string{
 		"PATH=/bin",
 		"ACTA_REPORT_TOKEN=private",
+		"ACTA_REPORT_TOKEN",
 		"OTEL_EXPORTER_OTLP_ENDPOINT=https://collector.example/private-token",
 		"OTEL_EXPORTER_OTLP_TRACES_HEADERS=Authorization=Bearer private",
 		"OTEL_TRACES_SAMPLER=always_off",
+		"otel_sdk_disabled=true",
+		"OTEL_MALFORMED",
+		"MALFORMED",
 		"TRACEPARENT=00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
 		"TRACESTATE=vendor=opaque",
+		"TRACEPARENT",
 	}
 	got := prepareAgentEnvironment(environment, "ACTA_REPORT_TOKEN")
 	want := []string{
 		"PATH=/bin",
+		"ACTA_REPORT_TOKEN",
+		"MALFORMED",
 		"TRACEPARENT=00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
 		"TRACESTATE=vendor=opaque",
+		"TRACEPARENT",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("agent environment = %q, want %q", got, want)

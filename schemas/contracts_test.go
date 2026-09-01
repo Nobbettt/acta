@@ -45,45 +45,131 @@ func TestPublishedExamplesValidateAgainstDraft202012Schemas(t *testing.T) {
 	}
 }
 
-func TestPublishedDigestVersionsRemainCompatible(t *testing.T) {
+func TestPublishedVersionsRemainCompatible(t *testing.T) {
 	tests := []struct {
-		path       string
-		version    int
-		otlpStatus string
+		name           string
+		paths          [2]string
+		decodeValidate func([]byte) (int, string, error)
+		mutateV3Status func([]byte) error
 	}{
-		{path: "digest.v2.json", version: 2, otlpStatus: "not_configured"},
-		{path: "digest.v3.json", version: 3, otlpStatus: "not_sampled"},
+		{
+			name: "digest", paths: [2]string{"digest.v2.json", "digest.v3.json"},
+			decodeValidate: func(payload []byte) (int, string, error) {
+				var d digest.Digest
+				if err := json.Unmarshal(payload, &d); err != nil {
+					return 0, "", err
+				}
+				return d.SchemaVersion, d.OTLPStatus, d.Validate()
+			},
+			mutateV3Status: func(payload []byte) error {
+				var d digest.Digest
+				if err := json.Unmarshal(payload, &d); err != nil {
+					return err
+				}
+				d.OTLPStatus = "not_sampled"
+				return d.Validate()
+			},
+		},
+		{
+			name: "event", paths: [2]string{"acta-events.v2.jsonl", "acta-events.v3.jsonl"},
+			decodeValidate: func(payload []byte) (int, string, error) {
+				scanner := bufio.NewScanner(bytes.NewReader(payload))
+				sequence, version, startedStatus := 0, 0, ""
+				for scanner.Scan() {
+					sequence++
+					var event actaevents.Event
+					if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+						return 0, "", err
+					}
+					if version == 0 {
+						version = event.SchemaVersion
+					} else if event.SchemaVersion != version {
+						return 0, "", fmt.Errorf("event schema_version = %d, want %d", event.SchemaVersion, version)
+					}
+					if err := actaevents.ValidateEvent(event, event.RunID, sequence); err != nil {
+						return 0, "", err
+					}
+					if event.Type == actaevents.TypeRunStarted {
+						var started struct {
+							OTLPStatus string `json:"otlp_status"`
+						}
+						if err := json.Unmarshal(event.Payload, &started); err != nil {
+							return 0, "", err
+						}
+						startedStatus = started.OTLPStatus
+					}
+				}
+				return version, startedStatus, scanner.Err()
+			},
+			mutateV3Status: func(payload []byte) error {
+				line, _, _ := bytes.Cut(payload, []byte{'\n'})
+				var event actaevents.Event
+				if err := json.Unmarshal(line, &event); err != nil {
+					return err
+				}
+				var started map[string]any
+				if err := json.Unmarshal(event.Payload, &started); err != nil {
+					return err
+				}
+				started["otlp_status"] = "not_sampled"
+				var err error
+				event.Payload, err = json.Marshal(started)
+				if err != nil {
+					return err
+				}
+				return actaevents.ValidateEvent(event, event.RunID, 1)
+			},
+		},
+		{
+			name: "run record", paths: [2]string{"run-record.v2.json", "run-record.v3.json"},
+			decodeValidate: func(payload []byte) (int, string, error) {
+				var record runrecord.Record
+				if err := json.Unmarshal(payload, &record); err != nil {
+					return 0, "", err
+				}
+				return record.SchemaVersion, record.OTLPStatus, record.Validate()
+			},
+			mutateV3Status: func(payload []byte) error {
+				var record runrecord.Record
+				if err := json.Unmarshal(payload, &record); err != nil {
+					return err
+				}
+				record.OTLPStatus = "not_sampled"
+				return record.Validate()
+			},
+		},
 	}
+	versions := []struct {
+		version int
+		status  string
+	}{{2, "not_configured"}, {3, "not_sampled"}}
 	for _, test := range tests {
-		t.Run(test.path, func(t *testing.T) {
-			payload, err := os.ReadFile(filepath.Join("examples", test.path))
+		t.Run(test.name, func(t *testing.T) {
+			for index, want := range versions {
+				path := test.paths[index]
+				t.Run(path, func(t *testing.T) {
+					payload, err := os.ReadFile(filepath.Join("examples", path))
+					if err != nil {
+						t.Fatal(err)
+					}
+					version, status, err := test.decodeValidate(payload)
+					if err != nil {
+						t.Fatalf("published %s did not parse: %v", test.name, err)
+					}
+					if version != want.version || status != want.status {
+						t.Fatalf("%s version/status = %d/%q", test.name, version, status)
+					}
+				})
+			}
+
+			payload, err := os.ReadFile(filepath.Join("examples", test.paths[0]))
 			if err != nil {
 				t.Fatal(err)
 			}
-			var d digest.Digest
-			if err := json.Unmarshal(payload, &d); err != nil {
-				t.Fatal(err)
-			}
-			if d.SchemaVersion != test.version || d.OTLPStatus != test.otlpStatus {
-				t.Fatalf("digest version/status = %d/%q", d.SchemaVersion, d.OTLPStatus)
-			}
-			if err := d.Validate(); err != nil {
-				t.Fatalf("published digest did not parse: %v", err)
+			if err := test.mutateV3Status(payload); err == nil {
+				t.Fatalf("v2 %s accepted the v3 not_sampled status", test.name)
 			}
 		})
-	}
-
-	payload, err := os.ReadFile(filepath.Join("examples", "digest.v2.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var incompatible digest.Digest
-	if err := json.Unmarshal(payload, &incompatible); err != nil {
-		t.Fatal(err)
-	}
-	incompatible.OTLPStatus = "not_sampled"
-	if err := incompatible.Validate(); err == nil {
-		t.Fatal("v2 digest accepted the v3 not_sampled status")
 	}
 }
 
@@ -133,79 +219,6 @@ func TestDigestVersionGateRejectsV3OnlyTimelineFields(t *testing.T) {
 	}
 }
 
-func TestPublishedEventVersionsRemainCompatible(t *testing.T) {
-	tests := []struct {
-		path       string
-		version    int
-		otlpStatus string
-	}{
-		{path: "acta-events.v2.jsonl", version: 2, otlpStatus: "not_configured"},
-		{path: "acta-events.v3.jsonl", version: 3, otlpStatus: "not_sampled"},
-	}
-	for _, test := range tests {
-		t.Run(test.path, func(t *testing.T) {
-			file, err := os.Open(filepath.Join("examples", test.path))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer file.Close()
-			scanner := bufio.NewScanner(file)
-			sequence := 0
-			startedStatus := ""
-			for scanner.Scan() {
-				sequence++
-				var event actaevents.Event
-				if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
-					t.Fatal(err)
-				}
-				if event.SchemaVersion != test.version {
-					t.Fatalf("event schema_version = %d, want %d", event.SchemaVersion, test.version)
-				}
-				if err := actaevents.ValidateEvent(event, event.RunID, sequence); err != nil {
-					t.Fatalf("published event did not parse: %v", err)
-				}
-				if event.Type == actaevents.TypeRunStarted {
-					var started struct {
-						OTLPStatus string `json:"otlp_status"`
-					}
-					if err := json.Unmarshal(event.Payload, &started); err != nil {
-						t.Fatal(err)
-					}
-					startedStatus = started.OTLPStatus
-				}
-			}
-			if err := scanner.Err(); err != nil {
-				t.Fatal(err)
-			}
-			if startedStatus != test.otlpStatus {
-				t.Fatalf("run.started otlp_status = %q, want %q", startedStatus, test.otlpStatus)
-			}
-		})
-	}
-
-	payload, err := os.ReadFile(filepath.Join("examples", "acta-events.v2.jsonl"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	line, _, _ := bytes.Cut(payload, []byte{'\n'})
-	var incompatible actaevents.Event
-	if err := json.Unmarshal(line, &incompatible); err != nil {
-		t.Fatal(err)
-	}
-	var started map[string]any
-	if err := json.Unmarshal(incompatible.Payload, &started); err != nil {
-		t.Fatal(err)
-	}
-	started["otlp_status"] = "not_sampled"
-	incompatible.Payload, err = json.Marshal(started)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := actaevents.ValidateEvent(incompatible, incompatible.RunID, 1); err == nil {
-		t.Fatal("v2 event accepted the v3 not_sampled status")
-	}
-}
-
 func TestEventVersionGateRejectsRunStartedReasoningRedactionState(t *testing.T) {
 	payload, err := os.ReadFile(filepath.Join("examples", "acta-events.v2.jsonl"))
 	if err != nil {
@@ -241,48 +254,6 @@ func TestEventVersionGateRejectsRunStartedReasoningRedactionState(t *testing.T) 
 				t.Fatalf("v3 event rejected reasoning_redaction_state: %v", err)
 			}
 		})
-	}
-}
-
-func TestPublishedRunRecordVersionsRemainCompatible(t *testing.T) {
-	tests := []struct {
-		path       string
-		version    int
-		otlpStatus string
-	}{
-		{path: "run-record.v2.json", version: 2, otlpStatus: "not_configured"},
-		{path: "run-record.v3.json", version: 3, otlpStatus: "not_sampled"},
-	}
-	for _, test := range tests {
-		t.Run(test.path, func(t *testing.T) {
-			payload, err := os.ReadFile(filepath.Join("examples", test.path))
-			if err != nil {
-				t.Fatal(err)
-			}
-			var record runrecord.Record
-			if err := json.Unmarshal(payload, &record); err != nil {
-				t.Fatal(err)
-			}
-			if record.SchemaVersion != test.version || record.OTLPStatus != test.otlpStatus {
-				t.Fatalf("record version/status = %d/%q", record.SchemaVersion, record.OTLPStatus)
-			}
-			if err := record.Validate(); err != nil {
-				t.Fatalf("published record did not parse: %v", err)
-			}
-		})
-	}
-
-	payload, err := os.ReadFile(filepath.Join("examples", "run-record.v2.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var incompatible runrecord.Record
-	if err := json.Unmarshal(payload, &incompatible); err != nil {
-		t.Fatal(err)
-	}
-	incompatible.OTLPStatus = "not_sampled"
-	if err := incompatible.Validate(); err == nil {
-		t.Fatal("v2 run record accepted the v3 not_sampled status")
 	}
 }
 

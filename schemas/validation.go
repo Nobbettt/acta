@@ -56,32 +56,6 @@ var loadEventSchemas = sync.OnceValues(func() (map[int]*jsonschema.Schema, error
 	return result, nil
 })
 
-// ValidateEventPayload validates payload against the closed per-type payload
-// contract selected by schemaVersion and eventType. Stable placeholder envelope
-// fields let the published event schema own the type-to-payload mapping while
-// callers continue to validate the real envelope and stream ordering separately.
-func ValidateEventPayload(schemaVersion int, eventType string, payload []byte) error {
-	decoded, err := decodeDocument(payload, "payload")
-	if err != nil {
-		return err
-	}
-
-	event := map[string]any{
-		"schema_version": schemaVersion,
-		"producer":       map[string]any{"name": "acta", "version": "payload-validation"},
-		"run_id":         "payload-validation",
-		"sequence":       1,
-		"timestamp":      "2000-01-01T00:00:00Z",
-		"source":         "acta",
-		"type":           eventType,
-		"payload":        decoded,
-	}
-	if err := validateEventDocument(schemaVersion, event); err != nil {
-		return fmt.Errorf("schema-v%d %s payload does not match the published schema: %w", schemaVersion, eventType, err)
-	}
-	return nil
-}
-
 // ValidateEvent validates a complete event envelope against the published
 // schema selected by schemaVersion.
 func ValidateEvent(schemaVersion int, encoded []byte) error {

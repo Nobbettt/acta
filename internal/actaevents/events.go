@@ -509,16 +509,10 @@ func buildEventsForRunDir(runDir string, d *digest.Digest) ([]Event, error) {
 	return buildForBundle(runDir, &record, d, prompt, &regeneratedBy)
 }
 
-// WriteProjectionForRunDir prebuilds and validates digest.json and the event
-// stream, stages both on the bundle filesystem, and publishes them as one
+// WriteProjectionForRunDirContext prebuilds and validates digest.json and the
+// event stream, stages both on the bundle filesystem, and publishes them as one
 // rollback-protected generation. projection.json is committed last and binds
 // the immutable run record to the derived pair.
-func WriteProjectionForRunDir(runDir string, d *digest.Digest) error {
-	return WriteProjectionForRunDirContext(context.Background(), runDir, d)
-}
-
-// WriteProjectionForRunDirContext is WriteProjectionForRunDir with
-// cancellation support while waiting to publish the new generation.
 func WriteProjectionForRunDirContext(ctx context.Context, runDir string, d *digest.Digest) error {
 	generation := fmt.Sprintf("%d", time.Now().UnixNano())
 	finals := []string{"digest.json", Filename, "projection.json"}
@@ -535,7 +529,7 @@ func WriteProjectionForRunDirContext(ctx context.Context, runDir string, d *dige
 		if err != nil {
 			return err
 		}
-		payloads[0], err = marshalDigest(d)
+		payloads[0], err = digest.MarshalFile(d)
 		if err != nil {
 			return err
 		}
@@ -572,11 +566,11 @@ func WriteProjectionForRecordContext(ctx context.Context, runDir string, record 
 		if err != nil {
 			return err
 		}
-		payloads[0], err = marshalRunRecord(record)
+		payloads[0], err = runrecord.MarshalFile(record)
 		if err != nil {
 			return err
 		}
-		payloads[1], err = marshalDigest(d)
+		payloads[1], err = digest.MarshalFile(d)
 		if err != nil {
 			return err
 		}
@@ -587,33 +581,6 @@ func WriteProjectionForRecordContext(ctx context.Context, runDir string, record 
 		payloads[3], err = marshalProjectionManifest(d.Producer, generation, payloads[0], payloads[1], payloads[2])
 		return err
 	})
-}
-
-func marshalRunRecord(record *runrecord.Record) ([]byte, error) {
-	if err := record.Validate(); err != nil {
-		return nil, fmt.Errorf("validate run record: %w", err)
-	}
-	payload, err := json.MarshalIndent(record, "", "  ")
-	if err != nil {
-		return nil, fmt.Errorf("marshal run record: %w", err)
-	}
-	payload = append(payload, '\n')
-	if int64(len(payload)) > runrecord.MaxRecordBytes {
-		return nil, fmt.Errorf("run record exceeds %d-byte limit", runrecord.MaxRecordBytes)
-	}
-	return payload, nil
-}
-
-func marshalDigest(d *digest.Digest) ([]byte, error) {
-	payload, err := digest.MarshalEvaluation(d)
-	if err != nil {
-		return nil, fmt.Errorf("marshal digest: %w", err)
-	}
-	payload = append(payload, '\n')
-	if len(payload) > digest.MaxDigestBytes {
-		return nil, fmt.Errorf("digest is %d bytes; maximum is %d", len(payload), digest.MaxDigestBytes)
-	}
-	return payload, nil
 }
 
 func marshalProjectionManifest(producer runrecord.Producer, generation string, runPayload, digestPayload, eventPayload []byte) ([]byte, error) {
@@ -651,10 +618,6 @@ type projectionScratchFile struct {
 var projectionArtifactNames = []string{"run.json", "digest.json", Filename, "projection.json"}
 
 const projectionCopyBackupTemporaryPrefix = ".projection-copy-backup-"
-
-func commitProjection(runDir, generation string, finals []string, payloads [][]byte, afterLock func() error) (returnErr error) {
-	return commitProjectionContext(context.Background(), runDir, generation, finals, payloads, afterLock)
-}
 
 func commitProjectionContext(ctx context.Context, runDir, generation string, finals []string, payloads [][]byte, afterLock func() error) (returnErr error) {
 	lock, err := AcquireProjectionLockContext(ctx, runDir)

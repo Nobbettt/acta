@@ -1,6 +1,7 @@
 package actaevents
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,9 +30,9 @@ func TestProjectionLockRejectsSymlinkWithoutTouchingTarget(t *testing.T) {
 				t.Skipf("symlinks unavailable: %v", err)
 			}
 
-			lock, err := AcquireProjectionLock(runDir)
+			lock, err := AcquireProjectionLockContext(context.Background(), runDir)
 			if lock != nil || err == nil || !strings.Contains(err.Error(), "projection lock securely") {
-				t.Fatalf("AcquireProjectionLock() = %#v, %v; want clear secure-open error", lock, err)
+				t.Fatalf("AcquireProjectionLockContext() = %#v, %v; want clear secure-open error", lock, err)
 			}
 			if !test.existingTarget {
 				if _, err := os.Lstat(externalPath); !os.IsNotExist(err) {
@@ -59,7 +60,7 @@ func TestProjectionLockRejectsSymlinkWithoutTouchingTarget(t *testing.T) {
 
 func TestProjectionLockCreatesAndReopensRegularFile(t *testing.T) {
 	runDir := t.TempDir()
-	lock, err := AcquireProjectionLock(runDir)
+	lock, err := AcquireProjectionLockContext(context.Background(), runDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +74,7 @@ func TestProjectionLockCreatesAndReopensRegularFile(t *testing.T) {
 	if !info.Mode().IsRegular() {
 		t.Fatalf("projection lock mode = %v, want regular file", info.Mode())
 	}
-	lock, err = AcquireProjectionLock(runDir)
+	lock, err = AcquireProjectionLockContext(context.Background(), runDir)
 	if err != nil {
 		t.Fatalf("reopen regular projection lock: %v", err)
 	}

@@ -79,12 +79,6 @@ func (traversal TraversalContext) Enter(parent map[string]any, key string) (Trav
 	return child, false
 }
 
-// IsRedactedBlock reports whether a reasoning block was previously redacted.
-// The explicit flag is provenance; marker text alone may be genuine content.
-func IsRedactedBlock(redacted bool) bool {
-	return redacted
-}
-
 // IsCodexBlock reports whether itemType is the exact reasoning discriminator
 // at the item position of a supported Codex item event.
 func IsCodexBlock(eventType, itemType string) bool {
@@ -113,7 +107,7 @@ func IsClaudeBlock(eventType, blockType string) bool {
 // IsBlockDiscriminator reports whether value is one of the exact private
 // reasoning block discriminators understood across supported providers. It
 // does not establish provider position; use IsCodexBlock, IsClaudeBlock, or
-// RedactProviderBlocks when position is required.
+// the provider traversal when position is required.
 func IsBlockDiscriminator(value string) bool {
 	switch value {
 	case actaReasoningKind, claudeThinkingBlock, claudeRedactedThinking:
@@ -137,15 +131,6 @@ func IsNormalizedEvent(kind, providerEvent, detailType string) bool {
 	}
 	return IsClaudeBlock(claudeAssistantEvent, detailType) &&
 		providerEvent == claudeAssistantEvent+"."+detailType
-}
-
-// RedactProviderBlocks recursively finds reasoning blocks at exact provider
-// positions inside a retained raw payload and masks their private fields. It
-// deliberately does not classify arbitrary objects with a reasoning-shaped
-// type as provider output.
-func RedactProviderBlocks(value any) bool {
-	changed, _, _ := redactProviderBlocks(context.Background(), value, ProviderTraversal())
-	return changed
 }
 
 // RedactValue applies both the exact provider-envelope pass and a defensive
@@ -452,7 +437,7 @@ func redactCodexBlock(event map[string]any) (changed, containsPreviouslyRedacted
 		return false, false
 	}
 	redacted, _ := item["redacted"].(bool)
-	return redactBlock(item, "text"), IsRedactedBlock(redacted)
+	return redactBlock(item, "text"), redacted
 }
 
 func redactClaudeBlocks(event map[string]any) (changed, containsPreviouslyRedacted bool) {
@@ -473,7 +458,7 @@ func redactClaudeBlocks(event map[string]any) (changed, containsPreviouslyRedact
 		blockType, _ := block["type"].(string)
 		if IsClaudeBlock(eventType, blockType) {
 			redacted, _ := block["redacted"].(bool)
-			containsPreviouslyRedacted = IsRedactedBlock(redacted) || containsPreviouslyRedacted
+			containsPreviouslyRedacted = redacted || containsPreviouslyRedacted
 			textField := "thinking"
 			if blockType == claudeRedactedThinking {
 				textField = "data"
@@ -488,7 +473,7 @@ func redactBlock(block map[string]any, textField string) bool {
 	changed := false
 	text, _ := block[textField].(string)
 	redacted, _ := block["redacted"].(bool)
-	if !IsRedactedBlock(redacted) && text != "" {
+	if !redacted && text != "" {
 		textChars := utf8.RuneCountInString(text)
 		textTruncated := len(text) > MaxTextBytes
 		if block["text_chars"] != textChars {

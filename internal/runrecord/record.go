@@ -231,6 +231,22 @@ func (r *Record) Validate() error {
 	return nil
 }
 
+// MarshalFile returns the validated, bounded bytes written to run.json.
+func MarshalFile(record *Record) ([]byte, error) {
+	if err := record.Validate(); err != nil {
+		return nil, fmt.Errorf("validate run record: %w", err)
+	}
+	payload, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal run record: %w", err)
+	}
+	payload = append(payload, '\n')
+	if int64(len(payload)) > MaxRecordBytes {
+		return nil, fmt.Errorf("run record exceeds %d-byte limit", MaxRecordBytes)
+	}
+	return payload, nil
+}
+
 func validPublishedBundleArtifactID(value string) bool {
 	return publishedBundleArtifactIDRegexp.MatchString(value)
 }

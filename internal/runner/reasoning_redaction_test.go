@@ -34,49 +34,108 @@ func TestRedactReasoningRawStreamRejectsOversizedLineWithoutMutation(t *testing.
 	}
 }
 
-func TestRedactReasoningLineRedactsExactProviderBlocks(t *testing.T) {
-	const secret = "private provider reasoning"
-	tests := map[string][]byte{
-		"codex":  []byte(`{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","text":"` + secret + `"}}` + "\n"),
-		"claude": []byte(`{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"` + secret + `"}]}}` + "\n"),
+func TestRedactReasoningLine(t *testing.T) {
+	const providerSecret = "private provider reasoning"
+	requireRedactedItem := func(t *testing.T, redacted []byte) {
+		t.Helper()
+		var event map[string]any
+		if err := json.Unmarshal(redacted, &event); err != nil {
+			t.Fatal(err)
+		}
+		item, ok := event["item"].(map[string]any)
+		if !ok || item["redacted"] != true {
+			t.Fatalf("redacted item = %#v, want typed provenance flag", event["item"])
+		}
 	}
-	for name, original := range tests {
-		t.Run(name, func(t *testing.T) {
-			redacted, err := redactReasoningLine(original)
+	tests := []struct {
+		name         string
+		original     []byte
+		wantEqual    bool
+		wantError    string
+		wantContains []string
+		wantAbsent   []string
+		semantic     func(*testing.T, []byte)
+	}{
+		{
+			name: "codex provider block", original: []byte(`{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","text":"` + providerSecret + `"}}` + "\n"),
+			wantContains: []string{`"type":"reasoning"`}, wantAbsent: []string{providerSecret},
+		},
+		{
+			name: "claude provider block", original: []byte(`{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"` + providerSecret + `"}]}}` + "\n"),
+			wantContains: []string{`"type":"thinking"`}, wantAbsent: []string{providerSecret},
+		},
+		{
+			name:       "claimed redacted metadata",
+			original:   []byte(`{"type":"item.completed","item":{"type":"reasoning","text":"[REDACTED]","id":{"value":"private-id"},"status":["private-status"],"text_chars":"private-count","text_truncated":"private-truncation","redacted":true}}` + "\n"),
+			wantAbsent: []string{"private-"}, semantic: requireRedactedItem,
+		},
+		{
+			name:       "malformed redacted flag",
+			original:   []byte(`{"type":"item.completed","item":{"type":"reasoning","text":"","redacted":"private-redacted-flag"}}` + "\n"),
+			wantAbsent: []string{"private-"}, semantic: requireRedactedItem,
+		},
+		{
+			name:         "provider-shaped tool result",
+			original:     []byte(`{"type":"item.completed","item":{"id":"mcp-1","type":"mcp_tool_call","result":{"type":"item.completed","item":{"type":"reasoning","text":"visible fixture"}}}}` + "\n"),
+			wantContains: []string{`"redacted":true`}, wantAbsent: []string{"visible fixture"},
+		},
+		{
+			name:      "lookalike provider discriminator",
+			original:  []byte(`{"type":"item.completed","item":{"id":"result-1","type":"reasoning_result","text":"visible output"}}` + "\n"),
+			wantEqual: true,
+		},
+		{
+			name:         "generic reasoning field",
+			original:     []byte(`{"type":"future.event","thinking":"private future reasoning"}` + "\n"),
+			wantContains: []string{`"type":"future.event"`, `"thinking":"[REDACTED]"`}, wantAbsent: []string{"private future reasoning"},
+		},
+		{
+			name:         "bare normalized kind",
+			original:     []byte(`{"kind":"tool_call","input":{"thinking":"private-bare-normalized-kind-reasoning-4187"}}` + "\n"),
+			wantContains: []string{`"kind":"tool_call"`, `"thinking":"[REDACTED]"`}, wantAbsent: []string{"private-bare-normalized-kind-reasoning-4187"},
+		},
+		{
+			name:         "reasoning kind with future type",
+			original:     []byte(`{"type":"future.event","kind":"reasoning","text":"private conflicting-discriminator reasoning"}` + "\n"),
+			wantContains: []string{`"type":"future.event"`, `"kind":"reasoning"`, `"redacted":true`}, wantAbsent: []string{"private conflicting-discriminator reasoning"},
+		},
+		{
+			name: "duplicate reasoning key", original: []byte(`{"reasoning":"private","reasoning":0}` + "\n"),
+			wantError: `duplicate JSON object key "reasoning"`,
+		},
+		{
+			name:      "duplicate provider discriminator",
+			original:  []byte(`{"type":"item.completed","item":{"id":"r","type":"reasoning","type":"agent_message","text":"secret"}}` + "\n"),
+			wantError: `duplicate JSON object key "type"`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			redacted, err := redactReasoningLine(test.original)
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("duplicate-key redaction = %q, error = %v", redacted, err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
-			if bytes.Contains(redacted, []byte(secret)) {
-				t.Fatalf("provider reasoning was not redacted: %s", redacted)
+			if test.wantEqual && !bytes.Equal(redacted, test.original) {
+				t.Fatalf("redacted line changed:\n got %s\nwant %s", redacted, test.original)
 			}
-			if !bytes.Contains(redacted, []byte(`"type":"reasoning"`)) && !bytes.Contains(redacted, []byte(`"type":"thinking"`)) {
-				t.Fatalf("provider reasoning block lost its discriminator: %s", redacted)
+			for _, want := range test.wantContains {
+				if !bytes.Contains(redacted, []byte(want)) {
+					t.Fatalf("redacted line does not contain %q: %s", want, redacted)
+				}
 			}
-		})
-	}
-}
-
-func TestRedactReasoningLineMasksMalformedStructuralMetadata(t *testing.T) {
-	tests := map[string][]byte{
-		"claimed redacted":        []byte(`{"type":"item.completed","item":{"type":"reasoning","text":"[REDACTED]","id":{"value":"private-id"},"status":["private-status"],"text_chars":"private-count","text_truncated":"private-truncation","redacted":true}}` + "\n"),
-		"malformed redacted flag": []byte(`{"type":"item.completed","item":{"type":"reasoning","text":"","redacted":"private-redacted-flag"}}` + "\n"),
-	}
-	for name, original := range tests {
-		t.Run(name, func(t *testing.T) {
-			redacted, err := redactReasoningLine(original)
-			if err != nil {
-				t.Fatal(err)
+			for _, absent := range test.wantAbsent {
+				if bytes.Contains(redacted, []byte(absent)) {
+					t.Fatalf("redacted line contains %q: %s", absent, redacted)
+				}
 			}
-			if bytes.Contains(redacted, []byte("private-")) {
-				t.Fatalf("malformed structural metadata retained private data: %s", redacted)
-			}
-			var event map[string]any
-			if err := json.Unmarshal(redacted, &event); err != nil {
-				t.Fatal(err)
-			}
-			item, ok := event["item"].(map[string]any)
-			if !ok || item["redacted"] != true {
-				t.Fatalf("redacted item = %#v, want typed provenance flag", event["item"])
+			if test.semantic != nil {
+				test.semantic(t, redacted)
 			}
 		})
 	}
@@ -108,87 +167,6 @@ func TestRedactReasoningRawStreamRejectsNonEnvelopeRecordsWithoutMutation(t *tes
 				t.Fatalf("failed redaction changed raw evidence = %q, want %q", payload, original)
 			}
 		})
-	}
-}
-
-func TestRedactReasoningLineTraversesProviderShapedToolResult(t *testing.T) {
-	original := []byte(`{"type":"item.completed","item":{"id":"mcp-1","type":"mcp_tool_call","result":{"type":"item.completed","item":{"type":"reasoning","text":"visible fixture"}}}}` + "\n")
-	redacted, err := redactReasoningLine(original)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(redacted, []byte("visible fixture")) || !bytes.Contains(redacted, []byte(`"redacted":true`)) {
-		t.Fatalf("nested raw provider reasoning was not redacted: %s", redacted)
-	}
-}
-
-func TestRedactReasoningLineRequiresExactProviderDiscriminator(t *testing.T) {
-	original := []byte(`{"type":"item.completed","item":{"id":"result-1","type":"reasoning_result","text":"visible output"}}` + "\n")
-	redacted, err := redactReasoningLine(original)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(redacted, original) {
-		t.Fatalf("lookalike provider item changed:\n got %s\nwant %s", redacted, original)
-	}
-}
-
-func TestRedactReasoningLineScrubsGenericReasoningFields(t *testing.T) {
-	const secret = "private future reasoning"
-	original := []byte(`{"type":"future.event","thinking":"` + secret + `"}` + "\n")
-	redacted, err := redactReasoningLine(original)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(redacted, []byte(secret)) ||
-		!bytes.Contains(redacted, []byte(`"type":"future.event"`)) ||
-		!bytes.Contains(redacted, []byte(`"thinking":"[REDACTED]"`)) {
-		t.Fatalf("generic reasoning field was not safely redacted: %s", redacted)
-	}
-}
-
-func TestRedactReasoningLineDoesNotTrustBareNormalizedKind(t *testing.T) {
-	const secret = "private-bare-normalized-kind-reasoning-4187"
-	original := []byte(`{"kind":"tool_call","input":{"thinking":"` + secret + `"}}` + "\n")
-	redacted, err := redactReasoningLine(original)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(redacted, []byte(secret)) ||
-		!bytes.Contains(redacted, []byte(`"kind":"tool_call"`)) ||
-		!bytes.Contains(redacted, []byte(`"thinking":"[REDACTED]"`)) {
-		t.Fatalf("bare normalized-kind input was not safely redacted: %s", redacted)
-	}
-}
-
-func TestRedactReasoningLineScrubsReasoningKindDespiteFutureType(t *testing.T) {
-	const secret = "private conflicting-discriminator reasoning"
-	original := []byte(`{"type":"future.event","kind":"reasoning","text":"` + secret + `"}` + "\n")
-	redacted, err := redactReasoningLine(original)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(redacted, []byte(secret)) ||
-		!bytes.Contains(redacted, []byte(`"type":"future.event"`)) ||
-		!bytes.Contains(redacted, []byte(`"kind":"reasoning"`)) ||
-		!bytes.Contains(redacted, []byte(`"redacted":true`)) {
-		t.Fatalf("conflicting discriminator reasoning was not safely redacted: %s", redacted)
-	}
-}
-
-func TestRedactReasoningLineRejectsDuplicateReasoningKey(t *testing.T) {
-	original := []byte(`{"reasoning":"private","reasoning":0}` + "\n")
-	redacted, err := redactReasoningLine(original)
-	if err == nil || !strings.Contains(err.Error(), `duplicate JSON object key "reasoning"`) {
-		t.Fatalf("duplicate-key redaction = %q, error = %v", redacted, err)
-	}
-}
-
-func TestRedactReasoningLineRejectsDuplicateProviderDiscriminator(t *testing.T) {
-	original := []byte(`{"type":"item.completed","item":{"id":"r","type":"reasoning","type":"agent_message","text":"secret"}}` + "\n")
-	redacted, err := redactReasoningLine(original)
-	if err == nil || !strings.Contains(err.Error(), `duplicate JSON object key "type"`) {
-		t.Fatalf("duplicate-key redaction = %q, error = %v", redacted, err)
 	}
 }
 

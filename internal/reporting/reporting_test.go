@@ -22,13 +22,12 @@ import (
 	"time"
 	"unicode/utf8"
 
-	jsonschema "github.com/santhosh-tekuri/jsonschema/v6"
-
 	"github.com/nobbettt/acta/internal/actaevents"
 	"github.com/nobbettt/acta/internal/digest"
 	"github.com/nobbettt/acta/internal/runrecord"
 	"github.com/nobbettt/acta/internal/schemaversion"
 	"github.com/nobbettt/acta/internal/securefile"
+	"github.com/nobbettt/acta/schemas"
 )
 
 func TestWriterEventBudgetFitsUploadEnvelope(t *testing.T) {
@@ -693,7 +692,7 @@ func TestUploadRunLegacyProjectionLockFreeSnapshotStillDetectsTornGeneration(t *
 
 func TestUploadRunProjectionLockWaitHonorsContext(t *testing.T) {
 	runDir := writeBundle(t)
-	lock, err := actaevents.AcquireProjectionLock(runDir)
+	lock, err := actaevents.AcquireProjectionLockContext(context.Background(), runDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -729,7 +728,7 @@ func TestUploadRunWaitsForFirstProjectionCommit(t *testing.T) {
 	newDigest := `{"run_id":"run-1","generation":"new"}` + "\n"
 	newEvents := strings.Replace(oldEvents, `"duration_ms":1000`, `"duration_ms":2000`, 1)
 
-	lock, err := actaevents.AcquireProjectionLock(runDir)
+	lock, err := actaevents.AcquireProjectionLockContext(context.Background(), runDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -859,12 +858,17 @@ func TestUploadRunAcceptsRedigestedV2EventsWithProducerProvenance(t *testing.T) 
 	if d.Producer != regenerator || d.Producer == originalProducer {
 		t.Fatalf("digest producer = %+v, regenerating producer = %+v, original producer = %+v", d.Producer, regenerator, originalProducer)
 	}
-	if err := actaevents.WriteProjectionForRunDir(runDir, d); err != nil {
+	if err := actaevents.WriteProjectionForRunDirContext(context.Background(), runDir, d); err != nil {
 		t.Fatalf("write regenerated projection: %v", err)
 	}
 
 	var localEvents []actaevents.Event
-	if _, err := scanEvents(runDir, record.ID, func(event actaevents.Event) error {
+	eventFile, err := securefile.OpenRegular(runDir, filepath.Join(runDir, actaevents.Filename))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eventFile.Close()
+	if _, err := scanEventsFile(context.Background(), eventFile, record.ID, func(event actaevents.Event) error {
 		localEvents = append(localEvents, event)
 		return nil
 	}); err != nil {
@@ -2063,27 +2067,7 @@ func TestRedactActaReasoningEventLinePreservesSchemaFieldTypes(t *testing.T) {
 		t.Fatalf("redacted payload did not preserve field types: %#v", payload)
 	}
 
-	compiler := jsonschema.NewCompiler()
-	compiler.AssertFormat()
-	const schemaBase = "https://github.com/Nobbettt/acta/schemas/"
-	for _, name := range []string{"run-record.schema.json", "acta-event.schema.json"} {
-		schemaPayload, err := os.ReadFile(filepath.Join("..", "..", "schemas", name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		var document any
-		if err := json.Unmarshal(schemaPayload, &document); err != nil {
-			t.Fatal(err)
-		}
-		if err := compiler.AddResource(schemaBase+name, document); err != nil {
-			t.Fatal(err)
-		}
-	}
-	schema, err := compiler.Compile(schemaBase + "acta-event.schema.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := schema.Validate(event); err != nil {
+	if err := schemas.ValidateEvent(actaevents.SchemaVersion, redacted); err != nil {
 		t.Fatalf("redacted agent.reasoning event failed schema validation: %v\nJSON: %s", err, redacted)
 	}
 }
@@ -2539,9 +2523,15 @@ func TestUploadRunRejectsSymlinkArtifact(t *testing.T) {
 
 func TestScanEventsBoundsLineSize(t *testing.T) {
 	runDir := t.TempDir()
-	writeFile(t, filepath.Join(runDir, "acta-events.jsonl"), strings.Repeat("x", maxEventsRequestBytes+1)+"\n")
-	if _, err := scanEvents(runDir, "run-1", nil); err == nil || !strings.Contains(err.Error(), "maximum line size") {
-		t.Fatalf("scanEvents() error = %v, want bounded-line error", err)
+	path := filepath.Join(runDir, "acta-events.jsonl")
+	writeFile(t, path, strings.Repeat("x", maxEventsRequestBytes+1)+"\n")
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := scanEventsFile(context.Background(), file, "run-1", nil); err == nil || !strings.Contains(err.Error(), "maximum line size") {
+		t.Fatalf("scanEventsFile() error = %v, want bounded-line error", err)
 	}
 }
 
@@ -2559,8 +2549,14 @@ func TestScanEventsRejectsInvalidReplayContract(t *testing.T) {
 	for name, lines := range cases {
 		t.Run(name, func(t *testing.T) {
 			runDir := t.TempDir()
-			writeFile(t, filepath.Join(runDir, "acta-events.jsonl"), strings.Join(lines, "\n")+"\n")
-			if _, err := scanEvents(runDir, "run-1", nil); err == nil {
+			path := filepath.Join(runDir, "acta-events.jsonl")
+			writeFile(t, path, strings.Join(lines, "\n")+"\n")
+			file, err := os.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer file.Close()
+			if _, err := scanEventsFile(context.Background(), file, "run-1", nil); err == nil {
 				t.Fatal("invalid replay stream was accepted")
 			}
 		})
@@ -2770,12 +2766,18 @@ func TestUploadRunRejectsFutureDigestSchemaRegardlessOfPrivacyOptIn(t *testing.T
 
 func TestScanEventsRejectsMixedSchemaStream(t *testing.T) {
 	runDir := t.TempDir()
-	writeFile(t, filepath.Join(runDir, actaevents.Filename), strings.Join([]string{
+	path := filepath.Join(runDir, actaevents.Filename)
+	writeFile(t, path, strings.Join([]string{
 		`{"schema_version":2,"producer":{"name":"acta","version":"test"},"run_id":"run-1","sequence":1,"timestamp":"2026-07-06T12:00:00Z","source":"acta","type":"run.started","payload":{"agent":"codex","cwd":"/workspace","run_dir":"/workspace/.acta/runs/run-1"}}`,
 		`{"schema_version":2,"producer":{"name":"acta","version":"v2"},"run_id":"run-1","sequence":2,"timestamp":"2026-07-06T12:00:01Z","source":"acta","type":"run.completed","payload":{"status":"ok","ok":true,"timeout":false,"duration_ms":1000}}`,
 	}, "\n")+"\n")
-	if _, err := scanEvents(runDir, "run-1", nil); err == nil || !strings.Contains(err.Error(), "does not match stream") {
-		t.Fatalf("scanEvents() error = %v", err)
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := scanEventsFile(context.Background(), file, "run-1", nil); err == nil || !strings.Contains(err.Error(), "does not match stream") {
+		t.Fatalf("scanEventsFile() error = %v", err)
 	}
 }
 

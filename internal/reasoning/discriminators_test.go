@@ -18,7 +18,11 @@ func TestRedactProviderBlocksRecursesThroughExactProviderPositions(t *testing.T)
 		t.Fatal(err)
 	}
 
-	if !RedactProviderBlocks(payload) {
+	changed, _, err := redactProviderBlocks(context.Background(), payload, ProviderTraversal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
 		t.Fatal("nested provider blocks were not redacted")
 	}
 	encoded, err := json.Marshal(payload)
@@ -37,7 +41,11 @@ func TestRedactProviderBlocksPreservesPriorRedactionMetadata(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if RedactProviderBlocks(payload) {
+	changed, _, err := redactProviderBlocks(context.Background(), payload, ProviderTraversal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
 		t.Fatal("already-redacted provider block changed")
 	}
 	encoded, err := json.Marshal(payload)
@@ -56,7 +64,11 @@ func TestRedactProviderBlocksTreatsUnflaggedMarkerAsContent(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if !RedactProviderBlocks(payload) {
+	changed, _, err := redactProviderBlocks(context.Background(), payload, ProviderTraversal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
 		t.Fatal("unflagged marker content was not redacted with provenance metadata")
 	}
 	encoded, err := json.Marshal(payload)
@@ -66,15 +78,6 @@ func TestRedactProviderBlocksTreatsUnflaggedMarkerAsContent(t *testing.T) {
 	want := `{"item":{"redacted":true,"text":"[REDACTED]","text_chars":10,"text_truncated":false,"type":"reasoning"},"type":"item.completed"}`
 	if string(encoded) != want {
 		t.Fatalf("redacted marker payload = %s\nwant %s", encoded, want)
-	}
-}
-
-func TestIsRedactedBlockRequiresProvenanceFlag(t *testing.T) {
-	if !IsRedactedBlock(true) {
-		t.Fatal("redaction flag was not recognized")
-	}
-	if IsRedactedBlock(false) {
-		t.Fatal("unflagged block was classified as previously redacted")
 	}
 }
 
@@ -90,7 +93,11 @@ func TestRedactProviderBlocksRequiresExactDiscriminatorAndPosition(t *testing.T)
 			if err := json.Unmarshal([]byte(raw), &payload); err != nil {
 				t.Fatal(err)
 			}
-			if RedactProviderBlocks(payload) {
+			changed, _, err := redactProviderBlocks(context.Background(), payload, ProviderTraversal())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if changed {
 				t.Fatalf("non-provider payload was redacted: %#v", payload)
 			}
 		})
@@ -117,7 +124,11 @@ func TestRedactProviderBlocksTraversesRawProviderData(t *testing.T) {
 			if err := json.Unmarshal([]byte(raw), &payload); err != nil {
 				t.Fatal(err)
 			}
-			if !RedactProviderBlocks(payload) {
+			changed, _, err := redactProviderBlocks(context.Background(), payload, ProviderTraversal())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !changed {
 				t.Fatalf("raw provider data was not traversed: %#v", payload)
 			}
 			after, err := json.Marshal(payload)

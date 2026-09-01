@@ -934,16 +934,9 @@ func validateGitEvidenceExcludes(values []string) error {
 }
 
 func WriteRecord(runDir string, record *runrecord.Record) error {
-	if err := record.Validate(); err != nil {
-		return fmt.Errorf("validate run record: %w", err)
-	}
-	payload, err := json.MarshalIndent(record, "", "  ")
+	payload, err := runrecord.MarshalFile(record)
 	if err != nil {
-		return fmt.Errorf("marshal run record: %w", err)
-	}
-	payload = append(payload, '\n')
-	if int64(len(payload)) > runrecord.MaxRecordBytes {
-		return fmt.Errorf("run record exceeds %d-byte limit", runrecord.MaxRecordBytes)
+		return err
 	}
 	path := filepath.Join(runDir, "run.json")
 	if err := securefile.WriteFile(path, payload); err != nil {
@@ -994,11 +987,12 @@ func agentEnvironment(opts Options) []string {
 }
 
 func prepareAgentEnvironment(environment []string, reportTokenEnv string) []string {
-	environment = environmentWithoutKeys(environment, reportTokenEnv)
-	filtered := environment[:0]
+	reportTokenEnv = strings.TrimSpace(reportTokenEnv)
+	filtered := make([]string, 0, len(environment))
 	for _, entry := range environment {
-		key, _, _ := strings.Cut(entry, "=")
-		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(key)), "OTEL_") {
+		key, _, valid := strings.Cut(entry, "=")
+		if valid && reportTokenEnv != "" && key == reportTokenEnv ||
+			strings.HasPrefix(strings.ToUpper(strings.TrimSpace(key)), "OTEL_") {
 			continue
 		}
 		filtered = append(filtered, entry)
@@ -1101,31 +1095,6 @@ func pathContains(root string, candidate string) (bool, error) {
 		return false, fmt.Errorf("compare agent writable directory boundaries: %w", err)
 	}
 	return relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative)), nil
-}
-
-func environmentWithoutKeys(env []string, keys ...string) []string {
-	blocked := make(map[string]struct{}, len(keys))
-	for _, key := range keys {
-		key = strings.TrimSpace(key)
-		if key != "" {
-			blocked[key] = struct{}{}
-		}
-	}
-	if len(blocked) == 0 {
-		return append([]string(nil), env...)
-	}
-
-	filtered := make([]string, 0, len(env))
-	for _, entry := range env {
-		key, _, ok := strings.Cut(entry, "=")
-		if ok {
-			if _, found := blocked[key]; found {
-				continue
-			}
-		}
-		filtered = append(filtered, entry)
-	}
-	return filtered
 }
 
 func taskTitle(opts Options) string {

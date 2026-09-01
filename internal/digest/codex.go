@@ -480,7 +480,7 @@ func codexItemEvent(d *Digest, item *CodexItem, srcLine int, completedLine int, 
 		e.Text = renderTodos(item.Items)
 	case "reasoning":
 		e.Kind = KindReasoning
-		if reasoning.IsRedactedBlock(item.Redacted) {
+		if item.Redacted {
 			e.Redacted = true
 			e.TextChars = item.TextChars
 			e.TextTruncated = item.TextTruncated

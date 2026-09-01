@@ -26,11 +26,6 @@ type ProjectionLock struct {
 	local *sync.Mutex
 }
 
-// AcquireProjectionLock blocks until the per-bundle projection lock is held.
-func AcquireProjectionLock(runDir string) (*ProjectionLock, error) {
-	return AcquireProjectionLockContext(context.Background(), runDir)
-}
-
 // AcquireProjectionLockContext waits until the per-bundle projection lock is
 // held or ctx is cancelled. OS lock attempts are nonblocking so cancellation
 // is observed even while another process owns the lock.

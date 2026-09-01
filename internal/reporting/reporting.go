@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -565,16 +566,6 @@ func terminalArtifactRefsFromFile(ctx context.Context, file *os.File, record *ru
 	return terminalRefs, nil
 }
 
-func scanEvents(runDir string, runID string, visit func(actaevents.Event) error) (int, error) {
-	path := filepath.Join(runDir, actaevents.Filename)
-	file, err := securefile.OpenRegular(runDir, path)
-	if err != nil {
-		return 0, fmt.Errorf("open %s: %w", actaevents.Filename, err)
-	}
-	defer file.Close()
-	return scanEventsFile(context.Background(), file, runID, visit)
-}
-
 func scanEventsFile(ctx context.Context, file *os.File, runID string, visit func(actaevents.Event) error) (int, error) {
 	count := 0
 	streamSchema := 0
@@ -661,42 +652,14 @@ func scanEventsFile(ctx context.Context, file *os.File, runID string, visit func
 	return count, nil
 }
 
-type uploadEventEnvelope struct {
-	SchemaVersion json.RawMessage     `json:"schema_version"`
-	Producer      runrecord.Producer  `json:"producer"`
-	RegeneratedBy *runrecord.Producer `json:"regenerated_by"`
-	RunID         json.RawMessage     `json:"run_id"`
-	Sequence      json.RawMessage     `json:"sequence"`
-	Timestamp     json.RawMessage     `json:"timestamp"`
-	Source        json.RawMessage     `json:"source"`
-	Type          json.RawMessage     `json:"type"`
-	Payload       json.RawMessage     `json:"payload"`
-	ArtifactRefs  []json.RawMessage   `json:"artifact_refs"`
-}
-
-type uploadArtifactRef struct {
-	Kind           json.RawMessage `json:"kind"`
-	Path           json.RawMessage `json:"path"`
-	Lines          json.RawMessage `json:"lines"`
-	Status         json.RawMessage `json:"status"`
-	Reason         json.RawMessage `json:"reason"`
-	RedactionState json.RawMessage `json:"redaction_state"`
-}
+type strictUploadEvent actaevents.Event
 
 func decodeUploadEvent(line []byte, event *actaevents.Event) error {
-	var envelope uploadEventEnvelope
+	var strict strictUploadEvent
 	decoder := json.NewDecoder(bytes.NewReader(line))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&envelope); err != nil {
+	if err := decoder.Decode(&strict); err != nil {
 		return err
-	}
-	for index, rawRef := range envelope.ArtifactRefs {
-		decoder = json.NewDecoder(bytes.NewReader(rawRef))
-		decoder.DisallowUnknownFields()
-		var ref uploadArtifactRef
-		if err := decoder.Decode(&ref); err != nil {
-			return fmt.Errorf("artifact_refs[%d]: %w", index, err)
-		}
 	}
 	return json.Unmarshal(line, event)
 }
@@ -1642,28 +1605,10 @@ func jsonStringEnd(line []byte, start int) int {
 	return -1
 }
 
-func lineHasReasoningDiscriminator(line []byte) bool {
-	lower := bytes.ToLower(line)
-	for _, discriminator := range []string{"reasoning", "thinking", "redacted_thinking"} {
-		for start := 0; start < len(lower); {
-			index := bytes.Index(lower[start:], []byte(discriminator))
-			if index < 0 {
-				break
-			}
-			index += start
-			end := index + len(discriminator)
-			if (index == 0 || !isIdentifierByte(lower[index-1])) &&
-				(end == len(lower) || !isIdentifierByte(lower[end])) {
-				return true
-			}
-			start = end
-		}
-	}
-	return false
-}
+var reasoningDiscriminatorPattern = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9_])(?:reasoning|thinking|redacted_thinking)(?:$|[^A-Za-z0-9_])`)
 
-func isIdentifierByte(char byte) bool {
-	return char >= 'a' && char <= 'z' || char >= '0' && char <= '9' || char == '_'
+func lineHasReasoningDiscriminator(line []byte) bool {
+	return reasoningDiscriminatorPattern.Match(line)
 }
 
 func inspectArtifactSnapshot(ctx context.Context, file *os.File, kind, path string, maxLineBytes int) (artifactInspection, error) {
@@ -1844,17 +1789,7 @@ func rewriteJSONLSnapshot(ctx context.Context, file *os.File, maxLineBytes int, 
 	if _, err := temp.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
-	if err := file.Truncate(0); err != nil {
-		return err
-	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return err
-	}
-	if err := copyContext(ctx, file, temp); err != nil {
-		return err
-	}
-	_, err = file.Seek(0, io.SeekStart)
-	return err
+	return replaceSnapshotReaderContext(ctx, file, temp)
 }
 
 func jsonLineParts(line []byte) (prefix, payload, suffix []byte) {
@@ -1929,30 +1864,8 @@ func stampActaEventLineSchemaVersion(line []byte) ([]byte, error) {
 
 func copyContext(ctx context.Context, dst io.Writer, src io.Reader) error {
 	buffer := make([]byte, 128<<10)
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		n, readErr := src.Read(buffer)
-		if n > 0 {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			written, writeErr := dst.Write(buffer[:n])
-			if writeErr != nil {
-				return writeErr
-			}
-			if written != n {
-				return io.ErrShortWrite
-			}
-		}
-		if readErr == io.EOF {
-			return nil
-		}
-		if readErr != nil {
-			return readErr
-		}
-	}
+	_, err := io.CopyBuffer(contextWriter{ctx, dst}, contextReader{ctx, src}, buffer)
+	return err
 }
 
 var errProviderRedactionUnverified = errors.New("provider event reasoning redaction could not be verified")
@@ -2399,6 +2312,18 @@ type contextReader struct {
 	reader io.Reader
 }
 
+type contextWriter struct {
+	ctx    context.Context
+	writer io.Writer
+}
+
+func (w contextWriter) Write(payload []byte) (int, error) {
+	if err := w.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return w.writer.Write(payload)
+}
+
 func (r contextReader) Read(payload []byte) (int, error) {
 	if err := r.ctx.Err(); err != nil {
 		return 0, err
@@ -2479,32 +2404,26 @@ func snapshotOpenFileBudgetContext(ctx context.Context, source *os.File, remaini
 	}
 	hasher := sha256.New()
 	buffer := make([]byte, 128<<10)
-	var copied int64
-	for {
-		if err := ctx.Err(); err != nil {
-			cleanup()
-			return nil, "", err
+	reader := io.Reader(source)
+	budget := int64(0)
+	if remaining != nil {
+		budget = *remaining
+		if budget < math.MaxInt64 {
+			reader = io.LimitReader(source, budget+1)
 		}
-		n, readErr := source.Read(buffer)
-		if n > 0 {
-			if remaining != nil && copied+int64(n) > *remaining {
-				cleanup()
-				return nil, "", fmt.Errorf("file exceeded remaining upload snapshot maximum of %d bytes", *remaining)
-			}
-			if _, err := temp.Write(buffer[:n]); err != nil {
-				cleanup()
-				return nil, "", err
-			}
-			_, _ = hasher.Write(buffer[:n])
-			copied += int64(n)
-		}
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			cleanup()
-			return nil, "", readErr
-		}
+	}
+	copied, err := io.CopyBuffer(
+		contextWriter{ctx, io.MultiWriter(temp, hasher)},
+		contextReader{ctx, reader},
+		buffer,
+	)
+	if err != nil {
+		cleanup()
+		return nil, "", err
+	}
+	if remaining != nil && copied > budget {
+		cleanup()
+		return nil, "", fmt.Errorf("file exceeded remaining upload snapshot maximum of %d bytes", budget)
 	}
 	copyHash := hex.EncodeToString(hasher.Sum(nil))
 	if expectedHash != "" && copyHash != expectedHash {

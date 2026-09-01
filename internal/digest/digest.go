@@ -937,18 +937,28 @@ func (sd *StreamDigester) Finalize(record *runrecord.Record, runDir string) *Dig
 
 // Write serializes the digest to digest.json inside the run bundle.
 func Write(runDir string, d *Digest) error {
-	payload, err := MarshalEvaluation(d)
+	payload, err := MarshalFile(d)
 	if err != nil {
-		return fmt.Errorf("marshal digest: %w", err)
-	}
-	if len(payload)+1 > MaxDigestBytes {
-		return fmt.Errorf("digest is %d bytes; maximum is %d", len(payload)+1, MaxDigestBytes)
+		return err
 	}
 	path := filepath.Join(runDir, "digest.json")
-	if err := securefile.WriteFile(path, append(payload, '\n')); err != nil {
+	if err := securefile.WriteFile(path, payload); err != nil {
 		return fmt.Errorf("write digest: %w", err)
 	}
 	return nil
+}
+
+// MarshalFile returns the bounded bytes written to digest.json.
+func MarshalFile(d *Digest) ([]byte, error) {
+	payload, err := MarshalEvaluation(d)
+	if err != nil {
+		return nil, fmt.Errorf("marshal digest: %w", err)
+	}
+	payload = append(payload, '\n')
+	if len(payload) > MaxDigestBytes {
+		return nil, fmt.Errorf("digest is %d bytes; maximum is %d", len(payload), MaxDigestBytes)
+	}
+	return payload, nil
 }
 
 // MarshalEvaluation serializes the structural/evaluation view of a digest.
