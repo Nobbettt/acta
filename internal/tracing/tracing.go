@@ -290,7 +290,7 @@ func samplerFromEnvironment() sdktrace.Sampler {
 	ratio := func() sdktrace.Sampler {
 		value, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER_ARG")), 64)
 		if err != nil || math.IsNaN(value) || value < 0 || value > 1 {
-			value = 1
+			return defaultSampler
 		}
 		return sdktrace.TraceIDRatioBased(value)
 	}

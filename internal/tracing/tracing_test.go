@@ -539,7 +539,7 @@ func TestTracerProviderHonorsSamplerEnvironment(t *testing.T) {
 		{name: "ratio zero", sampler: "traceidratio", arg: "0"},
 		{name: "ratio one", sampler: "traceidratio", arg: "1", wantSample: true},
 		{name: "ratio invalid fallback", sampler: "traceidratio", arg: "invalid", wantSample: true},
-		{name: "ratio NaN", sampler: "traceidratio", arg: "NaN"},
+		{name: "ratio NaN", sampler: "traceidratio", arg: "NaN", wantSample: true},
 		{name: "ratio negative fallback", sampler: "traceidratio", arg: "-1", wantSample: true},
 		{name: "ratio greater than one fallback", sampler: "traceidratio", arg: "2", wantSample: true},
 		{name: "parent based always on", sampler: "parentbased_always_on", wantSample: true},
@@ -547,13 +547,13 @@ func TestTracerProviderHonorsSamplerEnvironment(t *testing.T) {
 		{name: "parent based ratio zero", sampler: "parentbased_traceidratio", arg: "0"},
 		{name: "parent based ratio one", sampler: "parentbased_traceidratio", arg: "1", wantSample: true},
 		{name: "parent based ratio invalid fallback", sampler: "parentbased_traceidratio", arg: "invalid", wantSample: true},
-		{name: "parent based ratio NaN", sampler: "parentbased_traceidratio", arg: "NaN"},
+		{name: "parent based ratio NaN", sampler: "parentbased_traceidratio", arg: "NaN", wantSample: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Setenv("OTEL_TRACES_SAMPLER", test.sampler)
 			t.Setenv("OTEL_TRACES_SAMPLER_ARG", test.arg)
-			provider := sdktrace.NewTracerProvider()
+			provider := sdktrace.NewTracerProvider(sdktrace.WithSampler(samplerFromEnvironment()))
 			_, span := provider.Tracer("test").Start(context.Background(), "root")
 			sampled := span.SpanContext().IsSampled()
 			span.End()
