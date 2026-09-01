@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -450,23 +451,14 @@ func (d *Digest) Validate() error {
 			return fmt.Errorf("digest schema_version %d does not support %s", d.SchemaVersion, field)
 		}
 	}
-	validOTLPStatus := d.OTLPStatus == "" || oneOf(d.OTLPStatus, "not_configured", "exported", "failed")
+	validOTLPStatus := d.OTLPStatus == "" || slices.Contains([]string{"not_configured", "exported", "failed"}, d.OTLPStatus)
 	if runrecord.SupportsV3Fields(d.SchemaVersion) {
-		validOTLPStatus = validOTLPStatus || oneOf(d.OTLPStatus, "not_sampled", "pending")
+		validOTLPStatus = validOTLPStatus || slices.Contains([]string{"not_sampled", "pending"}, d.OTLPStatus)
 	}
 	if !validOTLPStatus {
 		return fmt.Errorf("digest schema_version %d has invalid otlp_status %q", d.SchemaVersion, d.OTLPStatus)
 	}
 	return nil
-}
-
-func oneOf(value string, allowed ...string) bool {
-	for _, candidate := range allowed {
-		if value == candidate {
-			return true
-		}
-	}
-	return false
 }
 
 func (d *Digest) projectionLimit() int {

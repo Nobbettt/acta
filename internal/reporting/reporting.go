@@ -110,15 +110,6 @@ type artifactSnapshot struct {
 // contract independently testable on every host platform.
 var openManifestedProjectionRegular = securefile.OpenRegular
 
-type projectionManifest struct {
-	SchemaVersion int                `json:"schema_version"`
-	Producer      runrecord.Producer `json:"producer"`
-	Generation    string             `json:"generation"`
-	RunSHA256     string             `json:"run_sha256,omitempty"`
-	DigestSHA256  string             `json:"digest_sha256"`
-	EventsSHA256  string             `json:"events_sha256"`
-}
-
 type completionMetadata struct {
 	OK                         bool   `json:"ok"`
 	Timeout                    bool   `json:"timeout"`
@@ -1058,8 +1049,8 @@ func projectionManifestUnchanged(root, path string, firstInfo os.FileInfo, first
 	return os.SameFile(firstInfo, currentInfo) && os.SameFile(currentInfo, pathInfo) && firstHash == sha256.Sum256(payload), nil
 }
 
-func decodeProjectionManifest(payload []byte) (projectionManifest, error) {
-	var manifest projectionManifest
+func decodeProjectionManifest(payload []byte) (actaevents.ProjectionManifest, error) {
+	var manifest actaevents.ProjectionManifest
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&manifest); err != nil {
@@ -1068,14 +1059,8 @@ func decodeProjectionManifest(payload []byte) (projectionManifest, error) {
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return manifest, errors.New("decode projection manifest: trailing JSON value")
 	}
-	if manifest.SchemaVersion < actaevents.MinProjectionSchemaVersion || manifest.SchemaVersion > actaevents.ProjectionSchemaVersion {
-		return manifest, fmt.Errorf("projection manifest has unsupported schema_version %d", manifest.SchemaVersion)
-	}
 	if strings.TrimSpace(manifest.Producer.Name) == "" || strings.TrimSpace(manifest.Producer.Version) == "" {
 		return manifest, errors.New("projection manifest producer name and version are required")
-	}
-	if manifest.Generation == "" || strings.Trim(manifest.Generation, "0123456789") != "" {
-		return manifest, errors.New("projection manifest generation must contain only digits")
 	}
 	if manifest.SchemaVersion == actaevents.ProjectionSchemaVersion && manifest.RunSHA256 == "" {
 		return manifest, errors.New("projection manifest run_sha256 is required")
@@ -1083,14 +1068,13 @@ func decodeProjectionManifest(payload []byte) (projectionManifest, error) {
 	if manifest.SchemaVersion < actaevents.ProjectionSchemaVersion && manifest.RunSHA256 != "" {
 		return manifest, errors.New("projection manifest run_sha256 requires schema_version 3")
 	}
-	hashes := map[string]string{"digest_sha256": manifest.DigestSHA256, "events_sha256": manifest.EventsSHA256}
-	if manifest.RunSHA256 != "" {
-		hashes["run_sha256"] = manifest.RunSHA256
+	if err := actaevents.ValidateProjectionManifest(manifest); err != nil {
+		return manifest, err
 	}
-	for name, value := range hashes {
-		decoded, err := hex.DecodeString(value)
-		if err != nil || len(decoded) != sha256.Size || value != strings.ToLower(value) {
-			return manifest, fmt.Errorf("projection manifest %s must be a lowercase SHA-256 digest", name)
+	if manifest.RunSHA256 != "" {
+		decoded, err := hex.DecodeString(manifest.RunSHA256)
+		if err != nil || len(decoded) != sha256.Size || manifest.RunSHA256 != strings.ToLower(manifest.RunSHA256) {
+			return manifest, errors.New("projection manifest run_sha256 must be a lowercase SHA-256 digest")
 		}
 	}
 	return manifest, nil
@@ -1558,8 +1542,8 @@ func rewriteOpaqueTextSnapshot(ctx context.Context, file *os.File, maxLineBytes 
 		if err := ctx.Err(); err != nil {
 			return false, err
 		}
-		line, readErr := readBoundedJSONLLine(reader, maxLineBytes)
-		if errors.Is(readErr, errRedactionLineTooLong) {
+		line, readErr := reasoning.ReadBoundedProviderLine(reader, maxLineBytes)
+		if errors.Is(readErr, reasoning.ErrProviderLineTooLong) {
 			// An overlong opaque line cannot be classified within the configured
 			// privacy bound. Keep the artifact local rather than failing the run.
 			return false, nil
@@ -1597,7 +1581,7 @@ func rewriteOpaqueTextSnapshot(ctx context.Context, file *os.File, maxLineBytes 
 	if _, err := temp.Seek(0, io.SeekStart); err != nil {
 		return false, err
 	}
-	if err := replaceSnapshotFromReader(ctx, file, temp); err != nil {
+	if err := replaceSnapshotReaderContext(ctx, file, temp); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -1733,8 +1717,8 @@ func inspectOpaqueTextSnapshot(ctx context.Context, file *os.File, maxLineBytes 
 		if err := ctx.Err(); err != nil {
 			return artifactInspection{}, err
 		}
-		line, readErr := readBoundedJSONLLine(reader, maxLineBytes)
-		if errors.Is(readErr, errRedactionLineTooLong) {
+		line, readErr := reasoning.ReadBoundedProviderLine(reader, maxLineBytes)
+		if errors.Is(readErr, reasoning.ErrProviderLineTooLong) {
 			inspection.Verified = false
 			return inspection, nil
 		}
@@ -1778,8 +1762,8 @@ func inspectJSONLinesSnapshot(ctx context.Context, file *os.File, maxLineBytes i
 		if err := ctx.Err(); err != nil {
 			return artifactInspection{}, err
 		}
-		line, readErr := readBoundedJSONLLine(reader, maxLineBytes)
-		if errors.Is(readErr, errRedactionLineTooLong) {
+		line, readErr := reasoning.ReadBoundedProviderLine(reader, maxLineBytes)
+		if errors.Is(readErr, reasoning.ErrProviderLineTooLong) {
 			inspection.Verified = false
 			return inspection, nil
 		}
@@ -1818,7 +1802,7 @@ func inspectActaEventValue(value any) (bool, bool) {
 		if !hasPayload {
 			return false, true
 		}
-		_, changed := redactToStructuralReferences(payload)
+		_, changed := reasoning.RedactToStructuralReferences(payload)
 		return changed, true
 	}
 	if typ == actaevents.TypeAgentEventUnsupported {
@@ -1895,8 +1879,8 @@ func rewriteJSONLSnapshot(ctx context.Context, file *os.File, maxLineBytes int, 
 			return err
 		}
 		lineNumber++
-		line, readErr := readBoundedJSONLLine(reader, maxLineBytes)
-		if errors.Is(readErr, errRedactionLineTooLong) {
+		line, readErr := reasoning.ReadBoundedProviderLine(reader, maxLineBytes)
+		if errors.Is(readErr, reasoning.ErrProviderLineTooLong) {
 			return fmt.Errorf("JSONL line %d exceeds maximum redaction line size of %d bytes", lineNumber, maxLineBytes)
 		}
 		if len(line) > 0 {
@@ -1970,8 +1954,8 @@ func redactActaEventSnapshot(ctx context.Context, file *os.File, maxLineBytes in
 			return err
 		}
 		lineNumber++
-		line, readErr := readBoundedJSONLLine(reader, maxLineBytes)
-		if errors.Is(readErr, errRedactionLineTooLong) {
+		line, readErr := reasoning.ReadBoundedProviderLine(reader, maxLineBytes)
+		if errors.Is(readErr, reasoning.ErrProviderLineTooLong) {
 			return fmt.Errorf("JSONL line %d exceeds maximum redaction line size of %d bytes", lineNumber, maxLineBytes)
 		}
 		redacted, err := redactActaReasoningEventLine(line)
@@ -2045,38 +2029,7 @@ func copyContext(ctx context.Context, dst io.Writer, src io.Reader) error {
 	}
 }
 
-func replaceSnapshotFromReader(ctx context.Context, file *os.File, source io.Reader) error {
-	if err := file.Truncate(0); err != nil {
-		return err
-	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return err
-	}
-	if err := copyContext(ctx, file, source); err != nil {
-		return err
-	}
-	_, err := file.Seek(0, io.SeekStart)
-	return err
-}
-
-var errRedactionLineTooLong = errors.New("redaction line too long")
-
 var errProviderRedactionUnverified = errors.New("provider event reasoning redaction could not be verified")
-
-func readBoundedJSONLLine(reader *bufio.Reader, maxLineBytes int) ([]byte, error) {
-	line := make([]byte, 0, min(maxLineBytes, 64<<10))
-	for {
-		fragment, err := reader.ReadSlice('\n')
-		if len(fragment) > maxLineBytes-len(line) {
-			return nil, errRedactionLineTooLong
-		}
-		line = append(line, fragment...)
-		if errors.Is(err, bufio.ErrBufferFull) {
-			continue
-		}
-		return line, err
-	}
-}
 
 func redactProviderReasoningLine(line []byte) ([]byte, error) {
 	redacted, verified, err := redactProviderReasoningLineVerified(line)
@@ -2136,18 +2089,18 @@ func redactActaReasoningEventLine(line []byte) ([]byte, error) {
 	if payload, ok := event["payload"]; ok {
 		switch {
 		case typ == actaevents.TypeAgentReasoning:
-			structural, structuralChanged := redactToStructuralReferences(payload)
+			structural, structuralChanged := reasoning.RedactToStructuralReferences(payload)
 			event["payload"] = structural
 			changed = structuralChanged || changed
 		case typ == actaevents.TypeAgentEventUnsupported:
 			redacted, detailsChanged, verified := redactUnsupportedPayload(payload)
 			if !verified {
-				redacted, detailsChanged = redactToStructuralReferences(payload)
+				redacted, detailsChanged = reasoning.RedactToStructuralReferences(payload)
 			}
 			event["payload"] = redacted
 			changed = detailsChanged || changed
 		case !reasoningFreeActaEventType(typ):
-			structural, structuralChanged := redactToStructuralReferences(payload)
+			structural, structuralChanged := reasoning.RedactToStructuralReferences(payload)
 			event["payload"] = structural
 			changed = structuralChanged || changed
 		default:
@@ -2206,81 +2159,7 @@ func reasoningFreeActaEventType(typ string) bool {
 	}
 }
 
-func redactToStructuralReferences(value any) (any, bool) {
-	payload, ok := value.(map[string]any)
-	if !ok {
-		return reasoningRedactionMask(value)
-	}
-	changed := false
-	for key, item := range payload {
-		if structuralPayloadValue(key, item) {
-			continue
-		}
-		masked, itemChanged := reasoningRedactionMask(item)
-		if itemChanged {
-			payload[key] = masked
-			changed = true
-		}
-	}
-	if redacted, _ := payload["redacted"].(bool); !redacted {
-		payload["redacted"] = true
-		changed = true
-	}
-	return payload, changed
-}
-
-func structuralPayloadValue(key string, value any) bool {
-	switch key {
-	case "type", "kind", "provider_event", "id", "parent_id", "thread_id", "session_id", "task_id",
-		"phase", "status", "visibility", "started_at", "observed_at", "completed_at", "tool", "server":
-		_, ok := value.(string)
-		return ok
-	case "exit_code", "input_chars", "result_chars", "output_chars", "text_chars":
-		return structuralInteger(value)
-	case "is_error", "input_truncated", "result_truncated", "output_truncated", "text_truncated", "redacted":
-		_, ok := value.(bool)
-		return ok
-	case "raw_event_lines":
-		lines, ok := value.([]any)
-		if !ok {
-			return false
-		}
-		for _, line := range lines {
-			if !structuralInteger(line) {
-				return false
-			}
-		}
-		return true
-	default:
-		return false
-	}
-}
-
-func structuralInteger(value any) bool {
-	switch typed := value.(type) {
-	case json.Number:
-		_, err := typed.Int64()
-		return err == nil
-	case float64:
-		return !math.IsInf(typed, 0) && !math.IsNaN(typed) && math.Trunc(typed) == typed
-	case float32:
-		return !float32IsInfOrNaN(typed) && float32(math.Trunc(float64(typed))) == typed
-	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
-		return true
-	default:
-		return false
-	}
-}
-
-func float32IsInfOrNaN(value float32) bool {
-	return math.IsInf(float64(value), 0) || math.IsNaN(float64(value))
-}
-
 const reasoningRedactionMarker = reasoning.RedactedMarker
-
-func reasoningRedactionMask(value any) (any, bool) {
-	return reasoning.MaskValue(value)
-}
 
 func redactReasoningValueContext(ctx context.Context, value any, traversal reasoning.TraversalContext) (bool, error) {
 	changed, verified, err := reasoning.RedactValueContext(ctx, value, traversal)
@@ -2291,28 +2170,7 @@ func redactReasoningValueContext(ctx context.Context, value any, traversal reaso
 }
 
 func setReasoningRedactionState(value any, traversal reasoning.TraversalContext) bool {
-	changed := false
-	switch typed := value.(type) {
-	case []any:
-		for _, item := range typed {
-			changed = setReasoningRedactionState(item, traversal) || changed
-		}
-	case map[string]any:
-		for key, item := range typed {
-			childTraversal, exempt := traversal.Enter(typed, key)
-			if exempt {
-				continue
-			}
-			if key == "reasoning_redaction_state" {
-				if item != "redacted" {
-					typed[key] = "redacted"
-					changed = true
-				}
-				continue
-			}
-			changed = setReasoningRedactionState(item, childTraversal) || changed
-		}
-	}
+	changed, _ := setReasoningRedactionStateContext(context.Background(), value, traversal)
 	return changed
 }
 
@@ -2588,7 +2446,7 @@ func rewriteJSONDocumentSnapshot(ctx context.Context, file *os.File, maxBytes in
 	if len(payload) > 0 && payload[len(payload)-1] == '\n' {
 		redacted = append(redacted, '\n')
 	}
-	return replaceSnapshotContentsContext(ctx, file, redacted)
+	return replaceSnapshotReaderContext(ctx, file, bytes.NewReader(redacted))
 }
 
 func readFileContextLimit(ctx context.Context, file *os.File, maxBytes int64) ([]byte, bool, error) {
@@ -2644,10 +2502,6 @@ func decodeJSONUseNumberContext(ctx context.Context, payload []byte, value any) 
 	return ctx.Err()
 }
 
-func replaceSnapshotContentsContext(ctx context.Context, file *os.File, payload []byte) error {
-	return replaceSnapshotReaderContext(ctx, file, bytes.NewReader(payload))
-}
-
 func replaceSnapshotReaderContext(ctx context.Context, file *os.File, reader io.Reader) error {
 	if err := file.Truncate(0); err != nil {
 		return err
@@ -2668,45 +2522,14 @@ func hashFileContext(ctx context.Context, file *os.File) (string, int64, error) 
 		return "", 0, err
 	}
 	buffer := make([]byte, 128<<10)
-	var size int64
-	for {
-		if err := ctx.Err(); err != nil {
-			return "", 0, err
-		}
-		n, readErr := file.Read(buffer)
-		if n > 0 {
-			_, _ = hasher.Write(buffer[:n])
-			size += int64(n)
-		}
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			return "", 0, readErr
-		}
+	size, err := io.CopyBuffer(hasher, contextReader{ctx, file}, buffer)
+	if err != nil {
+		return "", 0, err
 	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return "", 0, err
 	}
 	return hex.EncodeToString(hasher.Sum(nil)), size, nil
-}
-
-func snapshotEventStreamLimit(ctx context.Context, runDir string, maxBytes int64) (*os.File, string, error) {
-	resolvedRunDir, err := filepath.EvalSymlinks(runDir)
-	if err != nil {
-		return nil, "", fmt.Errorf("resolve run directory: %w", err)
-	}
-	path := filepath.Join(runDir, actaevents.Filename)
-	if maxBytes > 0 {
-		if info, statErr := os.Lstat(path); statErr == nil && info.Size() > maxBytes {
-			return nil, "", fmt.Errorf("event stream is %d bytes; artifact snapshot maximum is %d", info.Size(), maxBytes)
-		}
-	}
-	file, tempPath, err := snapshotRegularFile(ctx, resolvedRunDir, path, maxBytes)
-	if err != nil {
-		return nil, "", err
-	}
-	return file, tempPath, nil
 }
 
 // snapshotRegularFile copies one pinned source into a private temporary file,

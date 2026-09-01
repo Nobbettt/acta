@@ -1,6 +1,7 @@
 package reasoning
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -12,6 +13,27 @@ import (
 // ErrInvalidProviderEnvelope reports a complete JSON provider line whose
 // top-level value is not an object envelope.
 var ErrInvalidProviderEnvelope = errors.New("provider line is not a JSON object envelope")
+
+// ErrProviderLineTooLong reports a provider JSONL record that exceeds its
+// caller-supplied byte limit.
+var ErrProviderLineTooLong = errors.New("provider line too long")
+
+// ReadBoundedProviderLine reads one provider JSONL record without allowing
+// bufio's internal buffer size to become the record-size limit.
+func ReadBoundedProviderLine(reader *bufio.Reader, maxLineBytes int) ([]byte, error) {
+	line := make([]byte, 0, min(maxLineBytes, 64<<10))
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		if len(fragment) > maxLineBytes-len(line) {
+			return nil, ErrProviderLineTooLong
+		}
+		line = append(line, fragment...)
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		return line, err
+	}
+}
 
 // ValidateUniqueObjectKeys verifies that payload is one complete JSON value
 // and rejects duplicate keys at any object depth. Redaction callers must run

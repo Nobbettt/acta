@@ -310,7 +310,7 @@ func TestProjectionSnapshotsShareCumulativeBudget(t *testing.T) {
 			}
 			if test.manifested {
 				hash := fmt.Sprintf("%x", sha256.Sum256([]byte(payload)))
-				manifestPayload, err := json.Marshal(projectionManifest{
+				manifestPayload, err := json.Marshal(actaevents.ProjectionManifest{
 					SchemaVersion: actaevents.ProjectionSchemaVersion,
 					Producer:      runrecord.Producer{Name: "acta", Version: "test"},
 					Generation:    "1",
@@ -883,9 +883,7 @@ func TestUploadRunAcceptsRedigestedV2EventsWithProducerProvenance(t *testing.T) 
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
-	if err := UploadRun(context.Background(), Config{
-		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
-	}, record); err != nil {
+	if err := uploadToTestServer(server, record); err != nil {
 		t.Fatalf("upload re-digested v2 bundle: %v", err)
 	}
 	assertEventProducerProvenance(t, uploadedEvents, originalProducer, regenerator)
@@ -966,9 +964,7 @@ func TestUploadRunLegacyRecordUsesMetadataOrExplicitSchemaUpgrade(t *testing.T) 
 			}))
 			defer server.Close()
 
-			if err := UploadRun(context.Background(), Config{
-				BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
-			}, testRecord(runDir)); err != nil {
+			if err := uploadToTestServer(server, testRecord(runDir)); err != nil {
 				t.Fatal(err)
 			}
 			if uploadedState != "redacted" {
@@ -1148,7 +1144,11 @@ func TestUploadRunWithholdsAmbiguousOpaqueStderrByDefault(t *testing.T) {
 		"",
 	}, "\n"))
 	addArtifactRef(t, runDir, `{"kind":"raw_stderr","path":"`+stderrName+`"}`)
-	eventFile, eventTempPath, err := snapshotEventStreamLimit(context.Background(), runDir, 0)
+	resolvedRunDir, err := filepath.EvalSymlinks(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventFile, eventTempPath, err := snapshotRegularFile(context.Background(), resolvedRunDir, filepath.Join(runDir, actaevents.Filename), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1193,9 +1193,7 @@ func TestUploadRunWithholdsAmbiguousOpaqueStderrByDefault(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
-	if err := UploadRun(context.Background(), Config{
-		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
-	}, testRecord(runDir)); err != nil {
+	if err := uploadToTestServer(server, testRecord(runDir)); err != nil {
 		t.Fatal(err)
 	}
 	if uploaded[stderrName] {
@@ -1292,9 +1290,7 @@ func TestUploadRunDoesNotTrustBareUnsupportedKind(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := UploadRun(context.Background(), Config{
-		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
-	}, testRecord(runDir)); err != nil {
+	if err := uploadToTestServer(server, testRecord(runDir)); err != nil {
 		t.Fatalf("UploadRun() rejected an unverifiable opaque JSON line: %v", err)
 	}
 	if !uploaded[stderrName] {
@@ -1373,9 +1369,7 @@ func TestUploadRunRedactsRemoteReasoningByDefaultForEveryAgentShape(t *testing.T
 				w.WriteHeader(http.StatusOK)
 			}))
 			defer server.Close()
-			if err := UploadRun(context.Background(), Config{
-				BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
-			}, record); err != nil {
+			if err := uploadToTestServer(server, record); err != nil {
 				t.Fatal(err)
 			}
 			if strings.Contains(remote.String(), secret) {
@@ -1437,9 +1431,7 @@ func TestUploadRunWithholdsScalarProviderRecords(t *testing.T) {
 			}))
 			defer server.Close()
 
-			if err := UploadRun(context.Background(), Config{
-				BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
-			}, testRecord(runDir)); err != nil {
+			if err := uploadToTestServer(server, testRecord(runDir)); err != nil {
 				t.Fatalf("UploadRun() rejected an unverifiable provider scalar: %v", err)
 			}
 			if uploaded[rawName] {
@@ -1482,9 +1474,7 @@ func TestUploadRunRedactsReasoningKindDespiteFutureType(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := UploadRun(context.Background(), Config{
-		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
-	}, testRecord(runDir)); err != nil {
+	if err := uploadToTestServer(server, testRecord(runDir)); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(remoteRaw, secret) ||
@@ -1522,9 +1512,7 @@ func TestUploadRunDoesNotTrustBareNormalizedKind(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := UploadRun(context.Background(), Config{
-		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
-	}, testRecord(runDir)); err != nil {
+	if err := uploadToTestServer(server, testRecord(runDir)); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(remoteRaw, secret) ||
@@ -1567,9 +1555,7 @@ func TestUploadRunRemoteSnapshotTraversesProviderShapedToolResult(t *testing.T) 
 
 	record := testRecord(runDir)
 	record.ReasoningRedactionState = "retained_local"
-	if err := UploadRun(context.Background(), Config{
-		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
-	}, record); err != nil {
+	if err := uploadToTestServer(server, record); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(remoteRaw, fixtureText) || strings.Contains(remoteRaw, secret) ||
@@ -1638,9 +1624,7 @@ func TestUploadRunRemoteRawReasoningRedigestsWithOriginalMetadata(t *testing.T) 
 	defer server.Close()
 	uploadRecord := testRecord(runDir)
 	uploadRecord.ReasoningRedactionState = "retained_local"
-	if err := UploadRun(context.Background(), Config{
-		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
-	}, uploadRecord); err != nil {
+	if err := uploadToTestServer(server, uploadRecord); err != nil {
 		t.Fatal(err)
 	}
 	if bytes.Contains(remoteRaw, []byte(reasoningText)) {
@@ -1718,9 +1702,7 @@ func TestUploadRunRedactsReasoningFromLegacyDigest(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := UploadRun(context.Background(), Config{
-		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
-	}, record); err != nil {
+	if err := uploadToTestServer(server, record); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(remoteDigest, secret) || !strings.Contains(remoteDigest, `"text":"`+reasoningRedactionMarker+`"`) {
@@ -1782,9 +1764,7 @@ func TestUploadRunRedactsManifestPinnedLegacyDigest(t *testing.T) {
 			}))
 			defer server.Close()
 
-			if err := UploadRun(context.Background(), Config{
-				BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
-			}, testRecord(runDir)); err != nil {
+			if err := uploadToTestServer(server, testRecord(runDir)); err != nil {
 				t.Fatal(err)
 			}
 			if remoteState != "redacted" {
@@ -1830,9 +1810,7 @@ func TestUploadRunRedactsJSONLDespiteMismatchedDigestKind(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := UploadRun(context.Background(), Config{
-		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
-	}, record); err != nil {
+	if err := uploadToTestServer(server, record); err != nil {
 		t.Fatal(err)
 	}
 	if remoteKind != "digest" {
@@ -1872,9 +1850,7 @@ func TestUploadRunRedactsUnsupportedClaudeDetailsByDefault(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
-	if err := UploadRun(context.Background(), Config{
-		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
-	}, record); err != nil {
+	if err := uploadToTestServer(server, record); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(remote.String(), secret) || !strings.Contains(remote.String(), `"details":{}`) {
@@ -1913,9 +1889,7 @@ func TestUploadRunRedactsUnsupportedFutureMapDetailsByDefault(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := UploadRun(context.Background(), Config{
-		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
-	}, testRecord(runDir)); err != nil {
+	if err := uploadToTestServer(server, testRecord(runDir)); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(remote.String(), secret) || !strings.Contains(remote.String(), `"thinking":"`+reasoningRedactionMarker+`"`) {
@@ -2051,9 +2025,7 @@ func TestUploadRunRedactsEvenWhenRunRecordClaimsRedacted(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
-	if err := UploadRun(context.Background(), Config{
-		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
-	}, record); err != nil {
+	if err := uploadToTestServer(server, record); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(remote.String(), secret) {
@@ -2420,9 +2392,7 @@ func TestUploadRunPreservesNormalizedStructuredOutput(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := UploadRun(context.Background(), Config{
-		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
-	}, testRecord(runDir)); err != nil {
+	if err := uploadToTestServer(server, testRecord(runDir)); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"digest.json", actaevents.Filename} {
@@ -2569,9 +2539,7 @@ func TestUploadRunRefusesPartialLocalReasoningRedactionByDefault(t *testing.T) {
 	}))
 	defer server.Close()
 
-	err := UploadRun(context.Background(), Config{
-		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
-	}, record)
+	err := uploadToTestServer(server, record)
 	if err == nil || !strings.Contains(err.Error(), "remote upload refused") || requests != 0 {
 		t.Fatalf("partial-redaction upload error=%v requests=%d", err, requests)
 	}
@@ -2810,9 +2778,7 @@ func TestUploadRunRejectsUnknownEventFieldsBeforeUpload(t *testing.T) {
 			}))
 			defer server.Close()
 
-			err := UploadRun(context.Background(), Config{
-				BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
-			}, testRecord(runDir))
+			err := uploadToTestServer(server, testRecord(runDir))
 			if err == nil || !strings.Contains(err.Error(), `unknown field "thinking"`) {
 				t.Fatalf("UploadRun() error = %v, want unknown-field rejection", err)
 			}
@@ -2884,9 +2850,7 @@ func TestUploadRunValidatesPublishedEventSchemasBeforeUpload(t *testing.T) {
 			}))
 			defer server.Close()
 
-			err := UploadRun(context.Background(), Config{
-				BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
-			}, testRecord(runDir))
+			err := uploadToTestServer(server, testRecord(runDir))
 			if !test.wantError {
 				if err != nil {
 					t.Fatalf("UploadRun() rejected valid payloads: %v", err)
@@ -2925,9 +2889,7 @@ func TestUploadRunRejectsFutureEventSchemaBeforeRemoteRewrite(t *testing.T) {
 	}))
 	defer server.Close()
 
-	err := UploadRun(context.Background(), Config{
-		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
-	}, testRecord(runDir))
+	err := uploadToTestServer(server, testRecord(runDir))
 	if err == nil || !strings.Contains(err.Error(), "unsupported schema_version 4") {
 		t.Fatalf("UploadRun() error = %v, want future schema rejection", err)
 	}
@@ -3253,9 +3215,7 @@ func uploadBundleStderr(t *testing.T, content string) string {
 
 	record := testRecord(runDir)
 	record.ReasoningRedactionState = "retained_local"
-	if err := UploadRun(context.Background(), Config{
-		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
-	}, record); err != nil {
+	if err := uploadToTestServer(server, record); err != nil {
 		t.Fatalf("UploadRun() error = %v", err)
 	}
 	if !created {
@@ -3274,6 +3234,12 @@ func testEvent(sequence int, text string) actaevents.Event {
 		Type:          actaevents.TypeAgentMessage,
 		Payload:       json.RawMessage(`{"text":"` + text + `"}`),
 	}
+}
+
+func uploadToTestServer(server *httptest.Server, record *runrecord.Record) error {
+	return UploadRun(context.Background(), Config{
+		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
+	}, record)
 }
 
 func testRecord(runDir string) *runrecord.Record {

@@ -837,18 +837,7 @@ func TestProjectionCommitFallsBackToCopiedBackupsAndRecovers(t *testing.T) {
 		t.Fatalf("commit error = %v, want simulated kill", err)
 	}
 
-	lock, err := AcquireProjectionLock(runDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	recovered, recoverErr := RecoverProjectionCommit(runDir)
-	closeErr := lock.Close()
-	if recoverErr != nil || closeErr != nil {
-		t.Fatalf("recover copied backups: %v", errors.Join(recoverErr, closeErr))
-	}
-	if !recovered {
-		t.Fatal("RecoverProjectionCommit() did not report copied backup debris")
-	}
+	assertProjectionRecovered(t, runDir, "copied backups")
 	assertProjectionFiles(t, runDir, finals, committedPayloads)
 	assertNoProjectionScratch(t, runDir)
 }
@@ -896,18 +885,7 @@ func TestProjectionCommitCrashDuringCopiedBackupLeavesTargetIntact(t *testing.T)
 		t.Fatal("copy interruption did not leave an orphaned temporary")
 	}
 
-	lock, err := AcquireProjectionLock(runDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	recovered, recoverErr := RecoverProjectionCommit(runDir)
-	closeErr := lock.Close()
-	if recoverErr != nil || closeErr != nil {
-		t.Fatalf("clean copied-backup temporary: %v", errors.Join(recoverErr, closeErr))
-	}
-	if !recovered {
-		t.Fatal("RecoverProjectionCommit() did not report copied-backup temporary debris")
-	}
+	assertProjectionRecovered(t, runDir, "copied-backup temporary")
 	assertProjectionFiles(t, runDir, finals, oldPayloads)
 	assertNoProjectionScratch(t, runDir)
 
@@ -951,18 +929,7 @@ func TestProjectionCommitCrashAfterDataSyncRecoversOldGeneration(t *testing.T) {
 		}
 	}
 
-	lock, err := AcquireProjectionLock(runDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	recovered, recoverErr := RecoverProjectionCommit(runDir)
-	closeErr := lock.Close()
-	if recoverErr != nil || closeErr != nil {
-		t.Fatalf("recover post-data-sync interruption: %v", errors.Join(recoverErr, closeErr))
-	}
-	if !recovered {
-		t.Fatal("RecoverProjectionCommit() did not report interrupted generation")
-	}
+	assertProjectionRecovered(t, runDir, "post-data-sync interruption")
 	assertProjectionFiles(t, runDir, finals, oldPayloads)
 	assertNoProjectionScratch(t, runDir)
 }
@@ -985,6 +952,13 @@ func TestProjectionCommitCrashAfterManifestSyncKeepsNewGeneration(t *testing.T) 
 	}
 	assertProjectionFiles(t, runDir, finals, newPayloads)
 
+	assertProjectionRecovered(t, runDir, "post-manifest-sync interruption")
+	assertProjectionFiles(t, runDir, finals, newPayloads)
+	assertNoProjectionScratch(t, runDir)
+}
+
+func assertProjectionRecovered(t *testing.T, runDir, phase string) {
+	t.Helper()
 	lock, err := AcquireProjectionLock(runDir)
 	if err != nil {
 		t.Fatal(err)
@@ -992,13 +966,11 @@ func TestProjectionCommitCrashAfterManifestSyncKeepsNewGeneration(t *testing.T) 
 	recovered, recoverErr := RecoverProjectionCommit(runDir)
 	closeErr := lock.Close()
 	if recoverErr != nil || closeErr != nil {
-		t.Fatalf("recover post-manifest-sync interruption: %v", errors.Join(recoverErr, closeErr))
+		t.Fatalf("recover %s: %v", phase, errors.Join(recoverErr, closeErr))
 	}
 	if !recovered {
-		t.Fatal("RecoverProjectionCommit() did not report committed-generation backups")
+		t.Fatalf("RecoverProjectionCommit() did not report %s", phase)
 	}
-	assertProjectionFiles(t, runDir, finals, newPayloads)
-	assertNoProjectionScratch(t, runDir)
 }
 
 func TestProjectionCommitCrashBeforeManifestRecoversPinnedGeneration(t *testing.T) {

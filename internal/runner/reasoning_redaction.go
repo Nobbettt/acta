@@ -67,8 +67,8 @@ func redactReasoningRawStreamWithWriter(path string, maxLineBytes int, createWri
 	lineNumber := 0
 	for {
 		lineNumber++
-		line, readErr := readBoundedReasoningLine(reader, maxLineBytes)
-		if readErr == errReasoningLineTooLong {
+		line, readErr := reasoning.ReadBoundedProviderLine(reader, maxLineBytes)
+		if errors.Is(readErr, reasoning.ErrProviderLineTooLong) {
 			_ = input.Close()
 			return "failed", fmt.Errorf("JSONL line %d exceeds maximum reasoning-redaction line size of %d bytes", lineNumber, maxLineBytes)
 		}
@@ -127,23 +127,6 @@ func hashReasoningStream(reader io.Reader) ([sha256.Size]byte, error) {
 	var result [sha256.Size]byte
 	copy(result[:], hash.Sum(nil))
 	return result, nil
-}
-
-var errReasoningLineTooLong = errors.New("reasoning-redaction line too long")
-
-func readBoundedReasoningLine(reader *bufio.Reader, maxLineBytes int) ([]byte, error) {
-	line := make([]byte, 0, min(maxLineBytes, 64<<10))
-	for {
-		fragment, err := reader.ReadSlice('\n')
-		if len(fragment) > maxLineBytes-len(line) {
-			return nil, errReasoningLineTooLong
-		}
-		line = append(line, fragment...)
-		if err == bufio.ErrBufferFull {
-			continue
-		}
-		return line, err
-	}
 }
 
 func redactReasoningLine(line []byte) ([]byte, error) {

@@ -863,10 +863,7 @@ func TestRunCapturesWorkspaceDiff(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fakeBin := t.TempDir()
-	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
-		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	installSuccessfulCodex(t)
 
 	record, err := runForTest(context.Background(), Options{
 		Agent:        "codex",
@@ -981,10 +978,7 @@ func TestRunExcludesBundleWhenRunsDirIsWorkspaceRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fakeBin := t.TempDir()
-	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
-		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	installSuccessfulCodex(t)
 
 	record, err := runForTest(context.Background(), Options{
 		Agent: "codex", CWD: cwd, RunsDir: ".", Prompt: "x", PromptSource: "test", Stream: false,
@@ -1202,10 +1196,7 @@ func TestRunRequiredOTLPExportFailurePreservesOutcomeAndBundle(t *testing.T) {
 		t.Skip("fake shell agents require /bin/sh")
 	}
 	cwd := t.TempDir()
-	fakeBin := t.TempDir()
-	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
-		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	installSuccessfulCodex(t)
 
 	record, err := runForTest(context.Background(), Options{
 		Agent:                   "codex",
@@ -1322,10 +1313,7 @@ func TestRunRequiredOTLPUnsampledRootPreservesOutcomeAndBundle(t *testing.T) {
 	defer collector.Close()
 
 	cwd := t.TempDir()
-	fakeBin := t.TempDir()
-	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
-		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	installSuccessfulCodex(t)
 	t.Setenv("OTEL_TRACES_SAMPLER", "parentbased_always_on")
 	t.Setenv("TRACEPARENT", "00-0123456789abcdef0123456789abcdef-0123456789abcdef-00")
 
@@ -1356,10 +1344,7 @@ func TestRunBestEffortOTLPExportFailureIsDefault(t *testing.T) {
 		t.Skip("fake shell agents require /bin/sh")
 	}
 	cwd := t.TempDir()
-	fakeBin := t.TempDir()
-	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
-		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	installSuccessfulCodex(t)
 	t.Setenv("OTEL_TRACES_SAMPLER", "always_on")
 	stderr := bytes.NewBuffer(nil)
 	record, err := runForTest(context.Background(), Options{
@@ -1464,12 +1449,7 @@ func TestRunPublishesPendingTelemetryThenCommitsFailedGeneration(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake shell agents require /bin/sh")
 	}
-	for _, name := range []string{
-		"OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG",
-		"OTEL_EXPORTER_OTLP_COMPRESSION", "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION", "TRACEPARENT", "TRACESTATE",
-	} {
-		t.Setenv(name, "")
-	}
+	clearOTELTraceEnv(t)
 	t.Setenv("OTEL_TRACES_SAMPLER", "always_on")
 
 	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1532,10 +1512,7 @@ func TestRunPublishesPendingTelemetryThenCommitsFailedGeneration(t *testing.T) {
 	cwd := t.TempDir()
 	const runID = "telemetry-publication-boundary"
 	runDir := filepath.Join(cwd, ".acta", "runs", runID)
-	fakeBin := t.TempDir()
-	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
-		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	installSuccessfulCodex(t)
 
 	withPublicationHooks(t)
 	originalRename := publishRename
@@ -1681,10 +1658,7 @@ func TestRunSurfacesGenerationCommitFailureUnderBestEffort(t *testing.T) {
 		t.Skip("fake shell agents require /bin/sh")
 	}
 	cwd := t.TempDir()
-	fakeBin := t.TempDir()
-	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
-		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	installSuccessfulCodex(t)
 
 	originalProjectionWriter := writeFinalProjection
 	var before telemetryGeneration
@@ -1738,10 +1712,7 @@ func TestRunBestEffortSkipsInvalidOTLPEndpointWithoutAmbientFallback(t *testing.
 	defer collector.Close()
 
 	cwd := t.TempDir()
-	fakeBin := t.TempDir()
-	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
-		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	installSuccessfulCodex(t)
 	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", collector.URL)
 	stderr := bytes.NewBuffer(nil)
 	record, err := runForTest(context.Background(), Options{
@@ -1771,10 +1742,7 @@ func TestRunBestEffortRecordsInvalidEnvironmentOTLPEndpointFailure(t *testing.T)
 		t.Skip("fake shell agents require /bin/sh")
 	}
 	cwd := t.TempDir()
-	fakeBin := t.TempDir()
-	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
-		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	installSuccessfulCodex(t)
 	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "%invalid")
 
 	record, err := runForTest(context.Background(), Options{
@@ -1895,10 +1863,7 @@ func TestRunRecordsAlwaysOffSamplerAsNotSampled(t *testing.T) {
 	defer collector.Close()
 
 	cwd := t.TempDir()
-	fakeBin := t.TempDir()
-	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
-		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	installSuccessfulCodex(t)
 	t.Setenv("OTEL_TRACES_SAMPLER", "always_off")
 
 	record, err := runForTest(context.Background(), Options{
@@ -2008,12 +1973,7 @@ func TestRunFinishesRootTraceAfterReasoningRedaction(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake shell agents require /bin/sh")
 	}
-	for _, name := range []string{
-		"OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG",
-		"OTEL_EXPORTER_OTLP_COMPRESSION", "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION", "TRACEPARENT", "TRACESTATE",
-	} {
-		t.Setenv(name, "")
-	}
+	clearOTELTraceEnv(t)
 	tests := []struct {
 		name       string
 		provider   string
@@ -2071,12 +2031,7 @@ func TestRunFinishesRootTraceAfterLocalBundleFinalization(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake shell agents require /bin/sh")
 	}
-	for _, name := range []string{
-		"OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG",
-		"OTEL_EXPORTER_OTLP_COMPRESSION", "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION", "TRACEPARENT", "TRACESTATE",
-	} {
-		t.Setenv(name, "")
-	}
+	clearOTELTraceEnv(t)
 	tests := []struct {
 		name      string
 		runID     string
@@ -2178,12 +2133,7 @@ func TestRunPublicationRenameFailureIsExportedAndReconciledInRecoveryBundle(t *t
 	if runtime.GOOS == "windows" {
 		t.Skip("fake shell agents require /bin/sh")
 	}
-	for _, name := range []string{
-		"OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG",
-		"OTEL_EXPORTER_OTLP_COMPRESSION", "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION", "TRACEPARENT", "TRACESTATE",
-	} {
-		t.Setenv(name, "")
-	}
+	clearOTELTraceEnv(t)
 	t.Setenv("OTEL_TRACES_SAMPLER", "always_on")
 
 	cwd := t.TempDir()
@@ -2191,10 +2141,7 @@ func TestRunPublicationRenameFailureIsExportedAndReconciledInRecoveryBundle(t *t
 	runDir := filepath.Join(cwd, ".acta", "runs", runID)
 	collector, outcomes := newRootTraceCollector(t, filepath.Join(runDir, "run.json"))
 	defer collector.Close()
-	fakeBin := t.TempDir()
-	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
-		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	installSuccessfulCodex(t)
 
 	withPublicationHooks(t)
 	publishRename = func(_, _ string) error { return errors.New("injected publication rename failure") }
@@ -2704,6 +2651,24 @@ func TestVerifyCompleteBundleRejectsMissingArtifact(t *testing.T) {
 	}
 	if err := verifyCompleteBundle(dir, record); err == nil || !strings.Contains(err.Error(), "digest.json") {
 		t.Fatalf("missing artifact error = %v", err)
+	}
+}
+
+func installSuccessfulCodex(t *testing.T) {
+	t.Helper()
+	fakeBin := t.TempDir()
+	writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
+		`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func clearOTELTraceEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG",
+		"OTEL_EXPORTER_OTLP_COMPRESSION", "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION", "TRACEPARENT", "TRACESTATE",
+	} {
+		t.Setenv(name, "")
 	}
 }
 

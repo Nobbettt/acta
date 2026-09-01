@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -91,22 +92,11 @@ func FirstPresentV3OnlyField(documentType DocumentType, value any, decodedFields
 	if err != nil {
 		return "", false, err
 	}
-	set := make(map[string]struct{}, len(present)+len(decodedFields))
-	for _, path := range present {
-		set[path] = struct{}{}
-	}
-	for _, path := range decodedFields {
-		set[path] = struct{}{}
-	}
-	if len(set) == 0 {
+	paths := append(present, decodedFields...)
+	if len(paths) == 0 {
 		return "", false, nil
 	}
-	paths := make([]string, 0, len(set))
-	for path := range set {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
-	return paths[0], true, nil
+	return slices.Min(paths), true, nil
 }
 
 func presentV3OnlyFields(documentType DocumentType, document any) []string {

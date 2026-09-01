@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -153,7 +154,7 @@ func (r *Record) Validate() error {
 		if r.Producer.Name != "acta" {
 			return fmt.Errorf("run record producer name must be acta")
 		}
-		if !oneOf(r.Agent, "codex", "claude") || strings.TrimSpace(r.AgentVersion) == "" {
+		if !slices.Contains([]string{"codex", "claude"}, r.Agent) || strings.TrimSpace(r.AgentVersion) == "" {
 			return fmt.Errorf("run record requires a supported agent and agent_version")
 		}
 		if strings.TrimSpace(r.CWD) == "" || strings.TrimSpace(r.RunDir) == "" || len(r.Command) == 0 || strings.TrimSpace(r.Command[0]) == "" {
@@ -165,10 +166,10 @@ func (r *Record) Validate() error {
 		if r.StartedAt.IsZero() || r.CompletedAt.IsZero() || r.CompletedAt.Before(r.StartedAt) || r.DurationMillis < 0 {
 			return fmt.Errorf("run record has invalid timestamps or duration")
 		}
-		if !oneOf(r.PromptSource, "flag", "args", "stdin", "internal", "test") {
+		if !slices.Contains([]string{"flag", "args", "stdin", "internal", "test"}, r.PromptSource) {
 			return fmt.Errorf("run record has invalid prompt_source %q", r.PromptSource)
 		}
-		if !oneOf(r.TerminationReason, "completed", "timeout", "cancelled", "process_error", "resource_limit", "acta_error", "failed", "error", "interrupted", "degraded") {
+		if !slices.Contains([]string{"completed", "timeout", "cancelled", "process_error", "resource_limit", "acta_error", "failed", "error", "interrupted", "degraded"}, r.TerminationReason) {
 			return fmt.Errorf("run record has invalid termination_reason %q", r.TerminationReason)
 		}
 		if r.Timeout && (r.OK || r.TerminationReason != "timeout") || r.OK && r.TerminationReason != "completed" || !r.OK && r.TerminationReason == "completed" {
@@ -177,9 +178,9 @@ func (r *Record) Validate() error {
 		if r.OK && (r.ExitCode == nil || *r.ExitCode != 0) {
 			return fmt.Errorf("successful run record requires exit_code 0")
 		}
-		validOTLPStatus := oneOf(r.OTLPStatus, "not_configured", "exported", "failed")
+		validOTLPStatus := slices.Contains([]string{"not_configured", "exported", "failed"}, r.OTLPStatus)
 		if SupportsV3Fields(r.SchemaVersion) {
-			validOTLPStatus = validOTLPStatus || oneOf(r.OTLPStatus, "not_sampled", "pending")
+			validOTLPStatus = validOTLPStatus || slices.Contains([]string{"not_sampled", "pending"}, r.OTLPStatus)
 		}
 		if !validOTLPStatus || r.OTLPStatus == "failed" && strings.TrimSpace(r.OTLPError) == "" || r.OTLPStatus != "failed" && r.OTLPError != "" {
 			return fmt.Errorf("run record OTLP status and error are inconsistent")
@@ -188,13 +189,13 @@ func (r *Record) Validate() error {
 			r.OTLPStatus != "exported" && r.OTLPStatus != "pending" && r.TraceID != "" {
 			return fmt.Errorf("run record OTLP status and trace_id are inconsistent")
 		}
-		if !oneOf(r.ProcessContainment, "posix_process_group", "windows_job", "direct_process") {
+		if !slices.Contains([]string{"posix_process_group", "windows_job", "direct_process"}, r.ProcessContainment) {
 			return fmt.Errorf("run record has invalid process_containment %q", r.ProcessContainment)
 		}
-		if !oneOf(r.AgentConfigMode, "ambient_ephemeral", "project_only_ephemeral", "authoritative_bundle") {
+		if !slices.Contains([]string{"ambient_ephemeral", "project_only_ephemeral", "authoritative_bundle"}, r.AgentConfigMode) {
 			return fmt.Errorf("run record has invalid agent_config_mode %q", r.AgentConfigMode)
 		}
-		if r.ReasoningRedactionState != "" && !oneOf(r.ReasoningRedactionState, "retained_local", "redacted", "failed", "partial") {
+		if r.ReasoningRedactionState != "" && !slices.Contains([]string{"retained_local", "redacted", "failed", "partial"}, r.ReasoningRedactionState) {
 			return fmt.Errorf("run record has invalid reasoning_redaction_state %q", r.ReasoningRedactionState)
 		}
 		if r.PublishedBundle != nil {
@@ -229,15 +230,6 @@ func (r *Record) Validate() error {
 
 func validPublishedBundleArtifactID(value string) bool {
 	return publishedBundleArtifactIDRegexp.MatchString(value)
-}
-
-func oneOf(value string, allowed ...string) bool {
-	for _, candidate := range allowed {
-		if value == candidate {
-			return true
-		}
-	}
-	return false
 }
 
 func isLowerHexSHA256(value string) bool {

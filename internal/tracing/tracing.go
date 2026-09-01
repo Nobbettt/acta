@@ -85,12 +85,6 @@ func EndpointConfigurationError(endpointFlag string) error {
 	return nil
 }
 
-// DeliveryUnavailableReason reports startup configuration which makes a
-// required trace export impossible rather than merely fallible.
-func DeliveryUnavailableReason(endpointFlag string) string {
-	return deliveryUnavailableReason(endpointFlag, false)
-}
-
 // DeliveryUnavailableReasonWithForceRoot also accounts for the caller
 // deliberately ignoring otherwise valid inbound trace context.
 func DeliveryUnavailableReasonWithForceRoot(endpointFlag string, forceRoot bool) string {

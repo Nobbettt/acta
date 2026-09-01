@@ -148,12 +148,6 @@ func RedactProviderBlocks(value any) bool {
 	return changed
 }
 
-// RedactProviderBlocksContext is RedactProviderBlocks with cancellation checks
-// while traversing potentially large upload artifacts.
-func RedactProviderBlocksContext(ctx context.Context, value any) (bool, error) {
-	return redactProviderBlocks(ctx, value, ProviderTraversal())
-}
-
 // RedactValue applies both the exact provider-envelope pass and a defensive
 // generic pass for future provider events. The generic pass masks
 // reasoning-shaped fields while preserving their JSON types. verified is
@@ -236,6 +230,18 @@ func RedactUnsupportedPayloadContext(ctx context.Context, value any) (redacted a
 		}
 	}
 	return payload, changed, detailsVerified, nil
+}
+
+// RedactToStructuralReferences masks every non-structural value while
+// preserving its JSON type. Object fields use the same allowlist and
+// verification semantics as provider reasoning redaction.
+func RedactToStructuralReferences(value any) (any, bool) {
+	payload, ok := value.(map[string]any)
+	if !ok {
+		return MaskValue(value)
+	}
+	changed, _, _ := redactToStructuralReferencesContext(context.Background(), payload)
+	return payload, changed
 }
 
 func redactUnsupportedDetailsArrayContext(ctx context.Context, details []any) (changed, verified bool, err error) {
@@ -549,12 +555,6 @@ func structuralInteger(value any) bool {
 func ContainsRedactedProviderBlock(value any) bool {
 	contains, _ := containsRedactedProviderBlock(context.Background(), value, ProviderTraversal())
 	return contains
-}
-
-// ContainsRedactedProviderBlockContext is ContainsRedactedProviderBlock with
-// cancellation checks while traversing potentially large upload artifacts.
-func ContainsRedactedProviderBlockContext(ctx context.Context, value any) (bool, error) {
-	return containsRedactedProviderBlock(ctx, value, ProviderTraversal())
 }
 
 func containsRedactedProviderBlock(ctx context.Context, value any, traversal TraversalContext) (bool, error) {

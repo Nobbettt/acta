@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -42,7 +43,9 @@ const (
 	MaxStreamBytes        = 256 << 20
 )
 
-type projectionManifest struct {
+// ProjectionManifest binds one atomically published projection generation to
+// the hashes of its artifacts.
+type ProjectionManifest struct {
 	SchemaVersion int                `json:"schema_version"`
 	Producer      runrecord.Producer `json:"producer"`
 	Generation    string             `json:"generation"`
@@ -190,15 +193,6 @@ func IsKnownType(typ string) bool {
 	}
 }
 
-func oneOf(value string, allowed ...string) bool {
-	for _, candidate := range allowed {
-		if value == candidate {
-			return true
-		}
-	}
-	return false
-}
-
 func ValidateEvent(event Event, runID string, expectedSequence int) error {
 	if err := ValidateEnvelope(event, runID, expectedSequence); err != nil {
 		return err
@@ -216,9 +210,9 @@ func ValidateEvent(event Event, runID string, expectedSequence int) error {
 		if err := json.Unmarshal(event.Payload, &payload); err != nil {
 			return fmt.Errorf("event sequence %d has invalid run.started payload: %w", event.Sequence, err)
 		}
-		validOTLPStatus := payload.OTLPStatus == "" || oneOf(payload.OTLPStatus, "not_configured", "exported", "failed")
+		validOTLPStatus := payload.OTLPStatus == "" || slices.Contains([]string{"not_configured", "exported", "failed"}, payload.OTLPStatus)
 		if runrecord.SupportsV3Fields(event.SchemaVersion) {
-			validOTLPStatus = validOTLPStatus || oneOf(payload.OTLPStatus, "not_sampled", "pending")
+			validOTLPStatus = validOTLPStatus || slices.Contains([]string{"not_sampled", "pending"}, payload.OTLPStatus)
 		}
 		if !validOTLPStatus {
 			return fmt.Errorf("event sequence %d schema_version %d has invalid run.started otlp_status %q", event.Sequence, event.SchemaVersion, payload.OTLPStatus)
@@ -628,7 +622,7 @@ func marshalDigest(d *digest.Digest) ([]byte, error) {
 }
 
 func marshalProjectionManifest(producer runrecord.Producer, generation string, runPayload, digestPayload, eventPayload []byte) ([]byte, error) {
-	payload, err := json.MarshalIndent(projectionManifest{
+	payload, err := json.MarshalIndent(ProjectionManifest{
 		SchemaVersion: ProjectionSchemaVersion,
 		Producer:      producer,
 		Generation:    generation,
@@ -1025,28 +1019,38 @@ func projectionBackupGeneration(runDir string, backups []projectionScratchFile) 
 	return newest
 }
 
-func readProjectionManifest(runDir, path string) (projectionManifest, error) {
+func readProjectionManifest(runDir, path string) (ProjectionManifest, error) {
 	payload, err := securefile.ReadRegularFile(runDir, path, 64<<10)
 	if err != nil {
-		return projectionManifest{}, err
+		return ProjectionManifest{}, err
 	}
-	var manifest projectionManifest
+	var manifest ProjectionManifest
 	if err := json.Unmarshal(payload, &manifest); err != nil {
-		return projectionManifest{}, err
+		return ProjectionManifest{}, err
 	}
-	if manifest.SchemaVersion < MinProjectionSchemaVersion || manifest.SchemaVersion > ProjectionSchemaVersion {
-		return projectionManifest{}, fmt.Errorf("unsupported projection schema_version %d", manifest.SchemaVersion)
-	}
-	if manifest.Generation == "" || strings.Trim(manifest.Generation, "0123456789") != "" {
-		return projectionManifest{}, errors.New("projection generation must contain only digits")
-	}
-	if !validProjectionHash(manifest.DigestSHA256) || !validProjectionHash(manifest.EventsSHA256) {
-		return projectionManifest{}, errors.New("projection manifest contains an invalid artifact digest")
+	if err := ValidateProjectionManifest(manifest); err != nil {
+		return ProjectionManifest{}, err
 	}
 	if manifest.SchemaVersion == ProjectionSchemaVersion && !validProjectionHash(manifest.RunSHA256) {
-		return projectionManifest{}, errors.New("projection manifest contains an invalid run digest")
+		return ProjectionManifest{}, errors.New("projection manifest contains an invalid run digest")
 	}
 	return manifest, nil
+}
+
+// ValidateProjectionManifest checks the projection fields shared by local
+// recovery and remote upload readers. Caller-specific producer and run hash
+// rules remain at their respective trust boundaries.
+func ValidateProjectionManifest(manifest ProjectionManifest) error {
+	if manifest.SchemaVersion < MinProjectionSchemaVersion || manifest.SchemaVersion > ProjectionSchemaVersion {
+		return fmt.Errorf("unsupported projection schema_version %d", manifest.SchemaVersion)
+	}
+	if manifest.Generation == "" || strings.Trim(manifest.Generation, "0123456789") != "" {
+		return errors.New("projection generation must contain only digits")
+	}
+	if !validProjectionHash(manifest.DigestSHA256) || !validProjectionHash(manifest.EventsSHA256) {
+		return errors.New("projection manifest contains an invalid artifact digest")
+	}
+	return nil
 }
 
 func validProjectionHash(value string) bool {
