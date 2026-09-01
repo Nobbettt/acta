@@ -12,7 +12,7 @@ type Reader struct {
 }
 
 func (r Reader) Read(payload []byte) (int, error) {
-	if err := r.Context.Err(); err != nil {
+	if err := r.Err(); err != nil {
 		return 0, err
 	}
 	return r.Reader.Read(payload)
@@ -24,7 +24,7 @@ type Writer struct {
 }
 
 func (w Writer) Write(payload []byte) (int, error) {
-	if err := w.Context.Err(); err != nil {
+	if err := w.Err(); err != nil {
 		return 0, err
 	}
 	return w.Writer.Write(payload)
