@@ -149,6 +149,19 @@ records from outside the process, stages output beyond the agent's writable
 roots, and publishes the bundle after platform cleanup. Windows uses a Job
 Object. POSIX uses a process group; a child that creates a new session or
 process group is outside the portable guarantee.
+
+Two guarantees follow from recording this way. The bundle is **crash-safe**:
+every rewrite commits as one atomic generation behind the run record, so a
+kill or power loss mid-write can never leave a torn bundle or a moment
+without the authoritative `run.json`, and concurrent readers always see one
+consistent generation. And the bundle is **truthful and verifiable**: the
+projection manifest pins every artifact by content hash, so a consumer can
+check that this diff, this event stream, and this record belong together and
+are unmodified — and recorded states never overstate reality. If a telemetry
+flush fails after the run, the record, digest, and events all say so; a
+redaction label reflects what was actually removed, and content Acta cannot
+verify is withheld rather than mislabeled.
+
 Both agents' events are digested into one normalized timeline. By default the
 raw streams are preserved byte-identical so old runs can be re-digested with
 better parsers (`acta digest`); `--redact-reasoning` instead rewrites the raw
