@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/nobbettt/acta/internal/reasoning"
 )
 
 // ClaudeItem is one line of `claude --print --output-format stream-json`
@@ -80,16 +82,19 @@ type ClaudeMessage struct {
 }
 
 type ClaudeContent struct {
-	Type      string          `json:"type"`
-	Text      string          `json:"text,omitempty"`
-	Thinking  string          `json:"thinking,omitempty"`
-	ID        string          `json:"id,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Input     json.RawMessage `json:"input,omitempty"`
-	ToolUseID string          `json:"tool_use_id,omitempty"`
-	IsError   bool            `json:"is_error,omitempty"`
-	Content   json.RawMessage `json:"content,omitempty"`
-	Raw       json.RawMessage `json:"-"`
+	Type          string          `json:"type"`
+	Text          string          `json:"text,omitempty"`
+	Thinking      string          `json:"thinking,omitempty"`
+	TextChars     int             `json:"text_chars,omitempty"`
+	TextTruncated bool            `json:"text_truncated,omitempty"`
+	Redacted      bool            `json:"redacted,omitempty"`
+	ID            string          `json:"id,omitempty"`
+	Name          string          `json:"name,omitempty"`
+	Input         json.RawMessage `json:"input,omitempty"`
+	ToolUseID     string          `json:"tool_use_id,omitempty"`
+	IsError       bool            `json:"is_error,omitempty"`
+	Content       json.RawMessage `json:"content,omitempty"`
+	Raw           json.RawMessage `json:"-"`
 }
 
 func (c *ClaudeContent) UnmarshalJSON(raw []byte) error {
@@ -162,7 +167,7 @@ func parseClaude(r io.Reader, ws *workspace) (*Digest, error) {
 	}
 	if err := forEachLine(r, func(n int, line []byte) {
 		var item ClaudeItem
-		if err := json.Unmarshal(line, &item); err != nil {
+		if err := reasoning.UnmarshalProviderLine(line, &item); err != nil {
 			state.d.countParseError(line)
 			return
 		}
@@ -300,13 +305,25 @@ func (s *claudeParseState) consumeAssistantContent(content *ClaudeContent, item 
 		e.Text = content.Text
 		s.lastText = content.Text
 	case "thinking":
-		if strings.TrimSpace(content.Thinking) == "" {
-			return
+		if content.Redacted {
+			e.Redacted = true
+			e.TextChars = content.TextChars
+			e.TextTruncated = content.TextTruncated
+		} else if strings.TrimSpace(content.Thinking) == "" {
+			// Reasoning redaction deliberately leaves an empty structural content
+			// block. Retain its event and raw-line reference on re-digestion.
+			e.Redacted = true
+		} else {
+			e.localReasoningText = content.Thinking
 		}
 		e.Kind = KindReasoning
 		e.ProviderEvent = "assistant.thinking"
 		e.Status = "completed"
-		e.Text = content.Thinking
+	case "redacted_thinking":
+		e.Kind = KindReasoning
+		e.ProviderEvent = "assistant.redacted_thinking"
+		e.Status = "completed"
+		e.Redacted = true
 	case "tool_use":
 		e.ProviderEvent = "assistant.tool_use"
 		e.Phase = "started"

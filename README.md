@@ -84,7 +84,7 @@ Every run lands in a self-contained bundle under `.acta/runs`:
   workspace.diff      # staged+unstaged+non-ignored-untracked diff, when non-empty
   digest.json         # normalized timeline, metrics, files touched
   acta-events.jsonl  # stable product/replay events derived from the digest
-  projection.json     # digest/event hashes after an acta digest re-projection
+  projection.json     # generation hashes after reconciliation/re-projection
 ```
 
 The digest is the heart of it: a normalized timeline with token and tool
@@ -110,9 +110,12 @@ holds the data that never reaches them:
   per-line arrival timestamp for the stdout event stream (the streams
   themselves carry none). A launcher may set an explicit raw-output budget;
   exceeding it fails and stops the run rather than silently truncating success.
-- **Full tool-call arguments and outputs, message and reasoning text.** Native
-  events carry the tool *name*, duration, and success flag; the payloads stay
-  behind.
+- **Full tool-call arguments and outputs plus surfaced messages.** Provider
+  reasoning/thinking channels are treated differently from assistant text
+  deliberately surfaced to the user. Private reasoning stays local-only in
+  raw and normalized streams, is excluded from OTLP, `digest.json`, and
+  evaluation-facing summaries, and can be removed from bundles entirely with
+  `--redact-reasoning`.
 - **The workspace diff** (staged + unstaged + non-ignored untracked): the net uncommitted
   change the run left in the workspace. Commits made during the run show up as
   base-to-head commit movement in the run metadata instead. Line counters
@@ -146,12 +149,13 @@ records from outside the process, stages output beyond the agent's writable
 roots, and publishes the bundle after platform cleanup. Windows uses a Job
 Object. POSIX uses a process group; a child that creates a new session or
 process group is outside the portable guarantee.
-Both agents' events are digested into one normalized timeline, and the raw
-streams are preserved unmodified so old runs can be re-digested with better
-parsers (`acta digest`). A span the exporter dropped is gone; a bundle can be
-re-projected from its raw evidence. Live-only per-write patches are preserved
-from the prior digest and regeneration fails explicitly when that evidence
-cannot be validated.
+Both agents' events are digested into one normalized timeline. By default the
+raw streams are preserved byte-identical so old runs can be re-digested with
+better parsers (`acta digest`); `--redact-reasoning` instead rewrites the raw
+stdout stream to remove private reasoning text. A span the exporter dropped is
+gone; a bundle can be re-projected from its raw evidence. Live-only per-write
+patches are preserved from the prior digest and regeneration fails explicitly
+when that evidence cannot be validated.
 
 ## Watch runs live
 
@@ -163,19 +167,70 @@ honored too):
 ./acta run --agent codex --prompt "..." --otlp-endpoint http://localhost:4318
 ```
 
-Any configured OTLP exporter is required by default: setup or flush failure
-fails the Acta command and is recorded. Use `--otlp-best-effort` only when the
-launcher explicitly accepts a completed local bundle without successful trace
-export.
+Configured OTLP export is best-effort by default: setup or flush failure is
+recorded without changing the agent outcome. Use
+`--otlp-export-failure-policy required` when delivery is an operational
+requirement. Required mode still finishes and preserves the bundle and its
+semantic result before Acta exits with the documented telemetry-only code 86.
+Launchers must validate the successful Acta-owned `run.json` as well as the
+code before treating it as an operational warning. Required mode rejects
+startup configurations that make delivery impossible, including a missing
+endpoint, `OTEL_SDK_DISABLED=true`, `OTEL_TRACES_EXPORTER=none`, and an
+unconditionally disabled sampler. If parent sampling or another runtime
+decision still drops the root, Acta records `not_sampled`, preserves the
+bundle, and exits with telemetry-only code 86.
+The deprecated `--otlp-best-effort` alias still selects best-effort with a
+warning. Combining it with `--otlp-export-failure-policy required` is a startup
+error because those flags request conflicting delivery policies.
+
+When `TRACEPARENT` contains valid W3C Trace Context, the `invoke_agent` span
+joins that trace as a child of the supplied remote parent; valid `TRACESTATE`
+is carried with it. Missing or malformed parent context is ignored and Acta
+starts a standalone root trace as before. Pass `--otlp-force-root` to ignore
+both variables even when the parent is valid. Run IDs remain opaque and are
+never used to derive trace context.
 
 Hybrid and standalone upload pin an immutable bundle snapshot before sending
-it. The total snapshot budget defaults to 1 GiB; use
+it. Remote snapshots remove provider-private reasoning by default while the
+local bundle remains full fidelity. The explicit
+`--allow-unredacted-remote-reasoning` flag opts a remote upload back into that
+content. Artifact labels are content-derived in this mode: detected reasoning
+or content that cannot be verified is `unredacted`, while verified-clean
+artifacts are `not_required`. Declared structured artifacts (Acta events,
+digests, and provider streams) use their schema-specific privacy passes.
+Opaque text is handled only line by line: standalone JSON lines are redacted,
+but an unparseable brace/bracket-opening line or multiline JSON continuation
+makes the artifact `unverified` and local-only for the default upload. The
+uploaded terminal artifact manifest retains that reference with
+`status: withheld`, a machine-readable reason, and
+`redaction_state: unverified`, so remote completeness checks can distinguish
+privacy withholding from a missing upload. The
+explicit unredacted opt-in uploads such an artifact as `unredacted`. Ordinary
+plain-text diagnostics still upload. The total snapshot budget defaults to 1
+GiB; use
 `--max-upload-bytes 0` only when an explicit unlimited upload is intended.
+Reasoning redaction bounds each JSONL record to 8 MiB by default; use
+`--max-redaction-line-bytes` to set a different explicit bound.
 
 By default spans carry only structural metadata (tool names, ids, exit codes,
 tokens, timing). Content that can hold secrets or local paths stays out of the
-export unless you opt in with `--otlp-include-output`. Full fidelity always
-stays in the local bundle.
+export unless you opt in with `--otlp-include-output`. That opt-in applies to
+surfaced messages and tool content, never provider reasoning/thinking text.
+Without `--redact-reasoning`, private reasoning is retained only in local raw
+streams and `agent.reasoning` normalized events; `run.json` records
+`reasoning_redaction_state: retained_local`. Redact mode removes its text from
+both persisted streams and records `reasoning_redaction_state: redacted`. If
+redaction fails before replacement, Acta retains the completed unredacted
+bundle locally and records `reasoning_redaction_state: failed`. An ambiguous
+post-replacement commit is hash-checked and recorded as `partial` unless the
+original bytes are verified unchanged. Both states refuse default remote
+upload. Remote upload redaction is independent and never rewrites local files.
+
+Current writers emit schema v3 for run records, digests, and Acta events. It
+adds the `not_sampled` OTLP status, explicit redaction/publication metadata,
+and regenerated-event provenance without changing the closed v2 contract;
+readers accept both versions and reject v3-only fields or values when an
+artifact still declares v2.
 
 ## Where it's headed
 

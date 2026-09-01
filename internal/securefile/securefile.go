@@ -10,10 +10,13 @@ import (
 const Mode os.FileMode = 0o600
 
 type AtomicWriter struct {
-	file      *os.File
-	temporary string
-	target    string
-	committed bool
+	file           *os.File
+	temporary      string
+	target         string
+	replace        func(string, string) error
+	syncDirectory  func(string) error
+	committed      bool
+	targetReplaced bool
 }
 
 // Create starts an atomic rewrite beside path. Commit replaces path without
@@ -24,11 +27,20 @@ func Create(path string) (*AtomicWriter, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &AtomicWriter{file: file, temporary: file.Name(), target: path}, nil
+	return &AtomicWriter{
+		file: file, temporary: file.Name(), target: path,
+		replace: replaceFile, syncDirectory: SyncDirectory,
+	}, nil
 }
 
 func CreateExclusive(path string) (*os.File, error) {
 	return createPrivateExclusive(path)
+}
+
+// CreateTemp creates a uniquely named owner-only file in dir. The pattern must
+// contain one '*', which is replaced with random text.
+func CreateTemp(dir, pattern string) (*os.File, error) {
+	return createPrivateTemp(dir, pattern)
 }
 
 func (writer *AtomicWriter) Write(data []byte) (int, error) {
@@ -55,12 +67,28 @@ func (writer *AtomicWriter) Commit() error {
 		_ = os.Remove(writer.temporary)
 		return err
 	}
-	if err := replaceFile(writer.temporary, writer.target); err != nil {
+	directory := filepath.Dir(writer.target)
+	// Surface a directory-sync failure while the original target is still
+	// intact. A second sync after rename makes the replacement durable; callers
+	// can distinguish that ambiguous failure via TargetReplaced.
+	if err := writer.syncDirectory(directory); err != nil {
 		_ = os.Remove(writer.temporary)
 		return err
 	}
+	if err := writer.replace(writer.temporary, writer.target); err != nil {
+		_ = os.Remove(writer.temporary)
+		return err
+	}
+	writer.targetReplaced = true
 	writer.committed = true
-	return SyncDirectory(filepath.Dir(writer.target))
+	return writer.syncDirectory(directory)
+}
+
+// TargetReplaced reports whether Commit completed the atomic rename. When it
+// returns true alongside a Commit error, the target contains the complete
+// replacement but its directory entry may not be durable.
+func (writer *AtomicWriter) TargetReplaced() bool {
+	return writer != nil && writer.targetReplaced
 }
 
 func (writer *AtomicWriter) Abort() error {
@@ -80,6 +108,13 @@ func WriteFile(path string, data []byte) error {
 		return err
 	}
 	return writer.Commit()
+}
+
+// ReplaceFile atomically moves source over target, including when target
+// already exists. On Windows the replacement is requested with write-through
+// semantics.
+func ReplaceFile(source, target string) error {
+	return replaceFile(source, target)
 }
 
 // SyncDirectory makes a successful atomic replacement durable at the

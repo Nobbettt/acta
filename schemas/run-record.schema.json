@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Nobbettt/acta/schemas/run-record.schema.json",
-  "title": "Acta run record v2",
+  "title": "Acta run record v3",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "producer", "id", "agent", "agent_version", "cwd", "run_dir", "command", "started_at", "completed_at", "duration_ms", "ok", "timeout", "termination_reason", "raw_stdout_path", "raw_stderr_path", "raw_stdout_artifact", "raw_stderr_artifact", "prompt_source", "otlp_status", "process_containment", "agent_config_mode"],
   "properties": {
-    "schema_version": {"const": 2},
+    "schema_version": {"const": 3},
     "producer": {"$ref": "#/$defs/producer"},
     "id": {"type": "string", "minLength": 1},
     "trace_id": {"type": "string"},
@@ -39,7 +39,7 @@
     "raw_stderr_artifact": {"type": "string", "minLength": 1},
     "prompt_source": {"enum": ["flag", "args", "stdin", "internal", "test"]},
     "prompt_captured": {"type": "boolean"},
-    "otlp_status": {"enum": ["not_configured", "exported", "failed"]},
+    "otlp_status": {"enum": ["not_configured", "not_sampled", "pending", "exported", "failed"]},
     "otlp_error": {"type": "string"},
     "raw_output_limit_bytes": {"type": "integer", "minimum": 0},
     "raw_output_limit_exceeded": {"type": "boolean"},
@@ -48,7 +48,9 @@
     "recovery_dir": {"type": "string", "minLength": 1},
     "process_containment": {"enum": ["posix_process_group", "windows_job", "direct_process"]},
     "agent_config_mode": {"enum": ["ambient_ephemeral", "project_only_ephemeral", "authoritative_bundle"]},
-    "runtime_bundle_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+    "runtime_bundle_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "reasoning_redaction_state": {"enum": ["retained_local", "redacted", "failed", "partial"]},
+    "published_bundle": {"$ref": "#/$defs/published_bundle"}
   },
   "$defs": {
     "producer": {
@@ -60,6 +62,15 @@
         "version": {"type": "string", "minLength": 1},
         "commit": {"type": "string"},
         "date": {"type": "string"}
+      }
+    },
+    "published_bundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "sha256"],
+      "properties": {
+        "artifact_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
       }
     }
   }

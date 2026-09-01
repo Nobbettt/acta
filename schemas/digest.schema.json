@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Nobbettt/acta/schemas/digest.schema.json",
-  "title": "Acta digest v2",
+  "title": "Acta digest v3",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "producer", "run_id", "agent", "status", "timeline", "metrics", "files", "has_workspace_diff"],
   "properties": {
-    "schema_version": {"const": 2},
+    "schema_version": {"const": 3},
     "producer": {"$ref": "run-record.schema.json#/$defs/producer"},
     "run_id": {"type": "string", "minLength": 1},
     "agent": {"enum": ["codex", "claude"]},
@@ -25,7 +25,7 @@
     "termination": {"$ref": "#/$defs/termination"},
     "error": {"type": "string"},
     "has_workspace_diff": {"type": "boolean"},
-    "otlp_status": {"enum": ["not_configured", "exported", "failed"]},
+    "otlp_status": {"enum": ["not_configured", "not_sampled", "pending", "exported", "failed"]},
     "otlp_error": {"type": "string"},
     "raw_output_limit_bytes": {"type": "integer", "minimum": 0},
     "raw_output_limit_exceeded": {"type": "boolean"},
@@ -68,7 +68,8 @@
         "result": {}, "result_chars": {"type": "integer", "minimum": 0}, "result_truncated": {"type": "boolean"},
         "command": {"type": "string"}, "exit_code": {"type": "integer"}, "is_error": {"type": "boolean"},
         "error_message": {"type": "string"}, "output": {"type": "string"}, "output_chars": {"type": "integer", "minimum": 0},
-        "output_truncated": {"type": "boolean"}, "text": {"type": "string"}, "query": {"type": "string"}, "action": {},
+        "output_truncated": {"type": "boolean"}, "text": {"type": "string"}, "text_chars": {"type": "integer", "minimum": 0},
+        "text_truncated": {"type": "boolean"}, "query": {"type": "string"}, "action": {},
         "files": {"type": "array", "items": {"type": "string"}},
         "changes": {"type": "array", "items": {"$ref": "#/$defs/mutation"}},
         "spans": {"type": "object", "additionalProperties": {"type": "array", "items": {"$ref": "#/$defs/span"}}},
@@ -76,7 +77,8 @@
         "file_patches": {"type": "array", "items": {"$ref": "#/$defs/patch"}},
         "file_patch_status": {"enum": ["captured", "partial", "unavailable", "preserved"]},
         "file_patch_errors": {"type": "array", "items": {"type": "string"}}, "details": {},
-        "raw_event_lines": {"type": "array", "items": {"type": "integer", "minimum": 1}}
+        "raw_event_lines": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+        "redacted": {"type": "boolean"}
       }
     },
     "tokens": {

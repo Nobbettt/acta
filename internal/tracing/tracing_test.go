@@ -3,7 +3,11 @@ package tracing
 import (
 	"bufio"
 	"context"
+	"errors"
+	"fmt"
 	"os"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,12 +15,19 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/nobbettt/acta/internal/agents"
 	"github.com/nobbettt/acta/internal/runrecord"
 )
 
 var testStart = time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+const (
+	testParentTraceID = "11111111111111111111111111111111"
+	testParentSpanID  = "2222222222222222"
+	testTraceparent   = "00-" + testParentTraceID + "-" + testParentSpanID + "-01"
+)
 
 func newTestRun(t *testing.T, agent string) (*tracetest.SpanRecorder, *Run) {
 	t.Helper()
@@ -77,6 +88,111 @@ func TestContentAttributesGatedByIncludeOutput(t *testing.T) {
 		}
 		if args, paths := scan(agent, true); !args || !paths {
 			t.Errorf("%s with include-output: arguments=%v file_path=%v, want both present", agent, args, paths)
+		}
+	}
+}
+
+func TestReasoningTextNeverEntersTelemetry(t *testing.T) {
+	const secret = "private-reasoning-telemetry-8842"
+	lines := map[string]string{
+		"codex":  `{"type":"item.completed","item":{"id":"r1","type":"reasoning","text":"` + secret + `"}}`,
+		"claude": `{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"` + secret + `"}]}}`,
+	}
+	for agent, line := range lines {
+		recorder, run := newTestRunOutput(t, agent, true)
+		run.OnLine([]byte(line), testStart.Add(time.Millisecond))
+		finish(t, run, true, testStart.Add(time.Second))
+		reasoningEvents := 0
+		for _, span := range recorder.Ended() {
+			for _, value := range span.Attributes() {
+				if strings.Contains(fmt.Sprint(value.Value.AsInterface()), secret) {
+					t.Fatalf("%s span attribute %s leaked reasoning text", agent, value.Key)
+				}
+			}
+			for _, event := range span.Events() {
+				if event.Name == "acta.reasoning" {
+					reasoningEvents++
+				}
+				for _, value := range event.Attributes {
+					if value.Key == "text" || strings.Contains(fmt.Sprint(value.Value.AsInterface()), secret) {
+						t.Fatalf("%s event attribute %s leaked reasoning text", agent, value.Key)
+					}
+				}
+			}
+		}
+		if reasoningEvents != 1 {
+			t.Fatalf("%s reasoning structural events = %d, want 1", agent, reasoningEvents)
+		}
+	}
+}
+
+func TestClaudeRedactedThinkingEntersTelemetryWithoutPayload(t *testing.T) {
+	const (
+		thinking = "private thinking"
+		data     = "opaque redacted thinking data"
+	)
+	recorder, run := newTestRunOutput(t, "claude", true)
+	run.OnLine([]byte(`{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"`+thinking+`"},{"type":"redacted_thinking","data":"`+data+`"}]}}`), testStart.Add(time.Millisecond))
+	finish(t, run, true, testStart.Add(time.Second))
+
+	var thinkingEvents, redactedEvents int
+	for _, span := range recorder.Ended() {
+		for _, event := range span.Events() {
+			if event.Name != "acta.reasoning" {
+				continue
+			}
+			chars := -1
+			redacted := false
+			for _, value := range event.Attributes {
+				if value.Key == "text" || value.Key == "data" || strings.Contains(fmt.Sprint(value.Value.AsInterface()), thinking) || strings.Contains(fmt.Sprint(value.Value.AsInterface()), data) {
+					t.Fatalf("reasoning event attribute %s leaked payload", value.Key)
+				}
+				switch value.Key {
+				case attrEventChars:
+					chars = int(value.Value.AsInt64())
+				case attrEventRedacted:
+					redacted = value.Value.AsBool()
+				}
+			}
+			if redacted {
+				redactedEvents++
+				if chars != 0 {
+					t.Errorf("redacted reasoning chars = %d, want 0", chars)
+				}
+			} else {
+				thinkingEvents++
+				if chars != len(thinking) {
+					t.Errorf("thinking chars = %d, want %d", chars, len(thinking))
+				}
+			}
+		}
+	}
+	if thinkingEvents != 1 || redactedEvents != 1 {
+		t.Fatalf("reasoning events = thinking %d, redacted %d; want 1 each", thinkingEvents, redactedEvents)
+	}
+}
+
+func TestDuplicateProviderKeysNeverEnterTelemetry(t *testing.T) {
+	const secret = "secret"
+	recorder, run := newTestRunOutput(t, "codex", true)
+	run.OnLine([]byte(`{"type":"item.completed","item":{"id":"r","type":"reasoning","type":"agent_message","text":"`+secret+`"}}`), testStart.Add(time.Millisecond))
+	finish(t, run, true, testStart.Add(time.Second))
+
+	for _, span := range recorder.Ended() {
+		for _, value := range span.Attributes() {
+			if strings.Contains(fmt.Sprint(value.Value.AsInterface()), secret) {
+				t.Fatalf("span attribute %s leaked duplicate-key text", value.Key)
+			}
+		}
+		for _, event := range span.Events() {
+			if event.Name == "acta.message" {
+				t.Fatal("duplicate-key provider line was classified as an agent message")
+			}
+			for _, value := range event.Attributes {
+				if strings.Contains(fmt.Sprint(value.Value.AsInterface()), secret) {
+					t.Fatalf("event attribute %s leaked duplicate-key text", value.Key)
+				}
+			}
 		}
 	}
 }
@@ -149,6 +265,324 @@ func TestFinishSurfacesFlushError(t *testing.T) {
 	}
 }
 
+type failFirstExporter struct {
+	mu          sync.Mutex
+	calls       int
+	firstExport chan struct{}
+}
+
+func (e *failFirstExporter) ExportSpans(context.Context, []sdktrace.ReadOnlySpan) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.calls++
+	if e.calls == 1 {
+		close(e.firstExport)
+		return errTestMidRunExport
+	}
+	return nil
+}
+
+func (*failFirstExporter) Shutdown(context.Context) error { return nil }
+
+func (e *failFirstExporter) Calls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.calls
+}
+
+var errTestMidRunExport = errorString("mid-run export boom")
+
+func TestFinishSurfacesEarlierAsynchronousBatchError(t *testing.T) {
+	exporter := &failFirstExporter{firstExport: make(chan struct{})}
+	capturingExporter := &errorCapturingExporter{SpanExporter: exporter}
+	provider := sdktrace.NewTracerProvider(sdktrace.WithBatcher(
+		capturingExporter,
+		sdktrace.WithMaxExportBatchSize(1),
+		sdktrace.WithBatchTimeout(time.Hour),
+	))
+	r, err := newRun(context.Background(), provider, Config{Agent: "codex", RunID: "t", StartedAt: testStart})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.exportErrors = capturingExporter
+
+	span := r.startToolSpan("test", testStart.Add(time.Millisecond))
+	span.End(trace.WithTimestamp(testStart.Add(2 * time.Millisecond)))
+	select {
+	case <-exporter.firstExport:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the asynchronous mid-run export")
+	}
+
+	exit := 0
+	err = r.Finish(&runrecord.Record{OK: true, ExitCode: &exit}, testStart.Add(time.Second))
+	if !errors.Is(err, errTestMidRunExport) {
+		t.Fatalf("Finish error = %v, want retained mid-run batch error", err)
+	}
+	if calls := exporter.Calls(); calls < 2 {
+		t.Fatalf("export calls = %d, want failed mid-run batch and successful final batch", calls)
+	}
+}
+
+type blockingFirstExporter struct {
+	firstExport chan struct{}
+	release     chan struct{}
+	once        sync.Once
+}
+
+func (e *blockingFirstExporter) ExportSpans(context.Context, []sdktrace.ReadOnlySpan) error {
+	e.once.Do(func() {
+		close(e.firstExport)
+		<-e.release
+	})
+	return nil
+}
+
+func (*blockingFirstExporter) Shutdown(context.Context) error { return nil }
+
+func TestFinishSurfacesSaturatedBatchQueueDrop(t *testing.T) {
+	exporter := &blockingFirstExporter{
+		firstExport: make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+	capturingExporter := &errorCapturingExporter{SpanExporter: exporter}
+	batchProcessor := sdktrace.NewBatchSpanProcessor(
+		capturingExporter,
+		sdktrace.WithMaxQueueSize(1),
+		sdktrace.WithMaxExportBatchSize(1),
+		sdktrace.WithBatchTimeout(time.Hour),
+	)
+	dropCountingProcessor := &dropCountingSpanProcessor{
+		SpanProcessor: batchProcessor,
+		exporter:      capturingExporter,
+	}
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(dropCountingProcessor))
+	r, err := newRun(context.Background(), provider, Config{Agent: "codex", RunID: "t", StartedAt: testStart})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.exportErrors = capturingExporter
+	r.spanDelivery = dropCountingProcessor
+
+	first := r.startToolSpan("first", testStart.Add(time.Millisecond))
+	first.End(trace.WithTimestamp(testStart.Add(2 * time.Millisecond)))
+	select {
+	case <-exporter.firstExport:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the blocked export")
+	}
+
+	second := r.startToolSpan("second", testStart.Add(3*time.Millisecond))
+	second.End(trace.WithTimestamp(testStart.Add(4 * time.Millisecond)))
+	third := r.startToolSpan("third", testStart.Add(5*time.Millisecond))
+	third.End(trace.WithTimestamp(testStart.Add(6 * time.Millisecond)))
+	close(exporter.release)
+
+	exit := 0
+	err = r.Finish(&runrecord.Record{OK: true, ExitCode: &exit}, testStart.Add(time.Second))
+	if err == nil || !strings.Contains(err.Error(), "batch span processor dropped") {
+		t.Fatalf("Finish error = %v, want saturated queue drop", err)
+	}
+}
+
+func TestEnabledHonorsStandardDisableControls(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://collector.test/v1/traces")
+	t.Setenv("OTEL_SDK_DISABLED", "true")
+	if Enabled("") {
+		t.Fatal("OTEL_SDK_DISABLED=true must disable tracing")
+	}
+	t.Setenv("OTEL_SDK_DISABLED", "false")
+	t.Setenv("OTEL_TRACES_EXPORTER", "none")
+	if Enabled("https://explicit.test/v1/traces") {
+		t.Fatal("OTEL_TRACES_EXPORTER=none must disable an explicit endpoint")
+	}
+}
+
+func TestEndpointConfigurationRequiresAbsoluteHTTPURL(t *testing.T) {
+	for _, name := range []string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+		"OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER",
+	} {
+		t.Setenv(name, "")
+	}
+	tests := []struct {
+		name     string
+		endpoint string
+		wantErr  bool
+	}{
+		{name: "invalid escape", endpoint: "%invalid", wantErr: true},
+		{name: "missing scheme", endpoint: "collector.test/v1/traces", wantErr: true},
+		{name: "missing host", endpoint: "https:///v1/traces", wantErr: true},
+		{name: "empty hostname", endpoint: "http://:4318/v1/traces", wantErr: true},
+		{name: "wrong scheme", endpoint: "grpc://collector.test/v1/traces", wantErr: true},
+		{name: "http", endpoint: "http://collector.test/v1/traces"},
+		{name: "https", endpoint: "https://collector.test/v1/traces"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := EndpointConfigurationError(test.endpoint)
+			if got := err != nil; got != test.wantErr {
+				t.Fatalf("endpoint configuration error = %v, present %v; want present %v", err, got, test.wantErr)
+			}
+			if got := Enabled(test.endpoint); got == test.wantErr {
+				t.Fatalf("Enabled(%q) = %v, want %v", test.endpoint, got, !test.wantErr)
+			}
+		})
+	}
+}
+
+func TestEndpointConfigurationUsesExporterPrecedenceForEnvironment(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "%invalid-generic")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://traces.test/v1/traces")
+	if err := EndpointConfigurationError(""); err != nil {
+		t.Fatalf("valid traces-specific endpoint did not override generic endpoint: %v", err)
+	}
+
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "%invalid-traces")
+	if err := EndpointConfigurationError(""); err == nil ||
+		!strings.Contains(err.Error(), "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") {
+		t.Fatalf("environment endpoint error = %v, want traces-specific source", err)
+	}
+	if err := EndpointConfigurationError("https://explicit.test/v1/traces"); err != nil {
+		t.Fatalf("valid explicit endpoint did not override environment: %v", err)
+	}
+}
+
+func TestSetupRejectsInvalidExplicitEndpointBeforeAmbientFallback(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://ambient.test/v1/traces")
+	_, err := Setup(context.Background(), Config{
+		Endpoint:  "%invalid",
+		Agent:     "codex",
+		RunID:     "invalid-endpoint",
+		StartedAt: testStart,
+	})
+	if err == nil || !strings.Contains(err.Error(), "--otlp-endpoint must be an absolute http(s) URL with a host") {
+		t.Fatalf("Setup error = %v, want invalid explicit endpoint error", err)
+	}
+}
+
+func TestDeliveryUnavailableReasonRejectsEffectivelyZeroParentBasedRootRatio(t *testing.T) {
+	tests := []struct {
+		name        string
+		ratio       string
+		traceparent string
+		forceRoot   bool
+		wantReason  bool
+	}{
+		{name: "zero without parent", ratio: "0", wantReason: true},
+		{name: "effectively zero without parent", ratio: "1e-20", wantReason: true},
+		{name: "zero with malformed parent", ratio: "0", traceparent: "malformed", wantReason: true},
+		{name: "zero with unsampled parent", ratio: "0", traceparent: "00-11111111111111111111111111111111-2222222222222222-00", wantReason: true},
+		{name: "zero with sampled parent", ratio: "0", traceparent: testTraceparent},
+		{name: "zero with ignored sampled parent", ratio: "0", traceparent: testTraceparent, forceRoot: true, wantReason: true},
+		{name: "usable root ratio without parent", ratio: "0.5"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("OTEL_SDK_DISABLED", "")
+			t.Setenv("OTEL_TRACES_EXPORTER", "")
+			t.Setenv("OTEL_TRACES_SAMPLER", "parentbased_traceidratio")
+			t.Setenv("OTEL_TRACES_SAMPLER_ARG", test.ratio)
+			t.Setenv("TRACEPARENT", test.traceparent)
+			reason := DeliveryUnavailableReasonWithForceRoot("http://127.0.0.1:4318/v1/traces", test.forceRoot)
+			if got := reason != ""; got != test.wantReason {
+				t.Fatalf("delivery unavailable reason = %q, present %v; want present %v", reason, got, test.wantReason)
+			}
+			if reason != "" && !strings.Contains(reason, "parentbased_traceidratio") {
+				t.Fatalf("delivery unavailable reason = %q, want sampler name", reason)
+			}
+		})
+	}
+}
+
+func TestDeliveryUnavailableReasonRequiresSampledParentForParentBasedAlwaysOff(t *testing.T) {
+	tests := []struct {
+		name        string
+		traceparent string
+		forceRoot   bool
+		wantReason  bool
+	}{
+		{name: "without parent", wantReason: true},
+		{name: "with malformed parent", traceparent: "malformed", wantReason: true},
+		{name: "with unsampled parent", traceparent: "00-11111111111111111111111111111111-2222222222222222-00", wantReason: true},
+		{name: "with sampled parent", traceparent: testTraceparent},
+		{name: "with ignored sampled parent", traceparent: testTraceparent, forceRoot: true, wantReason: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("OTEL_SDK_DISABLED", "")
+			t.Setenv("OTEL_TRACES_EXPORTER", "")
+			t.Setenv("OTEL_TRACES_SAMPLER", "parentbased_always_off")
+			t.Setenv("TRACEPARENT", test.traceparent)
+			reason := DeliveryUnavailableReasonWithForceRoot("http://127.0.0.1:4318/v1/traces", test.forceRoot)
+			if got := reason != ""; got != test.wantReason {
+				t.Fatalf("delivery unavailable reason = %q, present %v; want present %v", reason, got, test.wantReason)
+			}
+			if reason != "" && !strings.Contains(reason, "sampled inbound parent") {
+				t.Fatalf("delivery unavailable reason = %q, want sampled-parent requirement", reason)
+			}
+		})
+	}
+}
+
+func TestTracerProviderHonorsSamplerEnvironment(t *testing.T) {
+	tests := []struct {
+		name       string
+		sampler    string
+		arg        string
+		wantSample bool
+	}{
+		{name: "default", wantSample: true},
+		{name: "unknown fallback", sampler: "unknown", wantSample: true},
+		{name: "always on", sampler: "always_on", wantSample: true},
+		{name: "always off", sampler: "always_off"},
+		{name: "ratio zero", sampler: "traceidratio", arg: "0"},
+		{name: "ratio one", sampler: "traceidratio", arg: "1", wantSample: true},
+		{name: "ratio invalid fallback", sampler: "traceidratio", arg: "invalid", wantSample: true},
+		{name: "ratio NaN", sampler: "traceidratio", arg: "NaN", wantSample: true},
+		{name: "ratio negative fallback", sampler: "traceidratio", arg: "-1", wantSample: true},
+		{name: "ratio greater than one fallback", sampler: "traceidratio", arg: "2", wantSample: true},
+		{name: "parent based always on", sampler: "parentbased_always_on", wantSample: true},
+		{name: "parent based always off", sampler: "parentbased_always_off"},
+		{name: "parent based ratio zero", sampler: "parentbased_traceidratio", arg: "0"},
+		{name: "parent based ratio one", sampler: "parentbased_traceidratio", arg: "1", wantSample: true},
+		{name: "parent based ratio invalid fallback", sampler: "parentbased_traceidratio", arg: "invalid", wantSample: true},
+		{name: "parent based ratio NaN", sampler: "parentbased_traceidratio", arg: "NaN", wantSample: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("OTEL_TRACES_SAMPLER", test.sampler)
+			t.Setenv("OTEL_TRACES_SAMPLER_ARG", test.arg)
+			provider := sdktrace.NewTracerProvider(sdktrace.WithSampler(samplerFromEnvironment()))
+			_, span := provider.Tracer("test").Start(context.Background(), "root")
+			sampled := span.SpanContext().IsSampled()
+			span.End()
+			if sampled != test.wantSample {
+				t.Fatalf("root span sampled = %v, want %v", sampled, test.wantSample)
+			}
+		})
+	}
+}
+
+func TestUnsampledRunHasNoExportableTraceID(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.NeverSample()),
+		sdktrace.WithSpanProcessor(recorder),
+	)
+	run, err := newRun(context.Background(), provider, Config{Agent: "codex", RunID: "unsampled", StartedAt: testStart})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Sampled() || run.TraceID() != "" {
+		t.Fatalf("unsampled run reported sampled=%v trace_id=%q", run.Sampled(), run.TraceID())
+	}
+	finish(t, run, true, testStart.Add(time.Second))
+	if len(recorder.Ended()) != 0 {
+		t.Fatalf("unsampled ended spans = %d, want 0", len(recorder.Ended()))
+	}
+}
+
 // Every registered agent must resolve a trace mapper and declare a provider, so
 // adding an agent without wiring tracing fails here instead of silently
 // exporting no spans at runtime.
@@ -190,6 +624,70 @@ func TestProviderAttributeOnRootSpan(t *testing.T) {
 	}
 }
 
+func TestRunRootUsesW3CParentContext(t *testing.T) {
+	t.Setenv("TRACEPARENT", testTraceparent)
+	t.Setenv("TRACESTATE", "vendor=opaque")
+
+	root := recordedRoot(t, Config{Agent: "codex", RunID: "child", StartedAt: testStart})
+	parent := root.Parent()
+	if !parent.IsValid() || !parent.IsRemote() {
+		t.Fatalf("parent = %v, want valid remote parent", parent)
+	}
+	if got := root.SpanContext().TraceID().String(); got != testParentTraceID {
+		t.Errorf("root trace id = %q, want %q", got, testParentTraceID)
+	}
+	if got := parent.TraceID().String(); got != testParentTraceID {
+		t.Errorf("parent trace id = %q, want %q", got, testParentTraceID)
+	}
+	if got := parent.SpanID().String(); got != testParentSpanID {
+		t.Errorf("parent span id = %q, want %q", got, testParentSpanID)
+	}
+}
+
+func TestRunRootWithoutParentContext(t *testing.T) {
+	t.Setenv("TRACEPARENT", "")
+	t.Setenv("TRACESTATE", "")
+
+	root := recordedRoot(t, Config{Agent: "codex", RunID: "standalone", StartedAt: testStart})
+	if parent := root.Parent(); parent.IsValid() || parent.IsRemote() {
+		t.Fatalf("parent = %v, want standalone root with no remote parent", parent)
+	}
+}
+
+func TestRunRootIgnoresMalformedTraceparent(t *testing.T) {
+	t.Setenv("TRACEPARENT", "not-w3c-trace-context")
+	t.Setenv("TRACESTATE", "vendor=opaque")
+
+	root := recordedRoot(t, Config{Agent: "codex", RunID: "malformed", StartedAt: testStart})
+	if parent := root.Parent(); parent.IsValid() || parent.IsRemote() {
+		t.Fatalf("parent = %v, want standalone root for malformed TRACEPARENT", parent)
+	}
+}
+
+func TestRunRootForceRootIgnoresValidParent(t *testing.T) {
+	t.Setenv("TRACEPARENT", testTraceparent)
+	t.Setenv("TRACESTATE", "vendor=opaque")
+
+	root := recordedRoot(t, Config{Agent: "codex", RunID: "forced-root", StartedAt: testStart, ForceRoot: true})
+	if parent := root.Parent(); parent.IsValid() || parent.IsRemote() {
+		t.Fatalf("parent = %v, want standalone root with ForceRoot", parent)
+	}
+	if got := root.SpanContext().TraceID().String(); got == testParentTraceID {
+		t.Errorf("root trace id = parent trace id %q despite ForceRoot", got)
+	}
+}
+
+func TestRunRootPropagatesTracestate(t *testing.T) {
+	const want = "vendor=opaque,other=value"
+	t.Setenv("TRACEPARENT", testTraceparent)
+	t.Setenv("TRACESTATE", want)
+
+	root := recordedRoot(t, Config{Agent: "claude", RunID: "state", StartedAt: testStart})
+	if got := root.Parent().TraceState().String(); got != want {
+		t.Fatalf("parent tracestate = %q, want %q", got, want)
+	}
+}
+
 func TestTextEventCountsCharactersNotBytes(t *testing.T) {
 	recorder, r := newTestRun(t, "codex")
 	r.addTextEvent("acta.message", "a€", testStart)
@@ -218,6 +716,24 @@ func attrValue(span sdktrace.ReadOnlySpan, key attribute.Key) (attribute.Value, 
 		}
 	}
 	return attribute.Value{}, false
+}
+
+func recordedRoot(t *testing.T, cfg Config) sdktrace.ReadOnlySpan {
+	t.Helper()
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	r, err := newRun(context.Background(), provider, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finish(t, r, true, cfg.StartedAt.Add(time.Second))
+	for _, span := range recorder.Ended() {
+		if span.Name() == "invoke_agent "+cfg.Agent {
+			return span
+		}
+	}
+	t.Fatalf("root span for %q not ended", cfg.Agent)
+	return nil
 }
 
 func TestClaudeFixtureSpans(t *testing.T) {

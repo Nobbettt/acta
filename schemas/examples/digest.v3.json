@@ -1,0 +1,26 @@
+{
+  "schema_version": 3,
+  "producer": {"name": "acta", "version": "v0.1.0", "commit": "0123456789abcdef", "date": "2026-08-19T10:00:00Z"},
+  "run_id": "20260819T100000Z-codex-a1b2c3d4",
+  "agent": "codex",
+  "agent_version": "0.147.0",
+  "status": "ok",
+  "timeline": [
+    {"kind": "message", "provider_event": "item.completed", "visibility": "primary", "text": "Example complete."}
+  ],
+  "metrics": {
+    "duration_ms": 1000,
+    "commands": 0,
+    "edits": 0,
+    "tokens": {"input": 10, "output": 5, "total": 15}
+  },
+  "files": [],
+  "final_message": "Example complete.",
+  "termination": {"outcome": "completed"},
+  "has_workspace_diff": false,
+  "otlp_status": "not_sampled",
+  "raw_output_limit_bytes": 1073741824,
+  "workspace_diff_limit_bytes": 268435456,
+  "process_containment": "posix_process_group",
+  "agent_config_mode": "ambient_ephemeral"
+}

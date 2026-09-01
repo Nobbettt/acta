@@ -1,6 +1,10 @@
 package digest
 
 import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -48,8 +52,19 @@ func TestCodexCapturesRichItemsFailuresAndIncompleteCalls(t *testing.T) {
 			unsupported = event
 		}
 	}
-	if reasoning == nil || reasoning.Text == "" {
-		t.Fatal("reasoning item was not retained")
+	if reasoning == nil || reasoning.Text != "" || reasoning.LocalReasoningText() != "Inspect the failing path." {
+		t.Fatalf("reasoning boundary = %#v / %q, want structural digest plus local-only text", reasoning, reasoning.LocalReasoningText())
+	}
+	dir := t.TempDir()
+	if err := Write(dir, d); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := os.ReadFile(filepath.Join(dir, "digest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(persisted), "Inspect the failing path.") {
+		t.Fatalf("persisted digest leaked reasoning text: %s", persisted)
 	}
 	if mcp == nil || mcp.Server != "docs" || mcp.Tool != "lookup" || len(mcp.Input) == 0 || len(mcp.Result) == 0 {
 		t.Fatalf("mcp event = %+v", mcp)
@@ -108,4 +123,132 @@ func TestClaudeCapturesRuntimeTasksOrphansPermissionsAndTermination(t *testing.T
 			t.Errorf("missing event kind %q", kind)
 		}
 	}
+}
+
+func TestClaudeRedactedThinkingRetainsStructuralReasoningEvent(t *testing.T) {
+	originalRaw := strings.Join([]string{
+		`{"type":"system","subtype":"init","session_id":"session-1"}`,
+		`{"type":"assistant","session_id":"session-1","message":{"id":"message-1","content":[{"type":"thinking","thinking":"private chain of thought"}]}}`,
+		`{"type":"result","subtype":"success","session_id":"session-1","is_error":false}`,
+	}, "\n") + "\n"
+	redactedRaw := strings.Replace(originalRaw, `{"type":"thinking","thinking":"private chain of thought"}`, `{"type":"thinking"}`, 1)
+
+	original, err := parseClaude(strings.NewReader(originalRaw), newWorkspace(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	redacted, err := parseClaude(strings.NewReader(redactedRaw), newWorkspace(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(redacted.Timeline) != len(original.Timeline) {
+		t.Fatalf("redacted timeline event count = %d, original = %d", len(redacted.Timeline), len(original.Timeline))
+	}
+	originalReasoning := findTimelineKind(original.Timeline, KindReasoning)
+	redactedReasoning := findTimelineKind(redacted.Timeline, KindReasoning)
+	if originalReasoning == nil || redactedReasoning == nil {
+		t.Fatalf("reasoning events original=%+v redacted=%+v", originalReasoning, redactedReasoning)
+	}
+	if originalReasoning.LocalReasoningText() != "private chain of thought" || originalReasoning.Redacted {
+		t.Fatalf("original reasoning event = %+v / %q", originalReasoning, originalReasoning.LocalReasoningText())
+	}
+	if !redactedReasoning.Redacted || redactedReasoning.LocalReasoningText() != "" ||
+		redactedReasoning.Kind != originalReasoning.Kind ||
+		redactedReasoning.ProviderEvent != originalReasoning.ProviderEvent ||
+		strings.TrimSpace(redactedReasoning.Text) != "" ||
+		len(redactedReasoning.RawEventLines) != 1 || redactedReasoning.RawEventLines[0] != 2 {
+		t.Fatalf("redacted structural reasoning event = %+v / %q", redactedReasoning, redactedReasoning.LocalReasoningText())
+	}
+}
+
+func TestClaudeRedactedThinkingBlockDigestsCleanlyAndStably(t *testing.T) {
+	const secret = "opaque-redacted-thinking-data"
+	dir := t.TempDir()
+	rawName := "claude-output.jsonl"
+	raw := strings.Join([]string{
+		`{"type":"system","subtype":"init","session_id":"session-1"}`,
+		`{"type":"assistant","session_id":"session-1","message":{"id":"message-1","content":[{"type":"redacted_thinking","data":"` + secret + `"}]}}`,
+		`{"type":"result","subtype":"success","session_id":"session-1","is_error":false}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(dir, rawName), []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	record := validTestRecord(dir, rawName)
+	record.Agent = "claude"
+	record.Command = []string{"claude", "--print"}
+	writeRecord(t, dir, record)
+
+	first, err := FromRunDir(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Status != StatusOK || first.Termination.Outcome != OutcomeCompleted || len(first.Metrics.UnsupportedEvents) != 0 {
+		t.Fatalf("redacted_thinking degraded run: status %q, termination %+v, unsupported %+v", first.Status, first.Termination, first.Metrics.UnsupportedEvents)
+	}
+	firstReasoning := findTimelineKind(first.Timeline, KindReasoning)
+	if firstReasoning == nil || !firstReasoning.Redacted || firstReasoning.ProviderEvent != "assistant.redacted_thinking" ||
+		firstReasoning.Text != "" || firstReasoning.LocalReasoningText() != "" || firstReasoning.Details != nil {
+		t.Fatalf("redacted_thinking event retained payload or lost structure: %+v", firstReasoning)
+	}
+	if err := Write(dir, first); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := os.ReadFile(filepath.Join(dir, "digest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(persisted, []byte(secret)) {
+		t.Fatalf("digest.json retained redacted_thinking data: %s", persisted)
+	}
+
+	second, err := FromRunDir(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondReasoning := findTimelineKind(second.Timeline, KindReasoning)
+	if secondReasoning == nil || !reflect.DeepEqual(*secondReasoning, *firstReasoning) {
+		t.Fatalf("re-digested reasoning event = %+v, want %+v", secondReasoning, firstReasoning)
+	}
+}
+
+func TestCodexRedactedReasoningRetainsStructuralReasoningEvent(t *testing.T) {
+	originalRaw := strings.Join([]string{
+		`{"type":"thread.started","thread_id":"thread-1"}`,
+		`{"type":"turn.started"}`,
+		`{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","text":"private chain of thought"}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`,
+	}, "\n") + "\n"
+	redactedRaw := strings.Replace(originalRaw, `,"text":"private chain of thought"`, "", 1)
+
+	original, err := parseCodex(strings.NewReader(originalRaw), newWorkspace(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	redacted, err := parseCodex(strings.NewReader(redactedRaw), newWorkspace(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalReasoning := findTimelineKind(original.Timeline, KindReasoning)
+	redactedReasoning := findTimelineKind(redacted.Timeline, KindReasoning)
+	if originalReasoning == nil || redactedReasoning == nil {
+		t.Fatalf("reasoning events original=%+v redacted=%+v", originalReasoning, redactedReasoning)
+	}
+	if originalReasoning.Redacted || originalReasoning.LocalReasoningText() != "private chain of thought" {
+		t.Fatalf("original reasoning event = %+v / %q", originalReasoning, originalReasoning.LocalReasoningText())
+	}
+	if !redactedReasoning.Redacted || redactedReasoning.LocalReasoningText() != "" ||
+		redactedReasoning.Kind != originalReasoning.Kind ||
+		redactedReasoning.ProviderEvent != originalReasoning.ProviderEvent ||
+		len(redactedReasoning.RawEventLines) != 1 || redactedReasoning.RawEventLines[0] != 3 {
+		t.Fatalf("redacted structural reasoning event = %+v / %q", redactedReasoning, redactedReasoning.LocalReasoningText())
+	}
+}
+
+func findTimelineKind(timeline []Event, kind string) *Event {
+	for index := range timeline {
+		if timeline[index].Kind == kind {
+			return &timeline[index]
+		}
+	}
+	return nil
 }

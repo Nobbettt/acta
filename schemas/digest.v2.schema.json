@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Nobbettt/acta/schemas/digest.v2.schema.json",
+  "title": "Acta digest v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "producer", "run_id", "agent", "status", "timeline", "metrics", "files", "has_workspace_diff"],
+  "properties": {
+    "schema_version": {"const": 2},
+    "producer": {"$ref": "run-record.v2.schema.json#/$defs/producer"},
+    "run_id": {"type": "string", "minLength": 1},
+    "agent": {"enum": ["codex", "claude"]},
+    "agent_version": {"type": "string"},
+    "model": {"type": "string"},
+    "thread_id": {"type": "string"},
+    "session_id": {"type": "string"},
+    "status": {"enum": ["ok", "error", "timeout", "degraded"]},
+    "timeline": {"type": "array", "maxItems": 100000, "items": {"$ref": "#/$defs/timelineEvent"}},
+    "metrics": {"$ref": "#/$defs/metrics"},
+    "files": {"type": "array", "items": {"$ref": "#/$defs/fileTouch"}},
+    "final_message": {"type": "string"},
+    "structured_output": {},
+    "model_usage": {},
+    "runtime": {"$ref": "#/$defs/runtime"},
+    "termination": {"$ref": "#/$defs/termination"},
+    "error": {"type": "string"},
+    "has_workspace_diff": {"type": "boolean"},
+    "otlp_status": {"enum": ["not_configured", "exported", "failed"]},
+    "otlp_error": {"type": "string"},
+    "raw_output_limit_bytes": {"type": "integer", "minimum": 0},
+    "raw_output_limit_exceeded": {"type": "boolean"},
+    "workspace_diff_limit_bytes": {"type": "integer", "minimum": 0},
+    "workspace_diff_limit_exceeded": {"type": "boolean"},
+    "process_containment": {"enum": ["posix_process_group", "windows_job", "direct_process"]},
+    "agent_config_mode": {"enum": ["ambient_ephemeral", "project_only_ephemeral", "authoritative_bundle"]},
+    "runtime_bundle_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "recovery_dir": {"type": "string", "minLength": 1},
+    "patch_preservation": {"$ref": "#/$defs/patchPreservation"}
+  },
+  "$defs": {
+    "span": {
+      "type": "object", "additionalProperties": false, "required": ["start", "end"],
+      "properties": {"start": {"type": "integer", "minimum": 1}, "end": {"type": "integer", "minimum": 1}}
+    },
+    "range": {
+      "type": "object", "additionalProperties": false, "required": ["start", "end", "content"],
+      "properties": {"start": {"type": "integer", "minimum": 1}, "end": {"type": "integer", "minimum": 1}, "content": {"type": "string"}}
+    },
+    "patch": {
+      "type": "object", "additionalProperties": false, "required": ["path", "patch"],
+      "properties": {"path": {"type": "string"}, "patch": {"type": "string"}}
+    },
+    "mutation": {
+      "type": "object", "additionalProperties": false, "required": ["path"],
+      "properties": {"path": {"type": "string"}, "kind": {"type": "string"}}
+    },
+    "timelineEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {"type": "string"}, "provider_event": {"type": "string"}, "id": {"type": "string"},
+        "parent_id": {"type": "string"}, "thread_id": {"type": "string"}, "session_id": {"type": "string"},
+        "task_id": {"type": "string"}, "phase": {"type": "string"}, "status": {"type": "string"},
+        "visibility": {"enum": ["primary", "diagnostic"]}, "observed_at": {"type": "string", "format": "date-time"},
+        "completed_at": {"type": "string", "format": "date-time"}, "tool": {"type": "string"}, "server": {"type": "string"},
+        "input": {}, "input_chars": {"type": "integer", "minimum": 0}, "input_truncated": {"type": "boolean"},
+        "result": {}, "result_chars": {"type": "integer", "minimum": 0}, "result_truncated": {"type": "boolean"},
+        "command": {"type": "string"}, "exit_code": {"type": "integer"}, "is_error": {"type": "boolean"},
+        "error_message": {"type": "string"}, "output": {"type": "string"}, "output_chars": {"type": "integer", "minimum": 0},
+        "output_truncated": {"type": "boolean"}, "text": {"type": "string"}, "query": {"type": "string"}, "action": {},
+        "files": {"type": "array", "items": {"type": "string"}},
+        "changes": {"type": "array", "items": {"$ref": "#/$defs/mutation"}},
+        "spans": {"type": "object", "additionalProperties": {"type": "array", "items": {"$ref": "#/$defs/span"}}},
+        "read_ranges": {"type": "object", "additionalProperties": {"type": "array", "items": {"$ref": "#/$defs/range"}}},
+        "file_patches": {"type": "array", "items": {"$ref": "#/$defs/patch"}},
+        "file_patch_status": {"enum": ["captured", "partial", "unavailable", "preserved"]},
+        "file_patch_errors": {"type": "array", "items": {"type": "string"}}, "details": {},
+        "raw_event_lines": {"type": "array", "items": {"type": "integer", "minimum": 1}}
+      }
+    },
+    "tokens": {
+      "type": "object", "additionalProperties": false, "required": ["input", "output", "total"],
+      "properties": {"input": {"type": "integer"}, "output": {"type": "integer"}, "cache_read": {"type": "integer"}, "cache_creation": {"type": "integer"}, "reasoning": {"type": "integer"}, "total": {"type": "integer"}}
+    },
+    "metrics": {
+      "type": "object", "additionalProperties": false, "required": ["duration_ms", "commands", "edits", "tokens"],
+      "properties": {
+        "duration_ms": {"type": "integer", "minimum": 0}, "turns": {"type": "integer", "minimum": 0},
+        "tool_calls": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "commands": {"type": "integer", "minimum": 0}, "edits": {"type": "integer", "minimum": 0},
+        "tokens": {"$ref": "#/$defs/tokens"}, "cost_usd": {"type": "number", "minimum": 0},
+        "parse_errors": {"type": "integer", "minimum": 0}, "unsupported_events": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "incomplete_tool_calls": {"type": "integer", "minimum": 0}, "orphaned_tool_results": {"type": "integer", "minimum": 0},
+        "dropped_events": {"type": "integer", "minimum": 0}, "projection_truncated": {"type": "boolean"}
+      }
+    },
+    "fileTouch": {
+      "type": "object", "additionalProperties": false, "required": ["path", "read", "edited"],
+      "properties": {"path": {"type": "string"}, "read": {"type": "boolean"}, "edited": {"type": "boolean"}, "read_spans": {"type": "array", "items": {"$ref": "#/$defs/span"}}}
+    },
+    "runtime": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"version": {"type": "string"}, "permission_mode": {"type": "string"}, "tools": {"type": "array", "items": {"type": "string"}}, "agents": {"type": "array", "items": {"type": "string"}}, "skills": {"type": "array", "items": {"type": "string"}}, "commands": {"type": "array", "items": {"type": "string"}}, "mcp_servers": {}, "plugins": {}}
+    },
+    "termination": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"outcome": {"enum": ["completed", "failed", "error", "timeout", "cancelled", "interrupted", "degraded"]}, "provider_reason": {"type": "string"}, "provider_subtype": {"type": "string"}, "runner_reason": {"type": "string"}, "error_code": {"type": "string"}, "error_message": {"type": "string"}}
+    },
+    "patchPreservation": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"status": {"enum": ["not_available", "preserved", "partial", "invalid"]}, "preserved": {"type": "integer", "minimum": 0}, "missing": {"type": "integer", "minimum": 0}, "error": {"type": "string"}}
+    }
+  }
+}

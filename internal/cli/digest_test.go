@@ -138,13 +138,19 @@ func assertProjectionManifest(t *testing.T, dir string) {
 		t.Fatal(err)
 	}
 	var manifest struct {
-		DigestSHA256 string `json:"digest_sha256"`
-		EventsSHA256 string `json:"events_sha256"`
+		SchemaVersion int    `json:"schema_version"`
+		RunSHA256     string `json:"run_sha256"`
+		DigestSHA256  string `json:"digest_sha256"`
+		EventsSHA256  string `json:"events_sha256"`
 	}
 	if err := json.Unmarshal(payload, &manifest); err != nil {
 		t.Fatal(err)
 	}
+	if manifest.SchemaVersion != 3 {
+		t.Fatalf("projection schema_version = %d, want 3", manifest.SchemaVersion)
+	}
 	for name, want := range map[string]string{
+		"run.json":          manifest.RunSHA256,
 		"digest.json":       manifest.DigestSHA256,
 		"acta-events.jsonl": manifest.EventsSHA256,
 	} {

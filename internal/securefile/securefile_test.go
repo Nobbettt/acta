@@ -1,6 +1,7 @@
 package securefile
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -57,6 +58,65 @@ func TestAtomicWriterAbortPreservesExistingFile(t *testing.T) {
 	}
 	if got, err := os.ReadFile(path); err != nil || string(got) != "old" {
 		t.Fatalf("aborted target = %q, err = %v", got, err)
+	}
+}
+
+func TestAtomicWriterDirectorySyncFailureBeforeRenamePreservesTarget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "artifact.json")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Abort()
+	if _, err := writer.Write([]byte("new")); err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("sync directory before rename")
+	writer.syncDirectory = func(string) error { return wantErr }
+	if err := writer.Commit(); !errors.Is(err, wantErr) {
+		t.Fatalf("Commit() error = %v, want %v", err, wantErr)
+	}
+	if writer.TargetReplaced() {
+		t.Fatal("writer reported a replacement after the pre-rename sync failed")
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "old" {
+		t.Fatalf("target = %q, err = %v; want original", got, err)
+	}
+}
+
+func TestAtomicWriterReportsDirectorySyncFailureAfterRename(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "artifact.json")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Abort()
+	if _, err := writer.Write([]byte("new")); err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("sync directory after rename")
+	syncCalls := 0
+	writer.syncDirectory = func(string) error {
+		syncCalls++
+		if syncCalls == 2 {
+			return wantErr
+		}
+		return nil
+	}
+	if err := writer.Commit(); !errors.Is(err, wantErr) {
+		t.Fatalf("Commit() error = %v, want %v", err, wantErr)
+	}
+	if !writer.TargetReplaced() {
+		t.Fatal("writer did not report the completed rename")
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "new" {
+		t.Fatalf("target = %q, err = %v; want complete replacement", got, err)
 	}
 }
 
