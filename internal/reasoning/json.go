@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+
+	"github.com/nobbettt/acta/internal/contextio"
 )
 
 // ErrInvalidProviderEnvelope reports a complete JSON provider line whose
@@ -68,7 +70,7 @@ func unmarshalValueContext(ctx context.Context, payload []byte, value any, requi
 	if trimmed := bytes.TrimSpace(payload); requireObject && (len(trimmed) == 0 || trimmed[0] != '{') {
 		return ErrInvalidProviderEnvelope
 	}
-	decoder := json.NewDecoder(jsonContextReader{ctx: ctx, reader: bytes.NewReader(payload)})
+	decoder := json.NewDecoder(contextio.Reader{Context: ctx, Reader: bytes.NewReader(payload)})
 	decoder.UseNumber()
 	if err := decoder.Decode(value); err != nil {
 		return err
@@ -79,7 +81,7 @@ func unmarshalValueContext(ctx context.Context, payload []byte, value any, requi
 // ValidateUniqueObjectKeysContext is ValidateUniqueObjectKeys with
 // cancellation checks while scanning potentially large artifacts.
 func ValidateUniqueObjectKeysContext(ctx context.Context, payload []byte) error {
-	decoder := json.NewDecoder(jsonContextReader{ctx: ctx, reader: bytes.NewReader(payload)})
+	decoder := json.NewDecoder(contextio.Reader{Context: ctx, Reader: bytes.NewReader(payload)})
 	decoder.UseNumber()
 
 	type frame struct {
@@ -173,16 +175,4 @@ func ValidateUniqueObjectKeysContext(ctx context.Context, payload []byte) error 
 			return err
 		}
 	}
-}
-
-type jsonContextReader struct {
-	ctx    context.Context
-	reader io.Reader
-}
-
-func (r jsonContextReader) Read(payload []byte) (int, error) {
-	if err := r.ctx.Err(); err != nil {
-		return 0, err
-	}
-	return r.reader.Read(payload)
 }

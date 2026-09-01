@@ -172,16 +172,17 @@ func ValidateEnvelope(event Event, runID string, expectedSequence int) error {
 	return nil
 }
 
-// IsKnownType reports whether typ belongs to the published Acta event
-// vocabulary. Provider event names are payload metadata, never envelope types.
-func IsKnownType(typ string) bool {
+// IsReasoningFreeType reports whether typ has a payload whose documented
+// content is safe to retain after a defensive recursive reasoning pass. The
+// list is deliberately explicit so newly introduced types fail closed.
+func IsReasoningFreeType(typ string) bool {
 	switch typ {
 	case TypeRunStarted, TypeRunCompleted, TypeRunFailed, TypeAgentPrompt,
-		TypeAgentInput, TypeAgentMessage, TypeAgentReasoning, TypeAgentTodo,
+		TypeAgentInput, TypeAgentMessage, TypeAgentTodo,
 		TypeAgentTodoUpdated, TypeAgentTaskStarted, TypeAgentTaskProgress,
 		TypeAgentTaskCompleted, TypeAgentTaskIncomplete, TypeAgentPermissionDenied,
 		TypeAgentRuntimeConfigured, TypeAgentStructuredOutput, TypeAgentRateLimitObserved,
-		TypeAgentError, TypeAgentEventUnsupported, TypeAgentLifecycle,
+		TypeAgentError, TypeAgentLifecycle,
 		TypeToolCallCompleted, TypeToolCallIncomplete, TypeToolResultOrphaned,
 		TypeShellCommandComplete, TypeShellCommandIncomplete, TypeWebSearchCompleted,
 		TypeWebSearchIncomplete, TypeFileRead, TypeFileWritten, TypeFileWriteIncomplete,
@@ -190,6 +191,12 @@ func IsKnownType(typ string) bool {
 	default:
 		return false
 	}
+}
+
+// IsKnownType reports whether typ belongs to the published Acta event
+// vocabulary. Provider event names are payload metadata, never envelope types.
+func IsKnownType(typ string) bool {
+	return IsReasoningFreeType(typ) || typ == TypeAgentReasoning || typ == TypeAgentEventUnsupported
 }
 
 func ValidateEvent(event Event, runID string, expectedSequence int) error {

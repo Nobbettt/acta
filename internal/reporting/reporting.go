@@ -25,6 +25,7 @@ import (
 	"unicode"
 
 	"github.com/nobbettt/acta/internal/actaevents"
+	"github.com/nobbettt/acta/internal/contextio"
 	"github.com/nobbettt/acta/internal/digest"
 	"github.com/nobbettt/acta/internal/reasoning"
 	"github.com/nobbettt/acta/internal/runrecord"
@@ -1674,7 +1675,7 @@ func inspectActaEventValue(value any) (bool, bool) {
 		_, changed, verified := reasoning.RedactUnsupportedPayload(payload)
 		return changed, verified
 	}
-	if !reasoningFreeActaEventType(typ) {
+	if !actaevents.IsReasoningFreeType(typ) {
 		return false, false
 	}
 	if !hasPayload {
@@ -1827,7 +1828,7 @@ func stampActaEventLineSchemaVersion(line []byte) ([]byte, error) {
 
 func copyContext(ctx context.Context, dst io.Writer, src io.Reader) error {
 	buffer := make([]byte, 128<<10)
-	_, err := io.CopyBuffer(contextWriter{ctx, dst}, contextReader{ctx, src}, buffer)
+	_, err := io.CopyBuffer(contextio.Writer{Context: ctx, Writer: dst}, contextio.Reader{Context: ctx, Reader: src}, buffer)
 	return err
 }
 
@@ -1901,7 +1902,7 @@ func redactActaReasoningEventLine(line []byte) ([]byte, error) {
 			}
 			event["payload"] = redacted
 			changed = detailsChanged || changed
-		case !reasoningFreeActaEventType(typ):
+		case !actaevents.IsReasoningFreeType(typ):
 			structural, structuralChanged := reasoning.RedactToStructuralReferences(payload)
 			event["payload"] = structural
 			changed = structuralChanged || changed
@@ -1926,30 +1927,6 @@ func redactActaReasoningEventLine(line []byte) ([]byte, error) {
 		return nil, err
 	}
 	return wrapJSONLine(prefix, encoded, suffix), nil
-}
-
-// reasoningFreeActaEventType is deliberately explicit. A newly introduced
-// event type is redacted until this upload privacy boundary has audited it.
-func reasoningFreeActaEventType(typ string) bool {
-	switch typ {
-	case actaevents.TypeRunStarted, actaevents.TypeRunCompleted, actaevents.TypeRunFailed,
-		actaevents.TypeAgentPrompt, actaevents.TypeAgentInput, actaevents.TypeAgentMessage,
-		actaevents.TypeAgentTodo, actaevents.TypeAgentTodoUpdated,
-		actaevents.TypeAgentTaskStarted, actaevents.TypeAgentTaskProgress,
-		actaevents.TypeAgentTaskCompleted, actaevents.TypeAgentTaskIncomplete,
-		actaevents.TypeAgentPermissionDenied, actaevents.TypeAgentRuntimeConfigured,
-		actaevents.TypeAgentStructuredOutput, actaevents.TypeAgentRateLimitObserved,
-		actaevents.TypeAgentError, actaevents.TypeAgentLifecycle,
-		actaevents.TypeToolCallCompleted, actaevents.TypeToolCallIncomplete,
-		actaevents.TypeToolResultOrphaned, actaevents.TypeShellCommandComplete,
-		actaevents.TypeShellCommandIncomplete, actaevents.TypeWebSearchCompleted,
-		actaevents.TypeWebSearchIncomplete, actaevents.TypeFileRead,
-		actaevents.TypeFileWritten, actaevents.TypeFileWriteIncomplete,
-		actaevents.TypeDiffGenerated, actaevents.TypeTokensReported:
-		return true
-	default:
-		return false
-	}
 }
 
 const reasoningRedactionMarker = reasoning.RedactedMarker
@@ -2230,30 +2207,6 @@ func readFileContextLimit(ctx context.Context, file *os.File, maxBytes int64) ([
 	return payload.Bytes(), false, nil
 }
 
-type contextReader struct {
-	ctx    context.Context
-	reader io.Reader
-}
-
-type contextWriter struct {
-	ctx    context.Context
-	writer io.Writer
-}
-
-func (w contextWriter) Write(payload []byte) (int, error) {
-	if err := w.ctx.Err(); err != nil {
-		return 0, err
-	}
-	return w.writer.Write(payload)
-}
-
-func (r contextReader) Read(payload []byte) (int, error) {
-	if err := r.ctx.Err(); err != nil {
-		return 0, err
-	}
-	return r.reader.Read(payload)
-}
-
 func replaceSnapshotReaderContext(ctx context.Context, file *os.File, reader io.Reader) error {
 	if err := file.Truncate(0); err != nil {
 		return err
@@ -2274,7 +2227,7 @@ func hashFileContext(ctx context.Context, file *os.File) (string, int64, error) 
 		return "", 0, err
 	}
 	buffer := make([]byte, 128<<10)
-	size, err := io.CopyBuffer(hasher, contextReader{ctx, file}, buffer)
+	size, err := io.CopyBuffer(hasher, contextio.Reader{Context: ctx, Reader: file}, buffer)
 	if err != nil {
 		return "", 0, err
 	}
@@ -2325,8 +2278,8 @@ func snapshotOpenFileBudgetContext(ctx context.Context, source *os.File, remaini
 		}
 	}
 	copied, err := io.CopyBuffer(
-		contextWriter{ctx, io.MultiWriter(temp, hasher)},
-		contextReader{ctx, reader},
+		contextio.Writer{Context: ctx, Writer: io.MultiWriter(temp, hasher)},
+		contextio.Reader{Context: ctx, Reader: reader},
 		buffer,
 	)
 	if err != nil {

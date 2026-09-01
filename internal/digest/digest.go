@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/nobbettt/acta/internal/contextio"
 	"github.com/nobbettt/acta/internal/reasoning"
 	"github.com/nobbettt/acta/internal/runrecord"
 	"github.com/nobbettt/acta/internal/schemaversion"
@@ -701,7 +702,7 @@ func FromRunDirContext(ctx context.Context, runDir string, workspaceDir string) 
 	}
 	defer raw.Close()
 
-	d, parseErr := parse(contextReader{ctx: ctx, reader: raw}, ws)
+	d, parseErr := parse(contextio.Reader{Context: ctx, Reader: raw}, ws)
 	if d == nil {
 		return nil, parseErr // fatal: unreadable stream or unknown structure
 	}
@@ -726,18 +727,6 @@ func FromRunDirContext(ctx context.Context, runDir string, workspaceDir string) 
 		return d, err
 	}
 	return d, nil
-}
-
-type contextReader struct {
-	ctx    context.Context
-	reader io.Reader
-}
-
-func (r contextReader) Read(payload []byte) (int, error) {
-	if err := r.ctx.Err(); err != nil {
-		return 0, err
-	}
-	return r.reader.Read(payload)
 }
 
 // applyRecord stamps run-record metadata and the assembled file summary onto a
@@ -1086,7 +1075,7 @@ func applyEventTimesContext(ctx context.Context, runDir string, timeline []Event
 
 	times := make(map[int]time.Time, len(wanted))
 	var parseErr error
-	if err := forEachLine(contextReader{ctx: ctx, reader: f}, func(_ int, line []byte) {
+	if err := forEachLine(contextio.Reader{Context: ctx, Reader: f}, func(_ int, line []byte) {
 		if parseErr != nil {
 			return
 		}

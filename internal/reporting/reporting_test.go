@@ -40,6 +40,18 @@ func TestUploadRunPostsRunEventsArtifactsAndCompletion(t *testing.T) {
 	runDir := writeBundle(t)
 	record := testRecord(runDir)
 
+	capture, server := newUploadCapture(t)
+	if err := UploadRun(context.Background(), Config{
+		BackendURL:     server.URL,
+		ReportToken:    "secret-token",
+		OrganizationID: "11111111-1111-1111-1111-111111111111",
+		RepositoryID:   "22222222-2222-2222-2222-222222222222",
+		HTTPClient:     server.Client(),
+		RetryDelays:    []time.Duration{},
+	}, record); err != nil {
+		t.Fatalf("UploadRun() error = %v", err)
+	}
+
 	var paths []string
 	var sawAuth bool
 	var artifactFilename string
@@ -52,14 +64,14 @@ func TestUploadRunPostsRunEventsArtifactsAndCompletion(t *testing.T) {
 	var sawEvents bool
 	var completeStatus string
 	var completeMetadata completionMetadata
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		paths = append(paths, r.URL.Path)
-		if r.Header.Get("Authorization") == "Bearer secret-token" {
+	for _, request := range capture.Requests {
+		paths = append(paths, request.Path)
+		if request.Header.Get("Authorization") == "Bearer secret-token" {
 			sawAuth = true
 		}
-		if r.URL.Path == "/api/ingest/runs" {
+		if request.Path == "/api/ingest/runs" {
 			var req createRunRequest
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			if err := json.Unmarshal(request.Body, &req); err != nil {
 				t.Fatalf("decode create run request: %v", err)
 			}
 			createStatus = req.Status
@@ -67,9 +79,9 @@ func TestUploadRunPostsRunEventsArtifactsAndCompletion(t *testing.T) {
 			createRepositoryID = req.RepositoryID
 			createMetadata = req.Metadata
 		}
-		if r.URL.Path == "/api/ingest/runs/run-1/events" {
+		if request.Path == "/api/ingest/runs/run-1/events" {
 			var req eventsRequest
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			if err := json.Unmarshal(request.Body, &req); err != nil {
 				t.Fatalf("decode events request: %v", err)
 			}
 			if len(req.Events) == 0 {
@@ -82,15 +94,12 @@ func TestUploadRunPostsRunEventsArtifactsAndCompletion(t *testing.T) {
 			}
 			sawEvents = true
 		}
-		if r.URL.Path == "/api/ingest/runs/run-1/artifacts" {
-			body, err := io.ReadAll(r.Body)
-			if err != nil {
-				t.Fatalf("read artifact body: %v", err)
-			}
+		if request.Path == "/api/ingest/runs/run-1/artifacts" {
+			body := request.Body
 			if len(body) == 0 {
 				t.Fatal("artifact request had empty body")
 			}
-			sizeBytes, err := strconv.ParseInt(r.URL.Query().Get("size_bytes"), 10, 64)
+			sizeBytes, err := strconv.ParseInt(request.Query.Get("size_bytes"), 10, 64)
 			if err != nil {
 				t.Fatalf("artifact request had invalid size_bytes query parameter: %v", err)
 			}
@@ -98,47 +107,34 @@ func TestUploadRunPostsRunEventsArtifactsAndCompletion(t *testing.T) {
 				t.Fatalf("artifact size_bytes = %d, body length = %d", sizeBytes, len(body))
 			}
 			if artifactFilename == "" {
-				artifactFilename = r.URL.Query().Get("filename")
+				artifactFilename = request.Query.Get("filename")
 			}
-			if r.URL.Query().Get("filename") == actaevents.Filename {
-				eventArtifactSchemaVersion = r.URL.Query().Get("schema_version")
+			if request.Query.Get("filename") == actaevents.Filename {
+				eventArtifactSchemaVersion = request.Query.Get("schema_version")
 			}
-			if r.URL.Query().Get("kind") == "" {
+			if request.Query.Get("kind") == "" {
 				t.Fatal("artifact request had empty kind query parameter")
 			}
-			if r.URL.Query().Get("filename") == "" {
+			if request.Query.Get("filename") == "" {
 				t.Fatal("artifact request had empty filename query parameter")
 			}
-			if r.URL.Query().Get("content_type") == "" {
+			if request.Query.Get("content_type") == "" {
 				t.Fatal("artifact request had empty content_type query parameter")
 			}
 			sum := sha256.Sum256(body)
-			if got, want := r.URL.Query().Get("sha256"), hex.EncodeToString(sum[:]); got != want {
+			if got, want := request.Query.Get("sha256"), hex.EncodeToString(sum[:]); got != want {
 				t.Fatalf("artifact sha256 = %q, want %q", got, want)
 			}
 			artifactChecks++
 		}
-		if r.URL.Path == "/api/ingest/runs/run-1/complete" {
+		if request.Path == "/api/ingest/runs/run-1/complete" {
 			var req completeRunRequest
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			if err := json.Unmarshal(request.Body, &req); err != nil {
 				t.Fatalf("decode complete request: %v", err)
 			}
 			completeStatus = req.Status
 			completeMetadata = req.Metadata
 		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-
-	if err := UploadRun(context.Background(), Config{
-		BackendURL:     server.URL,
-		ReportToken:    "secret-token",
-		OrganizationID: "11111111-1111-1111-1111-111111111111",
-		RepositoryID:   "22222222-2222-2222-2222-222222222222",
-		HTTPClient:     server.Client(),
-		RetryDelays:    []time.Duration{},
-	}, record); err != nil {
-		t.Fatalf("UploadRun() error = %v", err)
 	}
 
 	want := []string{
@@ -214,36 +210,7 @@ func TestUploadRunRetriesChangedProjectionGeneration(t *testing.T) {
 	newDigest := `{"run_id":"run-1","generation":"new"}` + "\n"
 	newEvents := strings.Replace(oldEvents, `"duration_ms":1000`, `"duration_ms":2000`, 1)
 	var attempts []int
-	var uploadedDigest string
-	var uploadedDuration int64
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/api/ingest/runs/run-1/events" {
-			var body eventsRequest
-			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
-				t.Error(err)
-			}
-			for _, event := range body.Events {
-				if event.Type == actaevents.TypeRunCompleted {
-					var payload struct {
-						DurationMillis int64 `json:"duration_ms"`
-					}
-					if err := json.Unmarshal(event.Payload, &payload); err != nil {
-						t.Error(err)
-					}
-					uploadedDuration = payload.DurationMillis
-				}
-			}
-		}
-		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == "digest.json" {
-			payload, err := io.ReadAll(request.Body)
-			if err != nil {
-				t.Error(err)
-			}
-			uploadedDigest = string(payload)
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	capture, server := newUploadCapture(t)
 
 	err := UploadRun(context.Background(), Config{
 		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
@@ -261,6 +228,19 @@ func TestUploadRunRetriesChangedProjectionGeneration(t *testing.T) {
 	if len(attempts) != 2 {
 		t.Fatalf("projection snapshot attempts = %v, want [1 2]", attempts)
 	}
+	var uploadedDuration int64
+	for _, event := range capture.events(t) {
+		if event.Type == actaevents.TypeRunCompleted {
+			var payload struct {
+				DurationMillis int64 `json:"duration_ms"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Error(err)
+			}
+			uploadedDuration = payload.DurationMillis
+		}
+	}
+	uploadedDigest := string(capture.Artifacts["digest.json"].Body)
 	if uploadedDigest != newDigest || uploadedDuration != 2000 {
 		t.Fatalf("uploaded generation digest/duration = %q/%d, want new generation %q/2000", uploadedDigest, uploadedDuration, newDigest)
 	}
@@ -402,10 +382,7 @@ func TestUploadRunSteadyProjectionUsesSinglePass(t *testing.T) {
 	writeProjectionGeneration(t, runDir, "100", digestPayload, eventsPayload)
 
 	attempts := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	_, server := newUploadCapture(t)
 	err := UploadRun(context.Background(), Config{
 		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
 		AllowUnredactedRemoteReasoning: true,
@@ -424,13 +401,7 @@ func TestUploadRunSteadyProjectionUsesSinglePass(t *testing.T) {
 func TestUploadRunLegacyProjectionUsesSingleLockedSnapshot(t *testing.T) {
 	runDir := writeBundle(t)
 	attempts := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if _, err := os.Stat(filepath.Join(runDir, ".projection.lock")); err != nil {
-			t.Errorf("writable legacy upload did not create projection lock: %v", err)
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	_, server := newUploadCapture(t)
 
 	err := UploadRun(context.Background(), Config{
 		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
@@ -444,6 +415,9 @@ func TestUploadRunLegacyProjectionUsesSingleLockedSnapshot(t *testing.T) {
 	}
 	if attempts != 1 {
 		t.Fatalf("legacy projection snapshot passes = %d, want 1", attempts)
+	}
+	if _, err := os.Stat(filepath.Join(runDir, ".projection.lock")); err != nil {
+		t.Errorf("writable legacy upload did not create projection lock: %v", err)
 	}
 }
 
@@ -493,26 +467,7 @@ func TestUploadRunRecoversInterruptedFirstProjectionCommit(t *testing.T) {
 		writeFile(t, filepath.Join(runDir, "."+name+".staged-200"), "interrupted generation\n")
 	}
 
-	var uploadedModels []string
-	var uploadedDigests []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		switch {
-		case request.URL.Path == "/api/ingest/runs":
-			var body createRunRequest
-			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
-				t.Error(err)
-			}
-			uploadedModels = append(uploadedModels, body.Model)
-		case request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == "digest.json":
-			payload, err := io.ReadAll(request.Body)
-			if err != nil {
-				t.Error(err)
-			}
-			uploadedDigests = append(uploadedDigests, string(payload))
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	capture, server := newUploadCapture(t)
 	config := Config{
 		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
 		AllowUnredactedRemoteReasoning: true,
@@ -530,6 +485,20 @@ func TestUploadRunRecoversInterruptedFirstProjectionCommit(t *testing.T) {
 	if err := UploadRun(context.Background(), config, oldRecord); err != nil {
 		t.Fatalf("post-recovery UploadRun(): %v", err)
 	}
+	var uploadedModels []string
+	var uploadedDigests []string
+	for _, request := range capture.Requests {
+		switch {
+		case request.Path == "/api/ingest/runs":
+			var body createRunRequest
+			if err := json.Unmarshal(request.Body, &body); err != nil {
+				t.Error(err)
+			}
+			uploadedModels = append(uploadedModels, body.Model)
+		case request.Path == "/api/ingest/runs/run-1/artifacts" && request.Query.Get("filename") == "digest.json":
+			uploadedDigests = append(uploadedDigests, string(request.Body))
+		}
+	}
 	if len(uploadedModels) != 2 || uploadedModels[0] != oldRecord.Model || uploadedModels[1] != oldRecord.Model {
 		t.Fatalf("uploaded models = %v, want recovered model %q twice", uploadedModels, oldRecord.Model)
 	}
@@ -541,10 +510,7 @@ func TestUploadRunRecoversInterruptedFirstProjectionCommit(t *testing.T) {
 func TestUploadRunLegacyProjectionReadOnlyBundleUsesLockFreeSnapshot(t *testing.T) {
 	runDir := writeBundle(t)
 	makeBundleDirectoryReadOnly(t, runDir)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	_, server := newUploadCapture(t)
 
 	err := UploadRun(context.Background(), Config{
 		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
@@ -562,12 +528,7 @@ func TestUploadRunLegacyProjectionReadOnlyDebrisIsTorn(t *testing.T) {
 	runDir := writeBundle(t)
 	writeFile(t, filepath.Join(runDir, ".digest.json.staged-200"), "interrupted generation\n")
 	makeBundleDirectoryReadOnly(t, runDir)
-	requests := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		requests++
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	capture, server := newUploadCapture(t)
 
 	err := UploadRun(context.Background(), Config{
 		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
@@ -576,8 +537,8 @@ func TestUploadRunLegacyProjectionReadOnlyDebrisIsTorn(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "torn bundle") || !strings.Contains(err.Error(), "requires recovery") {
 		t.Fatalf("UploadRun() error = %v, want clear torn-bundle recovery error", err)
 	}
-	if requests != 0 {
-		t.Fatalf("torn legacy bundle issued %d upload requests, want none", requests)
+	if len(capture.Requests) != 0 {
+		t.Fatalf("torn legacy bundle issued %d upload requests, want none", len(capture.Requests))
 	}
 }
 
@@ -653,12 +614,7 @@ func TestUploadRunLegacyProjectionLockFreeSnapshotStillDetectsTornGeneration(t *
 	runDir := writeBundle(t)
 	events := readTestFile(t, filepath.Join(runDir, actaevents.Filename))
 	originalMode := makeBundleDirectoryReadOnly(t, runDir)
-	requests := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		requests++
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	capture, server := newUploadCapture(t)
 
 	err := UploadRun(context.Background(), Config{
 		BackendURL: server.URL, ReportToken: "token", HTTPClient: server.Client(), RetryDelays: []time.Duration{},
@@ -677,8 +633,8 @@ func TestUploadRunLegacyProjectionLockFreeSnapshotStillDetectsTornGeneration(t *
 	if err == nil || !strings.Contains(err.Error(), "torn bundle") || !strings.Contains(err.Error(), "after 3 attempts") {
 		t.Fatalf("UploadRun() error = %v, want bounded torn-bundle error", err)
 	}
-	if requests != 0 {
-		t.Fatalf("torn lock-free bundle issued %d upload requests, want none", requests)
+	if len(capture.Requests) != 0 {
+		t.Fatalf("torn lock-free bundle issued %d upload requests, want none", len(capture.Requests))
 	}
 	if _, err := os.Stat(filepath.Join(runDir, ".projection.lock")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("lock-free torn-generation check created projection lock, stat error = %v", err)
@@ -692,12 +648,7 @@ func TestUploadRunProjectionLockWaitHonorsContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer lock.Close()
-	requests := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		requests++
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	capture, server := newUploadCapture(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -712,8 +663,8 @@ func TestUploadRunProjectionLockWaitHonorsContext(t *testing.T) {
 	if elapsed := time.Since(started); elapsed >= 2*time.Second {
 		t.Fatalf("UploadRun() returned after %s, want under 2s", elapsed)
 	}
-	if requests != 0 {
-		t.Fatalf("timed-out lock wait issued %d upload requests, want none", requests)
+	if len(capture.Requests) != 0 {
+		t.Fatalf("timed-out lock wait issued %d upload requests, want none", len(capture.Requests))
 	}
 }
 
@@ -738,36 +689,7 @@ func TestUploadRunWaitsForFirstProjectionCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var uploadedDigest string
-	var uploadedDuration int64
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/api/ingest/runs/run-1/events" {
-			var body eventsRequest
-			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
-				t.Error(err)
-			}
-			for _, event := range body.Events {
-				if event.Type == actaevents.TypeRunCompleted {
-					var payload struct {
-						DurationMillis int64 `json:"duration_ms"`
-					}
-					if err := json.Unmarshal(event.Payload, &payload); err != nil {
-						t.Error(err)
-					}
-					uploadedDuration = payload.DurationMillis
-				}
-			}
-		}
-		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" && request.URL.Query().Get("filename") == "digest.json" {
-			payload, err := io.ReadAll(request.Body)
-			if err != nil {
-				t.Error(err)
-			}
-			uploadedDigest = string(payload)
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	capture, server := newUploadCapture(t)
 
 	uploadDone := make(chan error, 1)
 	go func() {
@@ -795,6 +717,19 @@ func TestUploadRunWaitsForFirstProjectionCommit(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("UploadRun() did not resume after projection commit completed")
 	}
+	var uploadedDuration int64
+	for _, event := range capture.events(t) {
+		if event.Type == actaevents.TypeRunCompleted {
+			var payload struct {
+				DurationMillis int64 `json:"duration_ms"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Error(err)
+			}
+			uploadedDuration = payload.DurationMillis
+		}
+	}
+	uploadedDigest := string(capture.Artifacts["digest.json"].Body)
 	if uploadedDigest != newDigest || uploadedDuration != 2000 {
 		t.Fatalf("uploaded generation digest/duration = %q/%d, want new generation %q/2000", uploadedDigest, uploadedDuration, newDigest)
 	}
@@ -2273,16 +2208,11 @@ func TestUploadRunRefusesPartialLocalReasoningRedactionByDefault(t *testing.T) {
 	runDir := writeBundle(t)
 	record := testRecord(runDir)
 	record.ReasoningRedactionState = "partial"
-	requests := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		requests++
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	capture, server := newUploadCapture(t)
 
 	err := uploadToTestServer(server, record)
-	if err == nil || !strings.Contains(err.Error(), "remote upload refused") || requests != 0 {
-		t.Fatalf("partial-redaction upload error=%v requests=%d", err, requests)
+	if err == nil || !strings.Contains(err.Error(), "remote upload refused") || len(capture.Requests) != 0 {
+		t.Fatalf("partial-redaction upload error=%v requests=%d", err, len(capture.Requests))
 	}
 }
 
@@ -2305,15 +2235,13 @@ func TestUploadRunRetriesTransientFailures(t *testing.T) {
 	record := testRecord(runDir)
 
 	attempts := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, server := newUploadCapture(t, func(capturedUploadRequest) int {
 		attempts++
 		if attempts == 1 {
-			w.WriteHeader(http.StatusBadGateway)
-			return
+			return http.StatusBadGateway
 		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+		return http.StatusOK
+	})
 
 	if err := UploadRun(context.Background(), Config{
 		BackendURL:  server.URL,
@@ -2332,25 +2260,12 @@ func TestUploadRunMarksPartialUploadFailed(t *testing.T) {
 	runDir := writeBundle(t)
 	record := testRecord(runDir)
 
-	var markedFailed bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/ingest/runs":
-			w.WriteHeader(http.StatusOK)
-		case "/api/ingest/runs/run-1/events":
-			w.WriteHeader(http.StatusBadGateway)
-		case "/api/ingest/runs/run-1/complete":
-			var req completeRunRequest
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				t.Fatalf("decode complete request: %v", err)
-			}
-			markedFailed = req.Status == "failed"
-			w.WriteHeader(http.StatusOK)
-		default:
-			t.Fatalf("unexpected path %s", r.URL.Path)
+	capture, server := newUploadCapture(t, func(request capturedUploadRequest) int {
+		if request.Path == "/api/ingest/runs/run-1/events" {
+			return http.StatusBadGateway
 		}
-	}))
-	defer server.Close()
+		return http.StatusOK
+	})
 
 	err := UploadRun(context.Background(), Config{
 		BackendURL:  server.URL,
@@ -2360,6 +2275,20 @@ func TestUploadRunMarksPartialUploadFailed(t *testing.T) {
 	}, record)
 	if err == nil || !strings.Contains(err.Error(), "upload events") {
 		t.Fatalf("UploadRun() error = %v, want upload events error", err)
+	}
+	markedFailed := false
+	for _, request := range capture.Requests {
+		switch request.Path {
+		case "/api/ingest/runs", "/api/ingest/runs/run-1/events":
+		case "/api/ingest/runs/run-1/complete":
+			var req completeRunRequest
+			if err := json.Unmarshal(request.Body, &req); err != nil {
+				t.Fatalf("decode complete request: %v", err)
+			}
+			markedFailed = req.Status == "failed"
+		default:
+			t.Fatalf("unexpected path %s", request.Path)
+		}
 	}
 	if !markedFailed {
 		t.Fatal("partial upload was not marked failed")
@@ -2372,26 +2301,13 @@ func TestUploadRunMarksPartialFailureAfterCallerCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	var markedFailed bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/ingest/runs":
-			w.WriteHeader(http.StatusOK)
-		case "/api/ingest/runs/run-1/events":
+	capture, server := newUploadCapture(t, func(request capturedUploadRequest) int {
+		if request.Path == "/api/ingest/runs/run-1/events" {
 			cancel()
-			w.WriteHeader(http.StatusBadGateway)
-		case "/api/ingest/runs/run-1/complete":
-			var req completeRunRequest
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				t.Fatalf("decode complete request: %v", err)
-			}
-			markedFailed = req.Status == "failed"
-			w.WriteHeader(http.StatusOK)
-		default:
-			t.Fatalf("unexpected path %s", r.URL.Path)
+			return http.StatusBadGateway
 		}
-	}))
-	defer server.Close()
+		return http.StatusOK
+	})
 
 	err := UploadRun(ctx, Config{
 		BackendURL:  server.URL,
@@ -2401,6 +2317,20 @@ func TestUploadRunMarksPartialFailureAfterCallerCancellation(t *testing.T) {
 	}, record)
 	if err == nil || !strings.Contains(err.Error(), "upload events") {
 		t.Fatalf("UploadRun() error = %v, want canceled events upload", err)
+	}
+	markedFailed := false
+	for _, request := range capture.Requests {
+		switch request.Path {
+		case "/api/ingest/runs", "/api/ingest/runs/run-1/events":
+		case "/api/ingest/runs/run-1/complete":
+			var req completeRunRequest
+			if err := json.Unmarshal(request.Body, &req); err != nil {
+				t.Fatalf("decode complete request: %v", err)
+			}
+			markedFailed = req.Status == "failed"
+		default:
+			t.Fatalf("unexpected path %s", request.Path)
+		}
 	}
 	if !markedFailed {
 		t.Fatal("detached cleanup did not mark the partial upload failed")
@@ -2859,9 +2789,10 @@ func writeBundle(t *testing.T) string {
 }
 
 type capturedUploadRequest struct {
-	Path  string
-	Query url.Values
-	Body  []byte
+	Path   string
+	Header http.Header
+	Query  url.Values
+	Body   []byte
 }
 
 type uploadCapture struct {
@@ -2869,7 +2800,7 @@ type uploadCapture struct {
 	Artifacts map[string]capturedUploadRequest
 }
 
-func newUploadCapture(t *testing.T) (*uploadCapture, *httptest.Server) {
+func newUploadCapture(t *testing.T, respond ...func(capturedUploadRequest) int) (*uploadCapture, *httptest.Server) {
 	t.Helper()
 	capture := &uploadCapture{Artifacts: make(map[string]capturedUploadRequest)}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
@@ -2877,12 +2808,18 @@ func newUploadCapture(t *testing.T) (*uploadCapture, *httptest.Server) {
 		if err != nil {
 			t.Error(err)
 		}
-		captured := capturedUploadRequest{Path: request.URL.Path, Query: request.URL.Query(), Body: body}
+		captured := capturedUploadRequest{
+			Path: request.URL.Path, Header: request.Header.Clone(), Query: request.URL.Query(), Body: body,
+		}
 		capture.Requests = append(capture.Requests, captured)
 		if request.URL.Path == "/api/ingest/runs/run-1/artifacts" {
 			capture.Artifacts[captured.Query.Get("filename")] = captured
 		}
-		w.WriteHeader(http.StatusOK)
+		status := http.StatusOK
+		if len(respond) > 0 {
+			status = respond[0](captured)
+		}
+		w.WriteHeader(status)
 	}))
 	t.Cleanup(server.Close)
 	return capture, server

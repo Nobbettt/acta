@@ -3,10 +3,7 @@
 package schemaversion
 
 import (
-	"bytes"
 	"encoding/json"
-	"fmt"
-	"io"
 	"slices"
 	"sort"
 	"strings"
@@ -58,17 +55,8 @@ func V3OnlyFields() []Field {
 // document. Presence, rather than the decoded Go zero value, is significant:
 // false, zero, and null still name a field unavailable in schema v2.
 func PresentV3OnlyFieldsJSON(documentType DocumentType, data []byte) ([]string, error) {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.UseNumber()
 	var document any
-	if err := decoder.Decode(&document); err != nil {
-		return nil, err
-	}
-	var extra any
-	if err := decoder.Decode(&extra); err != io.EOF {
-		if err == nil {
-			return nil, fmt.Errorf("multiple JSON values")
-		}
+	if err := json.Unmarshal(data, &document); err != nil {
 		return nil, err
 	}
 	return presentV3OnlyFields(documentType, document), nil
