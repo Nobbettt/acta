@@ -150,14 +150,14 @@ func TestRunCreditsControlAccessForAgentWritableDir(t *testing.T) {
 	t.Cleanup(func() { _ = os.RemoveAll(stagingBase) })
 	lookupUserCacheDir = func() (string, error) { return stagingBase, nil }
 	lookupUserHomeDir = func() (string, error) { return "", errors.New("disabled for test") }
-	controlDir := filepath.Join(cwd, ".kiwi-stage-control")
+	controlDir := filepath.Join(cwd, ".stage-control")
 	if err := os.Mkdir(controlDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	fakeBin := t.TempDir()
 	writeFakeAgent(t, fakeBin, "codex", `#!/bin/sh
 cat >/dev/null
-printf '%s\n' '{"type":"item.completed","item":{"id":"control-read","type":"command_execution","command":"cat .kiwi-stage-control/result.json","status":"completed","exit_code":0,"aggregated_output":"{}\\n"}}'
+printf '%s\n' '{"type":"item.completed","item":{"id":"control-read","type":"command_execution","command":"cat .stage-control/result.json","status":"completed","exit_code":0,"aggregated_output":"{}\\n"}}'
 printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}'
 `)
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -182,7 +182,7 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens
 		t.Fatal(err)
 	}
 	for _, event := range got.Timeline {
-		if event.Kind == digest.KindCommand && event.Command == "cat .kiwi-stage-control/result.json" {
+		if event.Kind == digest.KindCommand && event.Command == "cat .stage-control/result.json" {
 			if !slices.Contains(event.Categories, "control.access") {
 				t.Fatalf("command categories = %v, want control.access", event.Categories)
 			}
