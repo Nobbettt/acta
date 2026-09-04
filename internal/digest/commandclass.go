@@ -327,6 +327,13 @@ func splitRawChain(command string) ([]commandChainRaw, bool) {
 			// duplication, e.g. `2>&1`) and `&>`/`&>>` (redirect both streams)
 			// are excluded — that `&` is not the detach operator.
 			afterRedirect := i > 0 && (command[i-1] == '>' || command[i-1] == '<')
+			if afterRedirect {
+				backslashes := 0
+				for j := i - 2; j >= 0 && command[j] == '\\'; j-- {
+					backslashes++
+				}
+				afterRedirect = backslashes%2 == 0
+			}
 			beforeRedirect := i+1 < len(command) && command[i+1] == '>'
 			if !afterRedirect && !beforeRedirect {
 				async = true
@@ -679,9 +686,8 @@ func (f *commandFacts) merge(other *commandFacts) {
 	for _, target := range other.targets {
 		appendCommandTarget(f, target)
 	}
-	// Deduped the same way as targets: `rm a.txt a.txt` and `rm x && rm x` are
-	// both a single real deletion, and a consumer of the file timeline must
-	// never see it reported twice.
+	// Deduped within this merge scope. classifyCommand uses one scope per shell
+	// segment so repeated operands collapse without erasing a later real change.
 	for _, mutation := range other.mutations {
 		appendShellMutation(f, mutation)
 	}
@@ -757,6 +763,7 @@ func classifyCommand(command, outputText string, exitOK bool, ws *workspace) *co
 	output := trustedOutput(chainSegmentTexts(chain), outputText)
 	facts := &commandFacts{}
 	for _, c := range chain {
+		segmentFacts := &commandFacts{}
 		tokens := tokensForSegment(c.raw)
 		segment := commandSegment{
 			raw:          c.raw,
@@ -768,7 +775,7 @@ func classifyCommand(command, outputText string, exitOK bool, ws *workspace) *co
 			cwdUncertain: c.cwdUncertain,
 		}
 		for _, classify := range segmentClassifiers {
-			facts.merge(classify(segment))
+			segmentFacts.merge(classify(segment))
 		}
 		if c.cwdUncertain {
 			probe := segment
@@ -776,11 +783,17 @@ func classifyCommand(command, outputText string, exitOK bool, ws *workspace) *co
 			if fsFacts := classifyFS(probe); fsFacts != nil {
 				for _, category := range fsFacts.categories {
 					if strings.HasPrefix(category, "fs.") {
-						facts.merge(&commandFacts{categories: []string{category}})
+						segmentFacts.merge(&commandFacts{categories: []string{category}})
 					}
 				}
 			}
 		}
+		// Categories and targets are command-wide sets. Mutations are only a set
+		// within one segment: a later segment may recreate and mutate the same path.
+		mutations := segmentFacts.mutations
+		segmentFacts.mutations = nil
+		facts.merge(segmentFacts)
+		facts.mutations = append(facts.mutations, mutations...)
 	}
 	if len(chain) > 0 && chain[0].cwdUncertain {
 		facts.taintPaths()

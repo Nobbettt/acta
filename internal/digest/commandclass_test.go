@@ -420,19 +420,17 @@ func TestClaudeFailedCommandWithoutIsErrorCreditsNothing(t *testing.T) {
 	}
 }
 
-// A duplicate operand within one segment, or the same mutating command
-// repeated across segments, is still a single real change: a consumer of the
-// file timeline must never see it reported twice.
-func TestClassifyCommandDedupesMutations(t *testing.T) {
+// A duplicate operand within one segment is one real change. The same mutation
+// in two segments is two changes when another command recreated the path in
+// between, so deduplication must not span the whole command.
+func TestClassifyCommandDedupesMutationsWithinEachSegment(t *testing.T) {
 	cases := []struct {
 		name    string
 		command string
+		want    int
 	}{
-		{"repeated operand in one segment", "rm a.txt a.txt"},
-		// Plain `rm`, not `rm -f`: a forced remove is a conditional mode whose
-		// outcome the command text cannot prove, so it emits no mutation at all
-		// and would make this dedupe case vacuous.
-		{"same delete repeated across segments", "rm log.txt && rm log.txt"},
+		{"repeated operand in one segment", "rm a.txt a.txt", 1},
+		{"path recreated between deletes", "rm a.txt && touch a.txt && rm a.txt", 2},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -440,8 +438,8 @@ func TestClassifyCommandDedupesMutations(t *testing.T) {
 			if facts == nil {
 				t.Fatalf("classifyCommand(%q) credited nothing", c.command)
 			}
-			if len(facts.mutations) != 1 {
-				t.Errorf("mutations = %+v, want exactly one", facts.mutations)
+			if len(facts.mutations) != c.want {
+				t.Errorf("mutations = %+v, want exactly %d", facts.mutations, c.want)
 			}
 		})
 	}
@@ -961,6 +959,21 @@ func TestClassifyCommandSuppressesStateChangeAcrossBackgroundedList(t *testing.T
 				t.Errorf("mutations = %+v, want none: nothing in the backgrounded list is proven to have run to completion", facts.mutations)
 			}
 		})
+	}
+}
+
+// An escaped `>` or `<` is an ordinary argument character, not the first half
+// of an fd-duplication operator. A live `&` immediately after it still
+// backgrounds the whole preceding AND-list and revokes its exit-status proof.
+func TestClassifyCommandDoesNotHideBackgroundAfterEscapedRedirection(t *testing.T) {
+	for _, command := range []string{`rm a.txt && printf x\>&`, `rm a.txt && printf x\<&`} {
+		facts := classifyCommand(command, "", true, testWorkspace())
+		if facts == nil || !slices.Contains(facts.categories, "process.background") {
+			t.Fatalf("classifyCommand(%q) = %+v, want process.background", command, facts)
+		}
+		if slices.Contains(facts.categories, "fs.delete") || len(facts.mutations) != 0 {
+			t.Errorf("classifyCommand(%q) = %+v, want no deletion without foreground exit-status proof", command, facts)
+		}
 	}
 }
 
