@@ -289,6 +289,8 @@ func scanCommandArgs(args []string, model commandFlagModel) commandArgScan {
 				value = args[i]
 			}
 			scan.flags = append(scan.flags, commandFlag{name: name, value: value, arity: arity, index: argIndex})
+		case len(arg) >= 3 && arg[2] == '=' && model[arg[:2]] == flagBoolean:
+			scan.flags = append(scan.flags, commandFlag{name: arg[:2], value: arg[3:], arity: flagBoolean, index: argIndex})
 		case model[arg] != 0:
 			arity := model[arg]
 			value := ""
@@ -427,7 +429,7 @@ func fsSourceBasenameIsDotOrDotDot(src string) bool {
 // destination is a directory before path cleaning discards that syntax.
 func fsDestinationNamesDirectory(dest string) bool {
 	dest = strings.TrimRight(filepath.ToSlash(strings.TrimSpace(dest)), "/")
-	return strings.HasSuffix(dest, "/.")
+	return dest != "" && (path.Base(dest) == "." || path.Base(dest) == "..")
 }
 
 // fsIsWorkspaceRoot reports whether operand names the workspace root itself.

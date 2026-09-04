@@ -239,6 +239,11 @@ func TestClassifyFS(t *testing.T) {
 			targets:    fsPathTargets("src.txt", "dest/src.txt"),
 			mutations:  []ShellMutation{{Kind: "move", From: "src.txt", To: "dest/src.txt"}},
 		}},
+		{"mv into a dot-dot-suffixed directory names the real destination", "mv a.txt dir/sub/..", true, &commandFacts{
+			categories: []string{"fs.move"},
+			targets:    fsPathTargets("a.txt", "dir/a.txt"),
+			mutations:  []ShellMutation{{Kind: "move", From: "a.txt", To: "dir/a.txt"}},
+		}},
 		{"mv into a directory outside the workspace escapes", "mv old.txt /tmp/", true, &commandFacts{
 			categories: []string{"workspace.escape"},
 		}},
@@ -428,6 +433,10 @@ func TestClassifyFS(t *testing.T) {
 		{"cp into a dot-suffixed directory names the real destination", "cp a.txt backup/.", true, &commandFacts{
 			categories: []string{"fs.create"},
 			targets:    fsPathTargets("backup/a.txt"),
+		}},
+		{"cp into a dot-dot-suffixed directory names the real destination", "cp a.txt dir/sub/..", true, &commandFacts{
+			categories: []string{"fs.create"},
+			targets:    fsPathTargets("dir/a.txt"),
 		}},
 		{"cp into a directory outside the workspace escapes", "cp a.txt /tmp/", true, &commandFacts{
 			categories: []string{"workspace.escape"},
@@ -802,6 +811,7 @@ func TestDisabledBooleanFlagsDoNotEnableModes(t *testing.T) {
 	}{
 		{"npm global false stays local", "npm install --global=false left-pad", "package.install", "workspace.escape"},
 		{"compose detach false stays foreground", "docker compose up --detach=false", "container.run", "process.background"},
+		{"compose short detach false stays foreground", "docker compose up -d=false", "container.run", "process.background"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

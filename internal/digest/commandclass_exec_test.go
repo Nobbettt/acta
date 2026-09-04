@@ -225,6 +225,12 @@ func TestClassifyExecNetworkEgress(t *testing.T) {
 			targets: host("build.example.com"),
 		},
 		{
+			name:    "rsync treats https spelling as remote shell syntax",
+			command: "rsync https://example.com/a ./a",
+			failed:  true,
+			want:    []string{"network.egress"},
+		},
+		{
 			name:    "nc host and port",
 			command: "nc build.example.com 443",
 			want:    []string{"network.egress"},
@@ -823,6 +829,11 @@ func TestClassifyExecSearchQuery(t *testing.T) {
 			command: "grep -eTODO src/main.go",
 			want:    []string{"search.query"},
 		},
+		{
+			name:    "explicitly empty regexp is still a query",
+			command: "grep -e '' src/main.go",
+			want:    []string{"search.query"},
+		},
 		// Negatives: a search scoped to one file, whose output actually proves
 		// content came back, is a file read (retrievalFromCommand), not a query.
 		{
@@ -837,6 +848,8 @@ func TestClassifyExecSearchQuery(t *testing.T) {
 		},
 		{name: "grep downstream of a pipe", command: "git log --oneline | grep fix"},
 		{name: "echoed rg", command: "echo rg TODO internal"},
+		{name: "bare grep has no query", command: "grep", failed: true},
+		{name: "bare rg has no query", command: "rg", failed: true},
 		// Regression: retrievalFromCommand additionally requires
 		// searchCommandCanExposeFileContent before it credits a single-file
 		// scope as a read. When that predicate does not hold, nothing else
@@ -919,9 +932,8 @@ func TestClassifyExecContainerAndBackground(t *testing.T) {
 			// own args there, so the pattern is not recovered — a miss, not a
 			// mislabel, which is the correct trade per the "prove it or credit
 			// nothing" rule. It must still not be credited process.background.
-			name:    "quoted ampersand argument to rg is a search, not a detach",
+			name:    "quoted ampersand argument to rg is not a detach",
 			command: "rg '&'",
-			want:    []string{"search.query"},
 		},
 		{
 			// Regression: a backslash-escaped "&" is a literal argument
@@ -996,6 +1008,10 @@ func TestClassifyExecArchiveAndPermission(t *testing.T) {
 		{name: "tar long outside destination escapes the workspace", command: "tar --directory=/tmp -xf release.tgz", want: []string{"workspace.escape"}},
 		{name: "tar traversal destination escapes the workspace", command: "tar -C ../other -xf release.tgz", want: []string{"workspace.escape"}},
 		{name: "tar later outside destination escapes the workspace", command: "tar -C build -C /tmp -xf release.tgz", want: []string{"workspace.escape"}},
+		{name: "tar repeated relative destinations return to workspace", command: "tar -C build -C .. -xf release.tgz", want: []string{"archive.extract"}},
+		{name: "tar repeated relative destinations after archive return to workspace", command: "tar -xf release.tgz -C build -C ..", want: []string{"archive.extract"}},
+		{name: "tar repeated relative destinations leave workspace", command: "tar -C build -C ../.. -xf release.tgz", want: []string{"workspace.escape"}},
+		{name: "tar old-style options bind directory before archive", command: "tar xCf /tmp release.tgz", want: []string{"workspace.escape"}},
 		{name: "unzip outside destination escapes the workspace", command: "unzip bundle.zip -d /tmp/out", want: []string{"workspace.escape"}},
 		{name: "unzip attached outside destination escapes the workspace", command: "unzip bundle.zip -d/tmp/out", want: []string{"workspace.escape"}},
 		{name: "unzip traversal destination escapes the workspace", command: "unzip bundle.zip -d ../other", want: []string{"workspace.escape"}},
@@ -1105,6 +1121,28 @@ func TestClassifyExecArchiveAndPermission(t *testing.T) {
 			targets: urlTarget("https://example.com"),
 		},
 	})
+}
+
+func TestClassifyCommandPreservesPathOperandWhitespace(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		path    string
+	}{
+		{name: "trailing space", command: "rm 'victim '", path: "victim "},
+		{name: "leading space", command: "rm ' victim'", path: " victim"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			facts := classifyCommand(tt.command, "", true, testWorkspace())
+			wantTargets := []CommandTarget{{Kind: "path", Value: tt.path}}
+			wantMutations := []ShellMutation{{Kind: "delete", Path: tt.path}}
+			if facts == nil || !reflect.DeepEqual(facts.categories, []string{"fs.delete"}) ||
+				!reflect.DeepEqual(facts.targets, wantTargets) || !reflect.DeepEqual(facts.mutations, wantMutations) {
+				t.Fatalf("classifyCommand(%q) = %+v, want path %q", tt.command, facts, tt.path)
+			}
+		})
+	}
 }
 
 func TestClassifyCommandWithholdsUnprovenPackageInstalls(t *testing.T) {

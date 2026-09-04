@@ -341,6 +341,28 @@ func TestWorkspaceRelPortableWindowsPath(t *testing.T) {
 	}
 }
 
+func TestNormalizeWorkspacePathPreservesWhitespace(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+		ok    bool
+	}{
+		{name: "trailing space", value: "victim ", want: "victim ", ok: true},
+		{name: "leading space", value: " victim", want: " victim", ok: true},
+		{name: "space-only filename", value: " ", want: " ", ok: true},
+		{name: "empty operand", value: "", ok: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := normalizeWorkspacePath(tt.value, testWorkspace())
+			if got != tt.want || ok != tt.ok {
+				t.Fatalf("normalizeWorkspacePath(%q) = %q, %v; want %q, %v", tt.value, got, ok, tt.want, tt.ok)
+			}
+		})
+	}
+}
+
 func TestInferSearchFileStepFromPath(t *testing.T) {
 	ws := testWorkspace()
 	if s := inferSearchFileStepFromPath("pkg/mod.py", "match found", ws); s == nil || s.files[0] != "pkg/mod.py" {

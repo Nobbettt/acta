@@ -321,6 +321,9 @@ func gitInvocation(tokens []string) (verb string, args []string, redirected, inf
 		if flag.index >= verbIndex {
 			continue
 		}
+		if flag.arity == 0 {
+			return "", nil, false, false, false
+		}
 		if slices.Contains(gitRepoRedirectFlags, flag.name) {
 			redirected = true
 		}
@@ -424,7 +427,13 @@ func gitRemoteOrigin(raw string) string {
 		return ""
 	}
 	if u, err := neturl.Parse(sanitized); err == nil && u.Scheme != "" && u.Host != "" {
-		return u.Scheme + "://" + u.Host
+		scheme := strings.ToLower(u.Scheme)
+		switch scheme {
+		case "http", "https", "ssh", "git", "rsync", "git+http", "git+https", "git+ssh", "git+git":
+			return scheme + "://" + u.Host
+		default:
+			return ""
+		}
 	}
 	// scp-like: [user@]host:path. Only this exact shape is accepted — a
 	// `user@host` prefix followed by a colon before the path — because the

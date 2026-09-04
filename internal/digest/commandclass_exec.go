@@ -137,7 +137,9 @@ func execFacts(category string, targets ...CommandTarget) *commandFacts {
 // unknown kinds fail closed, URL-bearing values are reduced to an origin, and
 // shell expressions that this package never expands are rejected.
 func appendCommandTarget(facts *commandFacts, target CommandTarget) {
-	target.Value = strings.TrimSpace(target.Value)
+	if target.Kind != "path" {
+		target.Value = strings.TrimSpace(target.Value)
+	}
 	if target.Value == "" {
 		return
 	}
@@ -233,7 +235,7 @@ func execNetwork(cmd execCommand) *commandFacts {
 	}
 	operands := scan.operands
 	if cmd.word != "ssh" {
-		if url := execFirstURL(operands); url != "" {
+		if url := execFirstURL(cmd.word, operands); url != "" {
 			return execFacts("network.egress", CommandTarget{Kind: "url", Value: url})
 		}
 	}
@@ -255,10 +257,11 @@ func execNetwork(cmd execCommand) *commandFacts {
 // execFirstURL returns the safe origin of the first URL argument. URL paths can
 // carry credentials just as readily as userinfo and query strings, so network
 // and VCS targets share gitRemoteOrigin and never publish them.
-func execFirstURL(args []string) string {
+func execFirstURL(word string, args []string) string {
 	for _, arg := range args {
-		if strings.HasPrefix(arg, "http://") || strings.HasPrefix(arg, "https://") ||
-			strings.HasPrefix(arg, "rsync://") {
+		if (word == "curl" || word == "wget") &&
+			(strings.HasPrefix(arg, "http://") || strings.HasPrefix(arg, "https://")) ||
+			word == "rsync" && strings.HasPrefix(arg, "rsync://") {
 			return gitRemoteOrigin(arg)
 		}
 	}
@@ -382,11 +385,11 @@ func execRemoteHost(word string, operands []string) string {
 	return ""
 }
 
-// execHostFromSpec pulls the host out of an `[user@]host:path` operand.
+// execHostFromSpec pulls the host spelling out of an `[user@]host:path`
+// operand. appendCommandTarget applies the stricter publication-safe host
+// grammar; returning an unsafe spelling still lets the remote form prove a
+// target-free network.egress.
 func execHostFromSpec(operand string) string {
-	if strings.Contains(operand, "://") {
-		return ""
-	}
 	if at := strings.LastIndexByte(operand, '@'); at >= 0 {
 		if strings.Contains(operand[:at], "/") {
 			return ""
@@ -398,13 +401,13 @@ func execHostFromSpec(operand string) string {
 		if close <= 1 || close+1 >= len(operand) || operand[close+1] != ':' {
 			return ""
 		}
-		return execHostName(operand[1:close])
+		return operand[1:close]
 	}
 	colon := strings.IndexByte(operand, ':')
 	if colon <= 0 || strings.Contains(operand[:colon], "/") {
 		return ""
 	}
-	return execHostName(operand[:colon])
+	return operand[:colon]
 }
 
 func execHostName(operand string) string {
@@ -743,14 +746,19 @@ func execSearch(cmd execCommand) *commandFacts {
 	if cmd.word != "rg" && cmd.word != "grep" {
 		return nil
 	}
+	scan := scanCommandArgs(cmd.args, execSearchFlagModelFor(cmd.word))
 	if cmd.word == "rg" {
-		scan := scanCommandArgs(cmd.args, execSearchRGFlagModel)
 		if scan.hasFlag("--files", "--type-list") {
 			return nil
 		}
 		if _, ok := scan.flagValue("--generate"); ok {
 			return nil
 		}
+	}
+	_, hasRegexp := scan.flagValue("-e", "--regexp")
+	_, hasPatternFile := scan.flagValue("-f", "--file")
+	if len(scan.operands) == 0 && !hasRegexp && !hasPatternFile {
+		return nil
 	}
 	if explicitSingleSearchFile(cmd.seg.tokens, cmd.seg.ws) != "" &&
 		searchCommandCanExposeFileContent(cmd.seg.tokens, cmd.seg.output) {
@@ -901,11 +909,41 @@ func execTarExtract(args []string) bool {
 }
 
 func execTarScan(args []string) commandArgScan {
-	scan := scanCommandArgs(args, execTarFlagModel)
-	if len(args) != 0 && !strings.HasPrefix(args[0], "-") {
-		oldStyle := append([]string{"-" + args[0]}, args[1:]...)
-		scan = scanCommandArgs(oldStyle, execTarFlagModel)
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return scanCommandArgs(args, execTarFlagModel)
 	}
+	var scan commandArgScan
+	next := 1
+	for _, letter := range args[0] {
+		name := "-" + string(letter)
+		arity := execTarFlagModel[name]
+		if arity == 0 {
+			scan.unknownFlag = true
+			scan.flags = append(scan.flags, commandFlag{name: name})
+			continue
+		}
+		flag := commandFlag{name: name, arity: arity}
+		if arity == flagValue {
+			if next >= len(args) {
+				scan.unknownFlag = true
+			} else {
+				flag.value = args[next]
+				next++
+			}
+		}
+		scan.flags = append(scan.flags, flag)
+	}
+	rest := scanCommandArgs(args[next:], execTarFlagModel)
+	for i := range rest.flags {
+		rest.flags[i].index += next
+	}
+	for i := range rest.operandIndexes {
+		rest.operandIndexes[i] += next
+	}
+	scan.flags = append(scan.flags, rest.flags...)
+	scan.operands = append(scan.operands, rest.operands...)
+	scan.operandIndexes = append(scan.operandIndexes, rest.operandIndexes...)
+	scan.unknownFlag = scan.unknownFlag || rest.unknownFlag
 	return scan
 }
 
@@ -954,10 +992,11 @@ func execArchive(cmd execCommand) *commandFacts {
 	case "unzip":
 		scan, destinations = scanCommandArgs(cmd.args, execUnzipFlagModel), []string{"-d"}
 	}
-	if execArchiveDestinationsEscapeWorkspace(cmd, scan, destinations...) {
+	inside, escaped := execArchiveDestinationsWorkspace(cmd, scan, destinations...)
+	if escaped {
 		return execFacts("workspace.escape")
 	}
-	if !execArchiveDestinationsTargetWorkspace(cmd, scan, destinations...) {
+	if !inside {
 		return nil
 	}
 	return execFacts("archive.extract")
@@ -976,29 +1015,57 @@ func execOutputTargetsWorkspaceFile(cmd execCommand, model commandFlagModel, sho
 	return execArchivePathTargetsWorkspace(cmd, value)
 }
 
-// execArchiveDestinationsTargetWorkspace applies the same disk-path gate to
-// every archive destination flag. Repeated flags are all required to resolve
-// inside the workspace; accepting only the first would let a later -C/-d
-// redirect the extraction elsewhere.
-func execArchiveDestinationsTargetWorkspace(cmd execCommand, scan commandArgScan, names ...string) bool {
-	for _, flag := range scan.flags {
-		if slices.Contains(names, flag.name) {
-			if _, ok := fsDirectoryPath(flag.value, cmd.seg.ws, cmd.seg.cwdUncertain); !ok {
-				return false
+// execArchiveDestinationsWorkspace resolves the directory where extraction
+// lands. tar applies each relative -C from the directory established by the
+// preceding one; unzip's -d values remain relative to the command's cwd.
+func execArchiveDestinationsWorkspace(cmd execCommand, scan commandArgScan, names ...string) (inside, escaped bool) {
+	if cmd.word == "tar" {
+		base := canonicalWorkspacePath(cmd.seg.ws.root)
+		if base == "." {
+			base = ""
+		}
+		known, seen := !cmd.seg.cwdUncertain, false
+		for _, flag := range scan.flags {
+			if !slices.Contains(names, flag.name) {
+				continue
+			}
+			seen = true
+			if flag.value == "" || strings.ContainsAny(flag.value, fsShellMetacharacters) {
+				known = false
+				continue
+			}
+			value := canonicalWorkspacePath(flag.value)
+			if fsOperandAbsolute(flag.value) || isPortableAbsolute(value) {
+				base, known = value, true
+			} else if known {
+				base = path.Join(base, value)
 			}
 		}
+		if !seen {
+			return true, false
+		}
+		if !known {
+			return false, false
+		}
+		if _, ok := fsDirectoryPath(base, cmd.seg.ws, false); ok {
+			return true, false
+		}
+		return false, fsEscapes([]string{base}, cmd.seg.ws, false)
 	}
-	return true
-}
 
-func execArchiveDestinationsEscapeWorkspace(cmd execCommand, scan commandArgScan, names ...string) bool {
+	inside = true
 	for _, flag := range scan.flags {
-		if slices.Contains(names, flag.name) && strings.TrimSpace(flag.value) != "" &&
-			fsEscapes([]string{flag.value}, cmd.seg.ws, cmd.seg.cwdUncertain) {
-			return true
+		if !slices.Contains(names, flag.name) {
+			continue
+		}
+		if _, ok := fsDirectoryPath(flag.value, cmd.seg.ws, cmd.seg.cwdUncertain); !ok {
+			inside = false
+		}
+		if flag.value != "" && fsEscapes([]string{flag.value}, cmd.seg.ws, cmd.seg.cwdUncertain) {
+			escaped = true
 		}
 	}
-	return false
+	return inside, escaped
 }
 
 func execArchivePathTargetsWorkspace(cmd execCommand, value string) bool {

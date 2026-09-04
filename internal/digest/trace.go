@@ -111,7 +111,7 @@ func togglePrivatePrefix(p string) string {
 }
 
 func canonicalWorkspacePath(value string) string {
-	return path.Clean(strings.ReplaceAll(filepath.ToSlash(strings.TrimSpace(value)), `\`, "/"))
+	return path.Clean(strings.ReplaceAll(filepath.ToSlash(value), `\`, "/"))
 }
 
 func isPortableAbsolute(value string) bool {
@@ -149,15 +149,14 @@ func (w *workspace) rel(p string) (string, bool) {
 // accepts ordinary relative tool paths, but rejects traversal such as ../x and
 // absolute paths that workspace.rel could not relativize.
 func normalizeWorkspacePath(value string, ws *workspace) (string, bool) {
-	raw := strings.TrimSpace(value)
-	if raw == "" {
+	if value == "" {
 		return "", false
 	}
-	normalized, ok := ws.rel(raw)
+	normalized, ok := ws.rel(value)
 	if !ok {
 		return "", false
 	}
-	normalized = path.Clean(filepath.ToSlash(strings.TrimSpace(normalized)))
+	normalized = path.Clean(filepath.ToSlash(normalized))
 	if normalized == "" || normalized == "." || normalized == ".." || strings.HasPrefix(normalized, "/") {
 		return "", false
 	}

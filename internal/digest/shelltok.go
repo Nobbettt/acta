@@ -64,7 +64,7 @@ func shellTokens(s string) []string {
 			current.WriteByte(s[i+1])
 			inToken = true
 			i += 2
-		case ' ', '\t', '\n', '\r':
+		case ' ', '\t', '\n':
 			flush()
 			i++
 		case '<', '>', '|', '&', ';':
@@ -87,6 +87,12 @@ func shellTokens(s string) []string {
 	}
 	flush()
 	return tokens
+}
+
+// trimShellWhitespace removes only characters that separate shell words or
+// command lines. A carriage return is an ordinary byte in a POSIX shell word.
+func trimShellWhitespace(s string) string {
+	return strings.Trim(s, " \t\n")
 }
 
 func removeShellLineContinuations(s string) string {

@@ -223,14 +223,14 @@ func splitRawChain(command string) ([]commandChainRaw, bool) {
 	hasSubshell := false
 	piped, async := false, false
 	appendChain := func(segment, sep string) {
-		if s := strings.TrimSpace(removeShellLineContinuations(segment)); s != "" {
+		if s := trimShellWhitespace(removeShellLineContinuations(segment)); s != "" {
 			raw = append(raw, commandChainRaw{raw: s, rawUntrimmed: segment, sep: sep, piped: piped, async: async})
 		}
 		piped, async = false, false
 	}
 	sep, start, pipelineStageStart := "", 0, 0
 	emptyStage := func(begin, end int) bool {
-		return strings.TrimSpace(removeShellLineContinuations(command[begin:end])) == ""
+		return trimShellWhitespace(removeShellLineContinuations(command[begin:end])) == ""
 	}
 	emptyPipelineTail := func(end int) bool {
 		return piped && emptyStage(pipelineStageStart, end)
@@ -252,6 +252,10 @@ func splitRawChain(command string) ([]commandChainRaw, bool) {
 		case c == '"' && !inSingle:
 			inDouble = !inDouble
 			wordStart = false
+		case c == '`' && !inSingle:
+			// A command substitution has its own control flow and exit statuses.
+			// None of its apparent commands may borrow the outer command's status.
+			return nil, false
 		case inSingle || inDouble:
 			// inside a quote: none of the separators below count
 		case c == '#' && wordStart:
@@ -261,7 +265,7 @@ func splitRawChain(command string) ([]commandChainRaw, bool) {
 			// physical line; `&&` still relates a to b and is therefore still
 			// part of the exit-status proof. A comment after real command text
 			// instead contributes its newline as the next separator.
-			if strings.TrimSpace(command[start:i]) != "" {
+			if trimShellWhitespace(command[start:i]) != "" {
 				if emptyPipelineTail(i) {
 					valid = false
 				}
@@ -278,13 +282,13 @@ func splitRawChain(command string) ([]commandChainRaw, bool) {
 			pipelineStageStart = start
 			wordStart = true
 			i = start - 1 // the loop's i++ resumes the scan at start
-		case c == ' ' || c == '\t' || c == '\r':
+		case c == ' ' || c == '\t':
 			wordStart = true
 		case c == '\n':
 			if emptyPipelineTail(i) {
 				valid = false
 			}
-			if strings.TrimSpace(command[start:i]) != "" {
+			if trimShellWhitespace(command[start:i]) != "" {
 				appendChain(command[start:i], sep)
 				sep = "\n"
 			} else if sep != "&&" && sep != "||" {
@@ -298,7 +302,7 @@ func splitRawChain(command string) ([]commandChainRaw, bool) {
 			if emptyPipelineTail(i) {
 				valid = false
 			}
-			if (sep == "&&" || sep == "||") && strings.TrimSpace(command[start:i]) == "" {
+			if emptyStage(start, i) {
 				valid = false
 			}
 			appendChain(command[start:i], sep)
@@ -309,7 +313,7 @@ func splitRawChain(command string) ([]commandChainRaw, bool) {
 			if emptyPipelineTail(i) {
 				valid = false
 			}
-			if strings.TrimSpace(command[start:i]) == "" {
+			if trimShellWhitespace(command[start:i]) == "" {
 				valid = false
 			}
 			appendChain(command[start:i], sep)
@@ -343,7 +347,7 @@ func splitRawChain(command string) ([]commandChainRaw, bool) {
 			if emptyPipelineTail(i) {
 				valid = false
 			}
-			if strings.TrimSpace(command[start:i]) == "" {
+			if trimShellWhitespace(command[start:i]) == "" {
 				valid = false
 			}
 			appendChain(command[start:i], sep)
@@ -379,7 +383,7 @@ func splitRawChain(command string) ([]commandChainRaw, bool) {
 	if emptyPipelineTail(len(command)) {
 		valid = false
 	}
-	if (sep == "&&" || sep == "||") && strings.TrimSpace(command[start:]) == "" {
+	if (sep == "&&" || sep == "||") && trimShellWhitespace(command[start:]) == "" {
 		valid = false
 	}
 	appendChain(command[start:], sep)
@@ -548,8 +552,9 @@ var unmodelledShellWords = []string{
 
 // commandSyntaxModelled rejects shell shapes this classifier cannot prove it
 // has segmented correctly. Compound bodies can put an apparent command in a
-// branch that never ran, and a redirection without a word is a parse error
-// that prevents its command from starting at all.
+// branch that never ran, option-bearing set can change later control flow,
+// and a redirection without a word is a parse error that prevents its command
+// from starting at all.
 func commandSyntaxModelled(raw []commandChainRaw) bool {
 	for _, r := range raw {
 		if r.subshell {
@@ -557,8 +562,9 @@ func commandSyntaxModelled(raw []commandChainRaw) bool {
 		}
 		tokens := tokensForSegment(r.raw)
 		leading := execLeadingTokens(tokens)
-		if len(tokens) == 0 || len(leading) > 0 && (slices.Contains(unmodelledShellWords, leading[0]) ||
-			strings.HasSuffix(leading[0], "()")) || !redirectionsComplete(tokens) {
+		if len(tokens) == 0 || len(tokens) > 1 && slices.Contains(tokens, "set") ||
+			len(leading) > 0 && (slices.Contains(unmodelledShellWords, leading[0]) ||
+				strings.HasSuffix(leading[0], "()")) || !redirectionsComplete(tokens) {
 			return false
 		}
 	}
@@ -806,10 +812,13 @@ func classifyCommand(command, outputText string, exitOK bool, ws *workspace) *co
 }
 
 // changesWorkingDirectory taints the whole command whenever cd, pushd or popd
-// appears as a standalone token anywhere. It deliberately does not try to
-// enumerate wrappers: losing a path target because an argument merely mentions
-// cd is safer than resolving a real cwd-changing command against the wrong root.
+// appears as a standalone token anywhere, or a parent-shell code loader could
+// run one invisibly. Losing a path target is safer than resolving a real
+// cwd-changing command against the wrong root.
 func changesWorkingDirectory(tokens []string) bool {
+	if shellStageStartsWith(tokens, "eval", "source", ".") {
+		return true
+	}
 	return slices.ContainsFunc(tokens, func(token string) bool {
 		return token == "cd" || token == "pushd" || token == "popd"
 	})

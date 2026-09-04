@@ -54,6 +54,7 @@ func TestClassifyVCSCategories(t *testing.T) {
 		{"assignment ending in git does not hide later redirect", "PATH_TO_GIT=/usr/bin/git GIT_DIR=/tmp/other/.git git commit -m x", true, nil},
 		// a read is an observation, so it survives a nonzero exit
 		{"failed status still read", "git status", false, []string{"vcs.read"}},
+		{"failed unknown global option never invokes status", "git --definitely-unknown status", false, nil},
 		{"status help credits nothing", "git status --help", true, nil},
 		{"global help before mutation credits nothing", "git --help commit", true, nil},
 		{"global version before mutation credits nothing", "git --version commit", true, nil},
@@ -356,6 +357,12 @@ func TestClassifyVCSProvenanceTargets(t *testing.T) {
 			"ambiguous schemeless userinfo is dropped closed",
 			"git remote -v",
 			"origin\tuser@host/path\t(fetch)\n",
+			nil,
+		},
+		{
+			"unknown remote scheme is dropped closed",
+			"git remote -v",
+			"origin\tsecret123://example.com/repo\t(fetch)\n",
 			nil,
 		},
 	}
