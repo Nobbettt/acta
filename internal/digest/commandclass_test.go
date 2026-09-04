@@ -165,10 +165,7 @@ func TestCommandFactsMergeSanitizesTargetsAndMutations(t *testing.T) {
 	}
 	facts := &commandFacts{}
 	facts.merge(raw)
-	if want := []CommandTarget{
-		{Kind: "url", Value: "https://example.test"},
-		{Kind: "package", Value: "git+https://packages.example.test"},
-	}; !reflect.DeepEqual(facts.targets, want) {
+	if want := []CommandTarget{{Kind: "url", Value: "https://example.test"}}; !reflect.DeepEqual(facts.targets, want) {
 		t.Fatalf("merged targets = %+v, want %+v", facts.targets, want)
 	}
 	if want := []ShellMutation{{Kind: "move", From: "old.txt", To: "new.txt"}}; !reflect.DeepEqual(facts.mutations, want) {

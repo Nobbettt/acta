@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/nobbettt/acta/internal/reasoning"
 )
 
 type commandCorpusWant struct {
@@ -21,13 +23,11 @@ type commandCorpusWant struct {
 type commandCorpusCase struct {
 	Command string `json:"command"`
 	commandCorpusWant
-	Source            string             `json:"source"`
-	Note              string             `json:"note,omitempty"`
-	Output            string             `json:"output,omitempty"`
-	Retry             bool               `json:"retry,omitempty"`
-	Failure           *commandCorpusWant `json:"failure,omitempty"`
-	DisagreesWithImpl bool               `json:"disagrees_with_impl,omitempty"`
-	Disagreement      string             `json:"disagreement,omitempty"`
+	Source  string             `json:"source"`
+	Note    string             `json:"note,omitempty"`
+	Output  string             `json:"output,omitempty"`
+	Retry   bool               `json:"retry,omitempty"`
+	Failure *commandCorpusWant `json:"failure,omitempty"`
 }
 
 func TestCommandCorpus(t *testing.T) {
@@ -46,9 +46,6 @@ func TestCommandCorpus(t *testing.T) {
 		name := tc.Source + "/" + strings.ReplaceAll(tc.Command, "/", "_")
 		t.Run(name, func(t *testing.T) {
 			validateCorpusCase(t, i, tc)
-			if tc.DisagreesWithImpl {
-				t.Skipf("explained implementation disagreement: %s", tc.Note)
-			}
 			compareCorpusWant(t, tc.Command, tc.commandCorpusWant, classifyCorpusCommand(tc, true))
 			if tc.Failure != nil {
 				compareCorpusWant(t, tc.Command+" [exitOK=false]", *tc.Failure, classifyCorpusCommand(tc, false))
@@ -60,6 +57,20 @@ func TestCommandCorpus(t *testing.T) {
 func TestDecodeCommandCorpusRejectsUnknownFields(t *testing.T) {
 	_, err := decodeCommandCorpus([]byte(`[{"command":"echo ok","source":"x","want_category":["fs.delete"]}]`))
 	if err == nil || !strings.Contains(err.Error(), `entry 0 ("echo ok"): json: unknown field "want_category"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestDecodeCommandCorpusRejectsDuplicateFields(t *testing.T) {
+	_, err := decodeCommandCorpus([]byte(`[{"command":"echo ok","source":"x","want_categories":["fs.delete"],"want_categories":[],"want_targets":[],"want_mutations":[]}]`))
+	if err == nil || !strings.Contains(err.Error(), `duplicate JSON object key "want_categories"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestDecodeCommandCorpusRejectsSkippedEntries(t *testing.T) {
+	_, err := decodeCommandCorpus([]byte(`[{"command":"command false && git status","source":"x","want_categories":[],"want_targets":[],"want_mutations":[],"disagrees_with_impl":true,"disagreement":"skip"}]`))
+	if err == nil || !strings.Contains(err.Error(), `entry 0 ("command false && git status"): json: unknown field "disagrees_with_impl"`) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -82,6 +93,9 @@ func decodeCommandCorpus(data []byte) ([]commandCorpusCase, error) {
 			return nil, fmt.Errorf("trailing JSON value")
 		}
 		return nil, fmt.Errorf("trailing JSON value: %w", err)
+	}
+	if err := reasoning.ValidateUniqueObjectKeys(data); err != nil {
+		return nil, err
 	}
 	corpus := make([]commandCorpusCase, len(entries))
 	for i, entry := range entries {
@@ -111,14 +125,8 @@ func validateCorpusCase(t *testing.T, index int, tc commandCorpusCase) {
 	if tc.Command == "" || tc.Source == "" {
 		t.Fatalf("entry %d must have command and source", index)
 	}
-	if strings.ContainsAny(tc.Note, "\r\n") || strings.ContainsAny(tc.Disagreement, "\r\n") {
-		t.Fatalf("entry %d note and disagreement must each be one line", index)
-	}
-	if tc.DisagreesWithImpl != (tc.Disagreement != "") {
-		t.Fatalf("entry %d must set disagrees_with_impl and disagreement together", index)
-	}
-	if tc.DisagreesWithImpl && tc.Note == "" {
-		t.Fatalf("entry %d has an unexplained implementation disagreement", index)
+	if strings.ContainsAny(tc.Note, "\r\n") {
+		t.Fatalf("entry %d note must be one line", index)
 	}
 	validateCorpusWant(t, index, tc.commandCorpusWant)
 	if tc.Failure != nil {

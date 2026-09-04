@@ -73,7 +73,7 @@ func TestClassifyExecRejectsPostLoaderSegments(t *testing.T) {
 	}
 }
 
-func TestClassifyExecKeepsActionsWithUncertainCWD(t *testing.T) {
+func TestClassifyExecHandlesActionsWithUncertainCWD(t *testing.T) {
 	runExecCases(t, []execCase{
 		{
 			name:    "relative chmod after cd",
@@ -81,14 +81,13 @@ func TestClassifyExecKeepsActionsWithUncertainCWD(t *testing.T) {
 			want:    []string{"permission.changed"},
 		},
 		{
-			name:    "relative gunzip after cd",
+			name:    "relative gunzip after uncertain cd",
 			command: "cd subdir && gunzip dump.sql.gz",
-			want:    []string{"archive.extract"},
 		},
 		{
-			name:    "relative curl output after cd",
+			name:    "relative curl output after uncertain cd",
 			command: "cd subdir && curl -o tool.tgz https://example.com/tool.tgz",
-			want:    []string{"archive.extract", "network.egress"},
+			want:    []string{"network.egress"},
 			targets: urlTarget("https://example.com"),
 		},
 	})

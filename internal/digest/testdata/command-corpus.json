@@ -485,9 +485,7 @@
   "want_targets": [],
   "want_mutations": [],
   "source": "review-r1-correctness",
-  "note": "Standing ruling: multi-source mv credits nothing because no source/destination pair is provable.",
-  "disagrees_with_impl": true,
-  "disagreement": "fsMove still credits fs.move for an ambiguous multi-source move."
+  "note": "Standing ruling: multi-source mv credits nothing because no source/destination pair is provable."
  },
  {
   "command": "git rm --cached secrets.env",
@@ -1012,8 +1010,6 @@
   "want_mutations": [],
   "source": "review-r11-contract",
   "note": "command false exits nonzero, so the && right-hand side cannot execute.",
-  "disagrees_with_impl": true,
-  "disagreement": "knownShellOutcome does not recognize false through the command wrapper.",
   "failure": {
    "want_categories": [],
    "want_targets": [],
@@ -1027,8 +1023,6 @@
   "want_mutations": [],
   "source": "review-r11-contract",
   "note": "command false exits nonzero, so the && right-hand side cannot execute.",
-  "disagrees_with_impl": true,
-  "disagreement": "knownShellOutcome does not recognize false through the command wrapper.",
   "failure": {
    "want_categories": [],
    "want_targets": [],
@@ -1175,9 +1169,7 @@
   "want_targets": [],
   "want_mutations": [],
   "source": "review-r12-contract",
-  "note": "A package URL proves a source location, not the installed package name.",
-  "disagrees_with_impl": true,
-  "disagreement": "Package target extraction publishes a sanitized URL origin as a package name."
+  "note": "A package URL proves a source location, not the installed package name."
  },
  {
   "command": "curl -o /dev/zero https://example.com/tool.tgz",
@@ -1515,9 +1507,7 @@
   ],
   "want_mutations": [],
   "source": "review-r17-correctness",
-  "note": "npm uses the final repeated --prefix value, which is the in-workspace current directory.",
-  "disagrees_with_impl": true,
-  "disagreement": "Workspace escape detection considers the overridden outside --prefix value."
+  "note": "npm uses the final repeated --prefix value, which is the in-workspace current directory."
  },
  {
   "command": "pip install --report /tmp/report.json requests",
@@ -1610,9 +1600,7 @@
   ],
   "want_mutations": [],
   "source": "review-r19-contract",
-  "note": "pip uses the final repeated --target value, which is the in-workspace vendor directory.",
-  "disagrees_with_impl": true,
-  "disagreement": "Workspace escape detection considers the overridden outside --target value."
+  "note": "pip uses the final repeated --target value, which is the in-workspace vendor directory."
  },
  {
   "command": "chown --from=root root config/settings.json",
@@ -3611,5 +3599,112 @@
   "want_targets": [],
   "want_mutations": [],
   "source": "review-r26-QQQ"
+ },
+ {
+  "command": "pip install /tmp/sk-live-SECRET/pkg.whl",
+  "want_categories": [
+   "package.install"
+  ],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r26-RRR"
+ },
+ {
+  "command": "npm install --prefix /tmp --prefix . left-pad",
+  "want_categories": [
+   "package.install"
+  ],
+  "want_targets": [
+   {
+    "kind": "package",
+    "value": "left-pad"
+   }
+  ],
+  "want_mutations": [],
+  "source": "review-r26-RRR"
+ },
+ {
+  "command": "pip install --target /tmp/vendor --target vendor requests",
+  "want_categories": [
+   "package.install"
+  ],
+  "want_targets": [
+   {
+    "kind": "package",
+    "value": "requests"
+   }
+  ],
+  "want_mutations": [],
+  "source": "review-r26-RRR"
+ },
+ {
+  "command": "pip install ./vendor",
+  "want_categories": [
+   "package.install"
+  ],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r26-RRR"
+ },
+ {
+  "command": "chmod -x scripts/run.sh",
+  "want_categories": [
+   "permission.changed"
+  ],
+  "want_targets": [
+   {
+    "kind": "path",
+    "value": "scripts/run.sh"
+   }
+  ],
+  "want_mutations": [],
+  "source": "review-r26-RRR"
+ },
+ {
+  "command": "cd \"$OUTSIDE\" && gunzip data.gz",
+  "want_categories": [],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r26-RRR"
+ },
+ {
+  "command": "curl file:///etc/hosts",
+  "want_categories": [],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r26-RRR"
+ },
+ {
+  "command": "rg --pcre2-version TODO",
+  "want_categories": [],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r26-RRR"
+ },
+ {
+  "command": "docker compose up -d --detach=false",
+  "want_categories": [
+   "container.run"
+  ],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r26-RRR"
+ },
+ {
+  "command": "tar -xwf archive.tar",
+  "want_categories": [],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r26-RRR"
+ },
+ {
+  "command": "tar -xf archive.tar -C /tmp outside.txt -C /repo inside.txt",
+  "want_categories": [
+   "archive.extract",
+   "workspace.escape"
+  ],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r26-RRR"
  }
 ]

@@ -71,7 +71,7 @@ func TestAppendCommandTargetSanitizesEveryKind(t *testing.T) {
 		{"scp url host", CommandTarget{Kind: "url", Value: "git@github.com:org/private.git"}, urlTarget("github.com")},
 		{"host origin", CommandTarget{Kind: "host", Value: "ssh://user@build.example.com/private"}, host("ssh://build.example.com")},
 		{"malformed host", CommandTarget{Kind: "host", Value: "password=hunter2.example.com"}, nil},
-		{"package origin", CommandTarget{Kind: "package", Value: "git+https://example.com/private.git"}, []CommandTarget{{Kind: "package", Value: "git+https://example.com"}}},
+		{"package source", CommandTarget{Kind: "package", Value: "git+https://example.com/private.git"}, nil},
 		{"bare package", CommandTarget{Kind: "package", Value: "left-pad"}, []CommandTarget{{Kind: "package", Value: "left-pad"}}},
 		{"opaque credential package", CommandTarget{Kind: "package", Value: "user:token@example.com"}, nil},
 		{"workspace path", CommandTarget{Kind: "path", Value: "internal/digest/trace.go"}, []CommandTarget{{Kind: "path", Value: "internal/digest/trace.go"}}},
@@ -386,25 +386,21 @@ func TestClassifyExecPackageInstall(t *testing.T) {
 		},
 		{name: "bare npm install credits no target", command: "npm install", want: []string{"package.install"}},
 		{
-			name:    "pip install from a credentialed url strips the credentials",
+			name:    "pip install from a credentialed url has no package target",
 			command: "pip install git+https://user:token@example.com/org/repo.git",
 			want:    []string{"package.install"},
-			targets: []CommandTarget{{Kind: "package", Value: "git+https://example.com"}},
 		},
 		{
-			// Regression: only userinfo was stripped from a package url, so a
-			// query string or fragment (`#egg=name`, `?token=...`) rode along
-			// into the published package target.
-			name:    "pip install from an url strips the query string",
+			// A package URL is a source location, not a package name; even its
+			// sanitized origin must not become a package target.
+			name:    "pip install from an url has no package target",
 			command: "pip install https://example.com/pkg.tar.gz?token=ghp_REDACTEDSECRET",
 			want:    []string{"package.install"},
-			targets: []CommandTarget{{Kind: "package", Value: "https://example.com"}},
 		},
 		{
-			name:    "pip package url path is reduced to its origin",
+			name:    "pip package url path has no package target",
 			command: "pip install https://packages.example.test/sk-live-SECRET/pkg.whl",
 			want:    []string{"package.install"},
-			targets: []CommandTarget{{Kind: "package", Value: "https://packages.example.test"}},
 		},
 		{
 			name:    "scoped npm package name is unaffected",

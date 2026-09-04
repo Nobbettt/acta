@@ -159,8 +159,8 @@ func execFacts(category string, targets ...CommandTarget) *commandFacts {
 
 // appendCommandTarget is the only route from a classifier into the published
 // target set. Every wire kind is handled explicitly; free-form patterns and
-// unknown kinds fail closed, URL-bearing values are reduced to an origin, and
-// shell expressions that this package never expands are rejected.
+// unknown kinds fail closed, URL targets are reduced to an origin, and shell
+// expressions that this package never expands are rejected.
 func appendCommandTarget(facts *commandFacts, target CommandTarget) {
 	if target.Kind != "path" {
 		target.Value = strings.TrimSpace(target.Value)
@@ -174,12 +174,7 @@ func appendCommandTarget(facts *commandFacts, target CommandTarget) {
 	case "host":
 		target.Value = commandTargetHost(target.Value)
 	case "package":
-		if origin := gitRemoteOrigin(target.Value); origin != "" {
-			target.Value = commandTargetOrigin(origin)
-			if target.Value == "" {
-				return
-			}
-		} else if execPackageURL(target.Value) || execCredentialPackage(target.Value) {
+		if execPackageSource(target.Value) || execCredentialPackage(target.Value) {
 			return
 		}
 	case "path":
@@ -286,6 +281,11 @@ func execNetwork(cmd execCommand) *commandFacts {
 	}
 	if len(operands) == 0 {
 		return nil // flags-only probe (`curl --version`) reaches nowhere
+	}
+	if !slices.ContainsFunc(operands, func(operand string) bool {
+		return !strings.HasPrefix(strings.ToLower(operand), "file:")
+	}) {
+		return nil
 	}
 	return execFacts("network.egress")
 }
@@ -674,6 +674,13 @@ func execPackageURL(name string) bool {
 		strings.HasPrefix(name, "git+")
 }
 
+func execPackageSource(name string) bool {
+	name = strings.ReplaceAll(name, `\`, "/")
+	return execPackageURL(name) || gitRemoteOrigin(name) != "" || strings.HasPrefix(strings.ToLower(name), "file:") ||
+		fsOperandAbsolute(name) || name == "." || name == ".." ||
+		strings.HasPrefix(name, "./") || strings.HasPrefix(name, "../")
+}
+
 // verify.run -----------------------------------------------------------------
 
 var execVerifyCommands = map[string]bool{
@@ -759,7 +766,7 @@ var execSearchGrepFlagModel = commandFlagModel{
 var execSearchRGFlagModel = commandFlagModel{
 	"-n": flagBoolean, "--line-number": flagBoolean, "-l": flagBoolean,
 	"--files-with-matches": flagBoolean, "--hidden": flagBoolean,
-	"--files": flagBoolean, "--type-list": flagBoolean,
+	"--files": flagBoolean, "--type-list": flagBoolean, "--pcre2-version": flagBoolean,
 	"-e": flagValue, "--regexp": flagValue, "-g": flagValue, "--glob": flagValue, "--iglob": flagValue,
 	"-t": flagValue, "--type": flagValue, "-T": flagValue, "--type-not": flagValue,
 	"-A": flagValue, "-B": flagValue, "-C": flagValue, "--after-context": flagValue,
@@ -798,7 +805,7 @@ func execSearch(cmd execCommand) *commandFacts {
 	}
 	scan := scanCommandArgs(cmd.args, execSearchFlagModelFor(cmd.word))
 	if cmd.word == "rg" {
-		if scan.hasFlag("--files", "--type-list") {
+		if scan.hasFlag("--files", "--type-list", "--pcre2-version") {
 			return nil
 		}
 		if _, ok := scan.flagValue("--generate"); ok {
@@ -952,7 +959,7 @@ var (
 		"-a": flagBoolean, "-j": flagBoolean, "-J": flagBoolean,
 		"-k": flagBoolean, "-m": flagBoolean, "-O": flagBoolean,
 		"--to-stdout": flagBoolean,
-		"-p":          flagBoolean, "-v": flagBoolean, "-w": flagBoolean, "-z": flagBoolean,
+		"-p":          flagBoolean, "-v": flagBoolean, "-w": flagBoolean, "--interactive": flagBoolean, "-z": flagBoolean,
 		"-f": flagValue, "--file": flagValue, "-C": flagValue, "--directory": flagValue,
 		"-X": flagValue, "--exclude-from": flagValue, "-T": flagValue, "--files-from": flagValue,
 		"--transform": flagValue, "--strip-components": flagValue, "--to-command": flagValue,
@@ -1036,7 +1043,7 @@ func execArchiveWritesToDisk(cmd execCommand) bool {
 	case "tar":
 		scan := execTarScan(cmd.args)
 		if scan.unknownFlag || !execTarExtract(cmd.args) || scan.hasFlag(
-			"--to-stdout", "-O", "--to-command", "-T", "--files-from",
+			"--to-stdout", "-O", "--to-command", "-T", "--files-from", "-w", "--interactive",
 		) {
 			return false
 		}
@@ -1068,29 +1075,26 @@ func execArchive(cmd execCommand) *commandFacts {
 	if !cmd.seg.exitOK || !execArchiveWritesToDisk(cmd) {
 		return nil
 	}
-	var destinations []string
 	var inside, escaped bool
 	switch cmd.word {
 	case "tar":
 		scan := execTarScan(cmd.args)
 		inside, escaped = execArchiveDestinationsWorkspace(cmd, scan, "-C", "--directory")
-		destinations = execFlagValues(scan, "-C", "--directory")
 	case "unzip":
 		scan := scanCommandArgs(cmd.args, execUnzipFlagModel)
 		inside, escaped = execArchiveDestinationsWorkspace(cmd, scan, "-d")
-		destinations = execFlagValues(scan, "-d")
 	case "gunzip":
-		destinations = scanCommandArgs(cmd.args, execGunzipFlagModel).operands
+		destinations := scanCommandArgs(cmd.args, execGunzipFlagModel).operands
 		inside, escaped = execPathsWorkspace(cmd, destinations)
 	case "curl":
-		destinations = execDownloadOutputFiles(cmd)
+		destinations := execDownloadOutputFiles(cmd)
 		inside, escaped = execAnyPathWorkspace(cmd, destinations)
 	case "wget":
-		destinations = execDownloadOutputFiles(cmd)
+		destinations := execDownloadOutputFiles(cmd)
 		inside, escaped = execAnyPathWorkspace(cmd, destinations)
 	}
 	facts := &commandFacts{}
-	if inside || !escaped && execCWDUncertainRelativeDestination(cmd, destinations) && !execRunsFromDeviceDirectory(cmd) {
+	if inside {
 		facts.categories = append(facts.categories, "archive.extract")
 	}
 	if escaped {
@@ -1176,30 +1180,40 @@ func execArchiveDestinationsWorkspace(cmd execCommand, scan commandArgScan, name
 		if base == "." {
 			base = ""
 		}
-		known, seen := !cmd.seg.cwdUncertain || cmd.seg.cwdKnown, false
-		for _, flag := range scan.flags {
-			if !slices.Contains(names, flag.name) {
-				continue
+		known, selected := !cmd.seg.cwdUncertain || cmd.seg.cwdKnown, false
+		record := func() {
+			if !known {
+				return
 			}
-			seen = true
-			if flag.value == "" || strings.ContainsAny(flag.value, fsShellMetacharacters) {
-				known = false
-				continue
+			valueInside, valueEscaped := execPathsWorkspace(cmd, []string{base})
+			inside = inside || valueInside
+			escaped = escaped || valueEscaped
+		}
+		for i := range cmd.args {
+			for _, flag := range scan.flags {
+				if flag.index != i || !slices.Contains(names, flag.name) {
+					continue
+				}
+				if flag.value == "" || strings.ContainsAny(flag.value, fsShellMetacharacters) {
+					known = false
+					continue
+				}
+				value := canonicalWorkspacePath(flag.value)
+				if fsOperandAbsolute(flag.value) || isPortableAbsolute(value) {
+					base, known = value, true
+				} else if known {
+					base = path.Join(base, value)
+				}
 			}
-			value := canonicalWorkspacePath(flag.value)
-			if fsOperandAbsolute(flag.value) || isPortableAbsolute(value) {
-				base, known = value, true
-			} else if known {
-				base = path.Join(base, value)
+			if slices.Contains(scan.operandIndexes, i) {
+				selected = true
+				record()
 			}
 		}
-		if !seen {
-			return execPathsWorkspace(cmd, []string{"."})
+		if !selected {
+			record()
 		}
-		if !known {
-			return false, false
-		}
-		return execPathsWorkspace(cmd, []string{base})
+		return inside, escaped
 	}
 
 	var values []string
@@ -1282,46 +1296,6 @@ func execCWDUncertainRelativeDestination(cmd execCommand, values []string) bool 
 	})
 }
 
-// execRunsFromDeviceDirectory recognizes only literal directory changes the
-// command text settles. Dynamic cd/pushd/popd forms remain unknown.
-func execRunsFromDeviceDirectory(cmd execCommand) bool {
-	chain := splitCommandChain(cmd.seg.command)
-	matches := 0
-	for _, segment := range chain {
-		if segment.raw == cmd.seg.raw {
-			matches++
-		}
-	}
-	if matches != 1 {
-		return false
-	}
-	cwd, known := canonicalWorkspacePath(cmd.seg.ws.root), true
-	for _, segment := range chain {
-		if segment.raw == cmd.seg.raw {
-			break
-		}
-		tokens := execLeadingTokens(tokensForSegment(segment.raw))
-		if len(tokens) == 0 {
-			continue
-		}
-		switch tokens[0] {
-		case "cd":
-			if len(tokens) != 2 || tokens[1] == "-" || strings.ContainsAny(tokens[1], fsShellMetacharacters) {
-				known = false
-				continue
-			}
-			if fsOperandAbsolute(tokens[1]) {
-				cwd, known = canonicalWorkspacePath(tokens[1]), true
-			} else if known {
-				cwd = path.Join(cwd, canonicalWorkspacePath(tokens[1]))
-			}
-		case "pushd", "popd":
-			known = false
-		}
-	}
-	return known && (cwd == "/dev" || strings.HasPrefix(cwd, "/dev/"))
-}
-
 // permission.changed ---------------------------------------------------------
 
 var execPermissionCommands = map[string]bool{"chmod": true, "chown": true, "chgrp": true}
@@ -1350,7 +1324,21 @@ func execPermissionFlagModelFor(word string) commandFlagModel {
 }
 
 func execPermissionPaths(cmd execCommand) ([]string, bool) {
-	scan := scanCommandArgs(cmd.args, execPermissionFlagModelFor(cmd.word))
+	args := cmd.args
+	if cmd.word == "chmod" {
+		for i, arg := range args {
+			prefix := scanCommandArgs(args[:i], execChmodFlagModel)
+			if prefix.unknownFlag || len(prefix.operands) != 0 {
+				break
+			}
+			if execChmodSymbolicMode(arg) {
+				args = slices.Clone(args)
+				args[i] = strings.TrimPrefix(arg, "-")
+				break
+			}
+		}
+	}
+	scan := scanCommandArgs(args, execPermissionFlagModelFor(cmd.word))
 	if scan.unknownFlag || scan.hasFlag("--from") {
 		return nil, false
 	}
@@ -1362,6 +1350,20 @@ func execPermissionPaths(cmd execCommand) ([]string, bool) {
 		paths = paths[1:]
 	}
 	return paths, len(paths) != 0
+}
+
+func execChmodSymbolicMode(value string) bool {
+	if !strings.HasPrefix(value, "-") {
+		return false
+	}
+	for _, clause := range strings.Split(value, ",") {
+		i := strings.IndexAny(clause, "+-=")
+		if i < 0 || i == len(clause)-1 || strings.Trim(clause[:i], "ugoa") != "" ||
+			strings.Trim(clause[i+1:], "rwxXstugo") != "" {
+			return false
+		}
+	}
+	return true
 }
 
 func execPermission(cmd execCommand) *commandFacts {
@@ -1523,8 +1525,23 @@ func execPackageDestinationFlags(word string) []string {
 func execPackageDestinations(scan commandArgScan, word string) []string {
 	names := execPackageDestinationFlags(word)
 	var values []string
-	for _, flag := range scan.flags {
+	seen := make(map[string]bool)
+	for i := len(scan.flags) - 1; i >= 0; i-- {
+		flag := scan.flags[i]
 		if slices.Contains(names, flag.name) {
+			name := flag.name
+			switch name {
+			case "-t":
+				name = "--target"
+			case "-i":
+				name = "--install-dir"
+			case "-n":
+				name = "--bindir"
+			}
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
 			if flag.name == "--report" && !execOutputPath(flag.value) {
 				continue
 			}
