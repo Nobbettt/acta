@@ -50,8 +50,17 @@ func TestClassifyFS(t *testing.T) {
 			mutations:  []ShellMutation{{Kind: "delete", Path: "src/old.go"}},
 		}},
 		{"rm force cannot prove a deletion", "rm -rf build", true, nil},
+		{"rm long force cannot prove a deletion", "rm --force missing.txt", true, nil},
 		{"rm interactive cannot prove a deletion", "rm -i src/old.go", true, nil},
 		{"rm prompt-once cannot prove a deletion", "rm -I a.txt b.txt c.txt d.txt", true, nil},
+		{"rm long interactive cannot prove a deletion", "rm --interactive victim.txt", true, nil},
+		{"rm long interactive always cannot prove a deletion", "rm --interactive=always victim.txt", true, nil},
+		{"rm long interactive once cannot prove a deletion", "rm --interactive=once victim.txt", true, nil},
+		{"rm long interactive never proves a deletion", "rm --interactive=never victim.txt", true, &commandFacts{
+			categories: []string{"fs.delete"},
+			targets:    fsPathTargets("victim.txt"),
+			mutations:  []ShellMutation{{Kind: "delete", Path: "victim.txt"}},
+		}},
 		{"rm end of flags", "rm -- -weird.txt", true, &commandFacts{
 			categories: []string{"fs.delete"},
 			targets:    fsPathTargets("-weird.txt"),
@@ -125,6 +134,7 @@ func TestClassifyFS(t *testing.T) {
 		{"git rm -n leaves the file on disk", "git rm -n src/old.go", true, nil},
 		{"git rm clustered dry run leaves the file on disk", "git rm -nq tracked.txt", true, nil},
 		{"git rm --dry-run leaves the file on disk", "git rm --dry-run src/old.go", true, nil},
+		{"git rm --ignore-unmatch may delete nothing", "git rm --ignore-unmatch missing.txt", true, nil},
 		{"git rm pathspec file names no deleted path", "git rm --pathspec-from-file paths.txt", true, &commandFacts{
 			categories: []string{"fs.delete"},
 		}},
@@ -166,6 +176,7 @@ func TestClassifyFS(t *testing.T) {
 			targets:    []CommandTarget{{Kind: "path", Value: "old.txt"}, {Kind: "path", Value: "new.txt"}},
 			mutations:  []ShellMutation{{Kind: "move", From: "old.txt", To: "new.txt"}},
 		}},
+		{"mv same path changes nothing", "mv a.txt a.txt", true, nil},
 		{"mv no-clobber cannot prove a move", "mv -n old.txt new.txt", true, nil},
 		{"mv long no-clobber cannot prove a move", "mv --no-clobber old.txt new.txt", true, nil},
 		{"mv update cannot prove a move", "mv -u old.txt new.txt", true, nil},
@@ -286,6 +297,8 @@ func TestClassifyFS(t *testing.T) {
 				{Kind: "move", From: "b.txt", To: "archive/b.txt"},
 			},
 		}},
+		{"mv -t to the source directory changes nothing", "mv -t archive archive/a.txt", true, nil},
+		{"mv trailing directory equal to source changes nothing", "mv archive/a.txt archive/", true, nil},
 		{"mv -t with no source credits nothing", "mv -t archive", true, nil},
 		{"mv -t with no value proves no destination", "mv a.txt -t", true, nil},
 		{"mv -t out of the workspace escapes", "mv -t /tmp notes.md", true, &commandFacts{
@@ -409,6 +422,18 @@ func TestClassifyFS(t *testing.T) {
 		{"cp into a directory names the real destination", "cp a.txt backup/", true, &commandFacts{
 			categories: []string{"fs.create"},
 			targets:    fsPathTargets("backup/a.txt"),
+		}},
+		{"cp outside source into a directory names the real destination", "cp /tmp/source.txt backup/", true, &commandFacts{
+			categories: []string{"fs.create"},
+			targets:    fsPathTargets("backup/source.txt"),
+		}},
+		{"cp outside source with target directory names the real destination", "cp -t backup /tmp/source.txt", true, &commandFacts{
+			categories: []string{"fs.create"},
+			targets:    fsPathTargets("backup/source.txt"),
+		}},
+		{"cp outside source into workspace root names the real destination", "cp /tmp/source.txt .", true, &commandFacts{
+			categories: []string{"fs.create"},
+			targets:    fsPathTargets("source.txt"),
 		}},
 		{"cp into a dot-suffixed directory names the real destination", "cp a.txt backup/.", true, &commandFacts{
 			categories: []string{"fs.create"},
@@ -604,6 +629,19 @@ func TestClassifyFS(t *testing.T) {
 			categories: []string{"fs.patch"},
 			targets:    fsPathTargets("frontend/orig.txt"),
 			mutations:  []ShellMutation{{Kind: "patch", Path: "frontend/orig.txt"}},
+		}},
+		{"patch directory relocates a relative output", "patch -d frontend -o new.txt orig.txt < fix.diff", true, &commandFacts{
+			categories: []string{"fs.patch"},
+			targets:    fsPathTargets("frontend/new.txt"),
+			mutations:  []ShellMutation{{Kind: "patch", Path: "frontend/new.txt"}},
+		}},
+		{"patch directory leaves an absolute output unchanged", "patch -d frontend -o /repo/new.txt orig.txt < fix.diff", true, &commandFacts{
+			categories: []string{"fs.patch"},
+			targets:    fsPathTargets("new.txt"),
+			mutations:  []ShellMutation{{Kind: "patch", Path: "new.txt"}},
+		}},
+		{"patch outside directory relocates a relative output outside", "patch -d /tmp -o new.txt orig.txt < fix.diff", true, &commandFacts{
+			categories: []string{"workspace.escape"},
 		}},
 		{"patch --directory separate token credits the effective path", "patch --directory frontend orig.txt < fix.diff", true, &commandFacts{
 			categories: []string{"fs.patch"},

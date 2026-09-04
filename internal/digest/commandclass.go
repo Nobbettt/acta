@@ -557,7 +557,7 @@ var unmodelledShellWords = []string{
 
 // commandSyntaxModelled rejects shell shapes this classifier cannot prove it
 // has segmented correctly. Compound bodies can put an apparent command in a
-// branch that never ran, option-bearing set can change later control flow,
+// branch that never ran, traps and shell options can change later control flow,
 // and a redirection without a word is a parse error that prevents its command
 // from starting at all.
 func commandSyntaxModelled(raw []commandChainRaw) bool {
@@ -568,6 +568,7 @@ func commandSyntaxModelled(raw []commandChainRaw) bool {
 		tokens := tokensForSegment(r.raw)
 		leading := execLeadingTokens(tokens)
 		if len(tokens) == 0 || len(tokens) > 1 && slices.Contains(tokens, "set") ||
+			containsShellControlCommand(tokens, "trap", "shopt") ||
 			len(leading) > 0 && (slices.Contains(unmodelledShellWords, leading[0]) ||
 				strings.HasSuffix(leading[0], "()")) || !redirectionsComplete(tokens) {
 			return false
@@ -754,9 +755,6 @@ func (f *commandFacts) taintPaths() {
 		f.targets = nil
 	}
 	f.mutations = nil
-	f.categories = slices.DeleteFunc(f.categories, func(category string) bool {
-		return category == "workspace.escape"
-	})
 }
 
 // segmentClassifiers are applied to every segment of every command, in this

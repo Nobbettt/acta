@@ -105,7 +105,14 @@ func classifyFS(segment commandSegment) *commandFacts {
 func fsRuntimeOutcomeUnproven(verb string, scan commandArgScan) bool {
 	switch verb {
 	case "rm":
-		return scan.hasFlag("-f", "-i", "-I")
+		if scan.hasFlag("-f", "--force", "-i", "-I") {
+			return true
+		}
+		for _, flag := range scan.flags {
+			if flag.name == "--interactive" && !strings.EqualFold(flag.value, "never") {
+				return true
+			}
+		}
 	case "mv", "cp":
 		return scan.hasFlag("-i", "--interactive", "-n", "--no-clobber", "-u", "--update")
 	case "mkdir":
@@ -158,10 +165,12 @@ var fsFlagModels = map[string]commandFlagModel{
 	"rm": {
 		"-d": flagBoolean, "-f": flagBoolean, "-i": flagBoolean,
 		"-I": flagBoolean, "-r": flagBoolean, "-R": flagBoolean, "-v": flagBoolean,
+		"--force": flagBoolean, "--interactive": flagAttachedValue,
 	},
 	"git rm": {
 		"-f": flagBoolean, "-n": flagBoolean, "-q": flagBoolean, "-r": flagBoolean,
 		"--cached": flagBoolean, "--dry-run": flagBoolean, "--staged": flagBoolean,
+		"--ignore-unmatch":     flagBoolean,
 		"--pathspec-from-file": flagValue, "--pathspec-file-nul": flagBoolean,
 	},
 	"mkdir": {
@@ -578,6 +587,9 @@ func fsMove(args, operands []string, ws *workspace, cwdUncertain bool) *commandF
 		}
 		return nil
 	}
+	if paths[0] == paths[1] {
+		return nil
+	}
 	facts := &commandFacts{
 		categories: []string{"fs.move"},
 		mutations:  []ShellMutation{{Kind: "move", From: paths[0], To: paths[1]}},
@@ -608,6 +620,9 @@ func fsMoveIntoDir(src, dest string, ws *workspace, cwdUncertain bool) *commandF
 		return &commandFacts{categories: []string{"fs.move"}}
 	}
 	to := path.Join(destDir, path.Base(srcPaths[0]))
+	if srcPaths[0] == to {
+		return nil
+	}
 	facts := &commandFacts{
 		categories: []string{"fs.move"},
 		mutations:  []ShellMutation{{Kind: "move", From: srcPaths[0], To: to}},
@@ -730,9 +745,8 @@ func fsDestinationOnly(category, dest string, ws *workspace, cwdUncertain bool) 
 // destination is checked for an escape: the source is read, not written, so it
 // is never the write that left the workspace.
 func fsCopyIntoDir(src, dest string, ws *workspace, cwdUncertain bool) *commandFacts {
-	srcPaths := fsPaths([]string{src}, ws, cwdUncertain)
 	destDir, destOK := fsDirectoryPath(dest, ws, cwdUncertain)
-	if len(srcPaths) != 1 || !destOK {
+	if src == "" || strings.ContainsAny(src, fsShellMetacharacters) || !destOK {
 		if fsEscapes([]string{dest}, ws, cwdUncertain) {
 			return &commandFacts{categories: []string{"workspace.escape"}}
 		}
@@ -743,7 +757,11 @@ func fsCopyIntoDir(src, dest string, ws *workspace, cwdUncertain bool) *commandF
 		// category is credited alone, with no synthesised target.
 		return &commandFacts{categories: []string{"fs.create"}}
 	}
-	to := path.Join(destDir, path.Base(srcPaths[0]))
+	basename := path.Base(canonicalWorkspacePath(src))
+	if basename == "/" || basename == "." {
+		return &commandFacts{categories: []string{"fs.create"}}
+	}
+	to := path.Join(destDir, basename)
 	facts := &commandFacts{categories: []string{"fs.create"}}
 	appendCommandTarget(facts, CommandTarget{Kind: "path", Value: to})
 	return facts
@@ -809,32 +827,34 @@ func fsPatch(args, operands []string, redirected bool, ws *workspace, cwdUncerta
 			cleanOutput == "/dev/stdout" || cleanOutput == "/dev/stderr" || strings.HasPrefix(cleanOutput, "/dev/fd/") {
 			return nil
 		}
-		if !outputTargetsWorkspaceFile(output, ws, cwdUncertain) {
-			if fsEscapes([]string{output}, ws, cwdUncertain) {
-				return &commandFacts{categories: []string{"workspace.escape"}}
-			}
-			return nil
-		}
 		destination = output
 	} else {
 		if len(operands) != 1 {
 			return facts
 		}
 		destination = operands[0]
-		if directory, hasDirectory := fsPatchDirectory(args); hasDirectory && !fsOperandAbsolute(destination) {
-			dir, ok := fsDirectoryPath(directory, ws, cwdUncertain)
-			if !ok {
-				if fsEscapes([]string{directory}, ws, cwdUncertain) {
-					return &commandFacts{categories: []string{"workspace.escape"}}
-				}
-				return facts
-			}
-			destination = path.Join(dir, filepath.ToSlash(destination))
-		}
 	}
-	paths := fsPaths([]string{destination}, ws, cwdUncertain)
+	destinationCwdUncertain := cwdUncertain
+	if directory, hasDirectory := fsPatchDirectory(args); hasDirectory && !fsOperandAbsolute(destination) {
+		dir, ok := fsDirectoryPath(directory, ws, cwdUncertain)
+		if !ok {
+			if fsEscapes([]string{directory}, ws, cwdUncertain) {
+				return &commandFacts{categories: []string{"workspace.escape"}}
+			}
+			return facts
+		}
+		destination = path.Join(dir, filepath.ToSlash(destination))
+		destinationCwdUncertain = false
+	}
+	if redirectsOutput && !outputTargetsWorkspaceFile(destination, ws, destinationCwdUncertain) {
+		if fsEscapes([]string{destination}, ws, destinationCwdUncertain) {
+			return &commandFacts{categories: []string{"workspace.escape"}}
+		}
+		return nil
+	}
+	paths := fsPaths([]string{destination}, ws, destinationCwdUncertain)
 	if len(paths) != 1 {
-		if fsEscapes([]string{destination}, ws, cwdUncertain) {
+		if fsEscapes([]string{destination}, ws, destinationCwdUncertain) {
 			return &commandFacts{categories: []string{"workspace.escape"}}
 		}
 		return facts

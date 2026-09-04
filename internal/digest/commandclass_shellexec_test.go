@@ -17,6 +17,8 @@ func TestClassifyCommandRejectsUnmodelledShellExecution(t *testing.T) {
 	}{
 		{"errexit skips network command", "set -e; false; curl https://example.com", false},
 		{"long errexit form skips vcs read", "set -o errexit; false; git status", false},
+		{"ERR trap terminates before deletion", `/bin/bash -lc "trap 'exit 0' ERR; false; rm victim.txt"`, true},
+		{"shopt errexit skips vcs read", `/bin/bash -lc "shopt -s -o errexit; false; git status"`, false},
 		{"backtick substitution cannot borrow outer success", "echo `false && rm victim && true`", true},
 		{"adjacent trailing semicolons are invalid", "curl https://never.example/path;;", false},
 		{"leading semicolon is invalid", "; curl https://never.example/path", false},
@@ -27,6 +29,14 @@ func TestClassifyCommandRejectsUnmodelledShellExecution(t *testing.T) {
 				t.Errorf("classifyCommand(%q) = %+v, want nil", c.command, facts)
 			}
 		})
+	}
+}
+
+func TestClassifyCommandPreservesAbsoluteEscapeBeforeCwdChange(t *testing.T) {
+	facts := classifyCommand("chmod 600 /tmp/outside && cd subdir", "", true, testWorkspace())
+	if facts == nil || !reflect.DeepEqual(facts.categories, []string{"workspace.escape"}) ||
+		len(facts.targets) != 0 || len(facts.mutations) != 0 {
+		t.Fatalf("classifyCommand preserved escape = %+v, want category-only workspace.escape", facts)
 	}
 }
 

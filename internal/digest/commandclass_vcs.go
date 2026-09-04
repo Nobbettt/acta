@@ -89,7 +89,7 @@ var gitStashReadOnlyVerbs = []string{"list", "show"}
 // it is deliberately excluded rather than guessed at — mv/cp's own `-n` is
 // `--no-clobber`, not a dry run, and this table is git-only.
 var gitNoOpFlags = map[string][]string{
-	"rm":     {"--dry-run", "-n", "--cached", "--staged"},
+	"rm":     {"--dry-run", "-n", "--cached", "--staged", "--ignore-unmatch"},
 	"add":    {"--dry-run", "-n"},
 	"commit": {"--dry-run"},
 	"push":   {"--dry-run", "-n"},
@@ -99,6 +99,7 @@ var gitFlagModels = map[string]commandFlagModel{
 	"rm": {
 		"-f": flagBoolean, "-n": flagBoolean, "-q": flagBoolean, "-r": flagBoolean,
 		"--cached": flagBoolean, "--dry-run": flagBoolean, "--staged": flagBoolean,
+		"--ignore-unmatch":     flagBoolean,
 		"--pathspec-from-file": flagValue, "--pathspec-file-nul": flagBoolean,
 	},
 	"add": {
@@ -327,6 +328,12 @@ func gitInvocation(tokens []string) (verb string, args []string, redirected, inf
 		}
 		if flag.arity == flagBoolean && strings.Contains(globalArgs[flag.index], "=") {
 			return "", nil, false, false, false
+		}
+		if flag.name == "-c" {
+			key, _, _ := strings.Cut(flag.value, "=")
+			if strings.TrimSpace(key) == "" {
+				return "", nil, false, false, false
+			}
 		}
 		if slices.Contains(gitRepoRedirectFlags, flag.name) {
 			redirected = true

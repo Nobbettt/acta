@@ -33,7 +33,7 @@ func classifyExec(seg commandSegment) *commandFacts {
 	}
 	cmd := execCommand{word: path.Base(tokens[0]), args: fsOwnArgs(tokens[1:]), seg: seg}
 	if !execExecutionProven(seg) {
-		if execTrailingAmpersand(seg) {
+		if execTrailingAmpersand(seg) && execBackgroundLaunchProven(seg) {
 			return execBackground(cmd)
 		}
 		return nil
@@ -51,10 +51,11 @@ func classifyExec(seg commandSegment) *commandFacts {
 	return facts
 }
 
-// execExecutionProven rejects a conditional branch that the shell may have
-// skipped. A zero exit status proves an all-&& chain ran; otherwise only the
-// first command is certain to have started. Equal later segments are harmless:
-// they can only repeat facts already proved by the identical first command.
+// execExecutionProven rejects a conditional branch or post-loader command that
+// may not have run. A proven successful status is sufficient; observational
+// rules on failed commands additionally require pruneUnexecuted to prove that
+// an equal segment started. Equal segments are harmless because the facts were
+// then proved by at least one identical invocation.
 func execExecutionProven(seg commandSegment) bool {
 	if seg.exitOK {
 		return true
@@ -67,12 +68,35 @@ func execExecutionProven(seg commandSegment) bool {
 	if !valid {
 		return false
 	}
-	for _, part := range raw[1:] {
-		if part.sep == "&&" || part.sep == "||" {
-			return len(raw) != 0 && seg.raw == raw[0].raw
+	for _, part := range pruneUnexecuted(raw) {
+		if part.executed && part.raw == seg.raw {
+			return true
 		}
 	}
-	return true
+	return false
+}
+
+// execBackgroundLaunchProven allows an uncertain command inside a launched
+// background AND-list, but not one after a parent-shell loader or terminator
+// that may have ended the list before the job was launched.
+func execBackgroundLaunchProven(seg commandSegment) bool {
+	raw, valid := splitRawChain(seg.command)
+	if !valid {
+		return false
+	}
+	raw, valid = stripHeredocBodies(raw)
+	if !valid {
+		return false
+	}
+	for _, part := range pruneUnexecuted(raw) {
+		if part.raw == seg.raw {
+			return true
+		}
+		if containsShellControlCommand(tokensForSegment(part.raw), "eval", "source", ".", "exit", "exec") {
+			return false
+		}
+	}
+	return false
 }
 
 var execRules = []func(execCommand) *commandFacts{
@@ -755,8 +779,8 @@ func execSearch(cmd execCommand) *commandFacts {
 			return nil
 		}
 	}
-	_, hasRegexp := scan.flagValue("-e", "--regexp")
-	_, hasPatternFile := scan.flagValue("-f", "--file")
+	_, hasRegexp := execCompleteFlagValue(cmd.args, scan, "-e", "--regexp")
+	_, hasPatternFile := execCompleteFlagValue(cmd.args, scan, "-f", "--file")
 	if len(scan.operands) == 0 && !hasRegexp && !hasPatternFile {
 		return nil
 	}
@@ -765,6 +789,34 @@ func execSearch(cmd execCommand) *commandFacts {
 		return nil
 	}
 	return execFacts("search.query")
+}
+
+// execCompleteFlagValue distinguishes a missing value from an explicitly
+// supplied empty one. commandArgScan preserves both as "", so the original
+// argument position is needed for value-taking search flags.
+func execCompleteFlagValue(args []string, scan commandArgScan, names ...string) (string, bool) {
+	for _, flag := range scan.flags {
+		if !slices.Contains(names, flag.name) {
+			continue
+		}
+		if flag.value != "" {
+			return flag.value, true
+		}
+		if flag.index < 0 || flag.index >= len(args) {
+			return "", false
+		}
+		arg := args[flag.index]
+		if strings.HasPrefix(arg, "--") {
+			return "", strings.Contains(arg, "=") || flag.index+1 < len(args)
+		}
+		if len(flag.name) == 2 {
+			if at := strings.IndexByte(arg[1:], flag.name[1]); at >= 0 && at+2 < len(arg) {
+				return "", true
+			}
+		}
+		return "", flag.index+1 < len(args)
+	}
+	return "", false
 }
 
 // execSearchPattern identifies which operand is the pattern so read inference
@@ -957,7 +1009,9 @@ func execArchiveWritesToDisk(cmd execCommand) bool {
 	switch cmd.word {
 	case "tar":
 		scan := execTarScan(cmd.args)
-		if scan.unknownFlag || !execTarExtract(cmd.args) || scan.hasFlag("--to-stdout", "-O", "--to-command") {
+		if scan.unknownFlag || !execTarExtract(cmd.args) || scan.hasFlag(
+			"--to-stdout", "-O", "--to-command", "-T", "--files-from",
+		) {
 			return false
 		}
 		return true
@@ -975,11 +1029,9 @@ func execArchiveWritesToDisk(cmd execCommand) bool {
 		}
 		return false
 	case "curl":
-		_, ok := execOutputFile(cmd, execCurlFlagModel, "-o", "--output")
-		return ok
+		return len(execDownloadOutputFiles(cmd)) != 0
 	case "wget":
-		_, ok := execOutputFile(cmd, execWgetFlagModel, "-O", "--output-document")
-		return ok
+		return len(execDownloadOutputFiles(cmd)) != 0
 	}
 	return false
 }
@@ -990,42 +1042,100 @@ func execArchive(cmd execCommand) *commandFacts {
 	if !cmd.seg.exitOK || !execArchiveWritesToDisk(cmd) {
 		return nil
 	}
+	var destinations []string
 	var inside, escaped bool
 	switch cmd.word {
 	case "tar":
-		inside, escaped = execArchiveDestinationsWorkspace(cmd, execTarScan(cmd.args), "-C", "--directory")
+		scan := execTarScan(cmd.args)
+		inside, escaped = execArchiveDestinationsWorkspace(cmd, scan, "-C", "--directory")
+		destinations = execFlagValues(scan, "-C", "--directory")
 	case "unzip":
-		inside, escaped = execArchiveDestinationsWorkspace(cmd, scanCommandArgs(cmd.args, execUnzipFlagModel), "-d")
+		scan := scanCommandArgs(cmd.args, execUnzipFlagModel)
+		inside, escaped = execArchiveDestinationsWorkspace(cmd, scan, "-d")
+		destinations = execFlagValues(scan, "-d")
 	case "gunzip":
-		inside, escaped = execPathsWorkspace(cmd, scanCommandArgs(cmd.args, execGunzipFlagModel).operands)
+		destinations = scanCommandArgs(cmd.args, execGunzipFlagModel).operands
+		inside, escaped = execPathsWorkspace(cmd, destinations)
 	case "curl":
-		output, _ := execOutputFile(cmd, execCurlFlagModel, "-o", "--output")
-		inside, escaped = execPathsWorkspace(cmd, []string{output})
+		destinations = execDownloadOutputFiles(cmd)
+		inside, escaped = execAnyPathWorkspace(cmd, destinations)
 	case "wget":
-		output, _ := execOutputFile(cmd, execWgetFlagModel, "-O", "--output-document")
-		inside, escaped = execPathsWorkspace(cmd, []string{output})
+		destinations = execDownloadOutputFiles(cmd)
+		inside, escaped = execAnyPathWorkspace(cmd, destinations)
+	}
+	facts := &commandFacts{}
+	if inside || !escaped && execCWDUncertainRelativeDestination(cmd, destinations) {
+		facts.categories = append(facts.categories, "archive.extract")
 	}
 	if escaped {
-		return execFacts("workspace.escape")
+		facts.categories = append(facts.categories, "workspace.escape")
 	}
-	if !inside {
+	if facts.empty() {
 		return nil
 	}
-	return execFacts("archive.extract")
+	return facts
 }
 
-// execOutputFile returns the explicit disk output named by a download command.
-// Standard streams, device paths, shell expressions and opaque flags do not
-// prove a file write.
-func execOutputFile(cmd execCommand, model commandFlagModel, short, long string) (string, bool) {
-	scan := scanCommandArgs(cmd.args, model)
-	value, ok := scan.flagValue(short, long)
-	clean := canonicalWorkspacePath(value)
-	if scan.unknownFlag || !ok || value == "" || value == "-" || strings.ContainsAny(value, fsShellMetacharacters) ||
-		strings.HasPrefix(clean, "/dev/") {
-		return "", false
+// execDownloadOutputFiles returns the effective explicit disk outputs. Wget's
+// last -O wins, while curl pairs output selectors and URLs in order; an extra
+// selector with no URL is ignored by curl.
+func execDownloadOutputFiles(cmd execCommand) []string {
+	scan := scanCommandArgs(cmd.args, execHostFlagModelFor(cmd.word))
+	if scan.unknownFlag {
+		return nil
 	}
-	return value, true
+	if cmd.word == "wget" {
+		for i := len(scan.flags) - 1; i >= 0; i-- {
+			flag := scan.flags[i]
+			if flag.name == "-O" || flag.name == "--output-document" {
+				if execOutputPath(flag.value) {
+					return []string{flag.value}
+				}
+				return nil
+			}
+		}
+		return nil
+	}
+
+	urls := len(scan.operands)
+	var outputs []string
+	for _, flag := range scan.flags {
+		if urls == 0 {
+			break
+		}
+		switch flag.name {
+		case "-o", "--output":
+			urls--
+			if execOutputPath(flag.value) {
+				outputs = append(outputs, flag.value)
+			}
+		case "-O", "--remote-name":
+			if flag.enabled() {
+				urls--
+			}
+		}
+	}
+	return outputs
+}
+
+// execOutputPath rejects output spellings that do not prove a regular file.
+func execOutputPath(value string) bool {
+	clean := canonicalWorkspacePath(value)
+	if value == "" || value == "-" || strings.ContainsAny(value, fsShellMetacharacters) ||
+		strings.HasPrefix(clean, "/dev/") {
+		return false
+	}
+	return true
+}
+
+func execFlagValues(scan commandArgScan, names ...string) []string {
+	var values []string
+	for _, flag := range scan.flags {
+		if slices.Contains(names, flag.name) {
+			values = append(values, flag.value)
+		}
+	}
+	return values
 }
 
 // execArchiveDestinationsWorkspace resolves the directory where extraction
@@ -1094,6 +1204,24 @@ func execPathsWorkspace(cmd execCommand, values []string) (inside, escaped bool)
 	return inside, fsEscapes(values, cmd.seg.ws, cmd.seg.cwdUncertain)
 }
 
+func execAnyPathWorkspace(cmd execCommand, values []string) (inside, escaped bool) {
+	for _, value := range values {
+		valueInside, valueEscaped := execPathsWorkspace(cmd, []string{value})
+		inside = inside || valueInside
+		escaped = escaped || valueEscaped
+	}
+	return inside, escaped
+}
+
+func execCWDUncertainRelativeDestination(cmd execCommand, values []string) bool {
+	if !cmd.seg.cwdUncertain {
+		return false
+	}
+	return slices.ContainsFunc(values, func(value string) bool {
+		return value != "" && !fsOperandAbsolute(value) && !strings.ContainsAny(value, fsShellMetacharacters)
+	})
+}
+
 // permission.changed ---------------------------------------------------------
 
 var execPermissionCommands = map[string]bool{"chmod": true, "chown": true, "chgrp": true}
@@ -1123,7 +1251,7 @@ func execPermissionFlagModelFor(word string) commandFlagModel {
 
 func execPermissionPaths(cmd execCommand) ([]string, bool) {
 	scan := scanCommandArgs(cmd.args, execPermissionFlagModelFor(cmd.word))
-	if scan.unknownFlag {
+	if scan.unknownFlag || scan.hasFlag("--from") {
 		return nil, false
 	}
 	paths := scan.operands
@@ -1146,8 +1274,10 @@ func execPermission(cmd execCommand) *commandFacts {
 	}
 	inside, escaped := execPathsWorkspace(cmd, paths)
 	facts := &commandFacts{}
-	if inside {
+	if inside || !escaped && execCWDUncertainRelativeDestination(cmd, paths) {
 		facts.categories = append(facts.categories, "permission.changed")
+	}
+	if inside {
 		for _, p := range fsPaths(paths, cmd.seg.ws, cmd.seg.cwdUncertain) {
 			appendCommandTarget(facts, CommandTarget{Kind: "path", Value: p})
 		}
@@ -1231,7 +1361,7 @@ func execInteractive(cmd execCommand) *commandFacts {
 // execGitConfigWriteFlags are the git config flags that mutate the config
 // using only the key, not a second value operand (`--unset name` removes
 // `name`; it does not take a value the way `-r`-style flags do elsewhere).
-var execGitConfigWriteFlags = []string{"--unset", "--unset-all", "--add", "--replace-all", "--edit", "-e"}
+var execGitConfigWriteFlags = []string{"--unset", "--unset-all", "--add", "--replace-all"}
 var execGitConfigReadFlags = []string{
 	"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l",
 	"--get-color", "--get-colorbool",
@@ -1259,6 +1389,9 @@ func execGitConfigWrites(configArgs []string) bool {
 	if scan.hasFlag(execGitConfigReadFlags...) {
 		return false
 	}
+	if scan.hasFlag("--edit", "-e") {
+		return false
+	}
 	if scan.hasFlag(execGitConfigWriteFlags...) {
 		return true
 	}
@@ -1268,7 +1401,7 @@ func execGitConfigWrites(configArgs []string) bool {
 func execPackageDestinationFlags(word string) []string {
 	switch word {
 	case "pip", "pip3":
-		return []string{"-t", "--target", "--prefix", "--root"}
+		return []string{"-t", "--target", "--prefix", "--root", "--report"}
 	case "npm", "pnpm", "yarn":
 		return []string{"--prefix", "--cwd", "--modules-folder"}
 	case "cargo":
@@ -1284,6 +1417,9 @@ func execPackageDestinations(scan commandArgScan, word string) []string {
 	var values []string
 	for _, flag := range scan.flags {
 		if slices.Contains(names, flag.name) {
+			if flag.name == "--report" && !execOutputPath(flag.value) {
+				continue
+			}
 			values = append(values, flag.value)
 		}
 	}
