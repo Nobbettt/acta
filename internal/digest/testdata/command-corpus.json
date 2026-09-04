@@ -442,7 +442,12 @@
   ],
   "want_targets": [],
   "want_mutations": [],
-  "source": "review-r1-contract"
+  "source": "review-r1-contract",
+  "failure": {
+   "want_categories": [],
+   "want_targets": [],
+   "want_mutations": []
+  }
  },
  {
   "command": "mv internal/old.go internal/digest/",
@@ -467,17 +472,22 @@
     "to": "internal/digest/old.go"
    }
   ],
-  "source": "review-r1-correctness"
+  "source": "review-r1-correctness",
+  "failure": {
+   "want_categories": [],
+   "want_targets": [],
+   "want_mutations": []
+  }
  },
  {
   "command": "mv a b c",
-  "want_categories": [
-   "fs.move"
-  ],
+  "want_categories": [],
   "want_targets": [],
   "want_mutations": [],
   "source": "review-r1-correctness",
-  "note": "Standing ruling: multi-source mv keeps only fs.move; unprovable destination targets are intentionally withheld."
+  "note": "Standing ruling: multi-source mv credits nothing because no source/destination pair is provable.",
+  "disagrees_with_impl": true,
+  "disagreement": "fsMove still credits fs.move for an ambiguous multi-source move."
  },
  {
   "command": "git rm --cached secrets.env",
@@ -542,7 +552,12 @@
     "to": ""
    }
   ],
-  "source": "review-r1-correctness"
+  "source": "review-r1-correctness",
+  "failure": {
+   "want_categories": [],
+   "want_targets": [],
+   "want_mutations": []
+  }
  },
  {
   "command": "git remote -v",
@@ -992,21 +1007,33 @@
  },
  {
   "command": "command false && git status",
-  "want_categories": [
-   "vcs.read"
-  ],
+  "want_categories": [],
   "want_targets": [],
   "want_mutations": [],
-  "source": "review-r11-contract"
+  "source": "review-r11-contract",
+  "note": "command false exits nonzero, so the && right-hand side cannot execute.",
+  "disagrees_with_impl": true,
+  "disagreement": "knownShellOutcome does not recognize false through the command wrapper.",
+  "failure": {
+   "want_categories": [],
+   "want_targets": [],
+   "want_mutations": []
+  }
  },
  {
   "command": "command false && nohup sleep 60",
-  "want_categories": [
-   "process.background"
-  ],
+  "want_categories": [],
   "want_targets": [],
   "want_mutations": [],
-  "source": "review-r11-contract"
+  "source": "review-r11-contract",
+  "note": "command false exits nonzero, so the && right-hand side cannot execute.",
+  "disagrees_with_impl": true,
+  "disagreement": "knownShellOutcome does not recognize false through the command wrapper.",
+  "failure": {
+   "want_categories": [],
+   "want_targets": [],
+   "want_mutations": []
+  }
  },
  {
   "command": "exit 0; curl https://never.example",
@@ -1145,14 +1172,12 @@
   "want_categories": [
    "package.install"
   ],
-  "want_targets": [
-   {
-    "kind": "package",
-    "value": "https://packages.example.test"
-   }
-  ],
+  "want_targets": [],
   "want_mutations": [],
-  "source": "review-r12-contract"
+  "source": "review-r12-contract",
+  "note": "A package URL proves a source location, not the installed package name.",
+  "disagrees_with_impl": true,
+  "disagreement": "Package target extraction publishes a sanitized URL origin as a package name."
  },
  {
   "command": "curl -o /dev/zero https://example.com/tool.tgz",
@@ -1480,8 +1505,7 @@
  {
   "command": "npm install --prefix /tmp --prefix . left-pad",
   "want_categories": [
-   "package.install",
-   "workspace.escape"
+   "package.install"
   ],
   "want_targets": [
    {
@@ -1490,7 +1514,10 @@
    }
   ],
   "want_mutations": [],
-  "source": "review-r17-correctness"
+  "source": "review-r17-correctness",
+  "note": "npm uses the final repeated --prefix value, which is the in-workspace current directory.",
+  "disagrees_with_impl": true,
+  "disagreement": "Workspace escape detection considers the overridden outside --prefix value."
  },
  {
   "command": "pip install --report /tmp/report.json requests",
@@ -1573,8 +1600,7 @@
  {
   "command": "pip install --target /tmp/vendor --target vendor requests",
   "want_categories": [
-   "package.install",
-   "workspace.escape"
+   "package.install"
   ],
   "want_targets": [
    {
@@ -1583,7 +1609,10 @@
    }
   ],
   "want_mutations": [],
-  "source": "review-r19-contract"
+  "source": "review-r19-contract",
+  "note": "pip uses the final repeated --target value, which is the in-workspace vendor directory.",
+  "disagrees_with_impl": true,
+  "disagreement": "Workspace escape detection considers the overridden outside --target value."
  },
  {
   "command": "chown --from=root root config/settings.json",
@@ -1893,7 +1922,12 @@
   ],
   "want_targets": [],
   "want_mutations": [],
-  "source": "contract:PLAN.md"
+  "source": "contract:PLAN.md",
+  "failure": {
+   "want_categories": [],
+   "want_targets": [],
+   "want_mutations": []
+  }
  },
  {
   "command": "rm '*.tmp'",
@@ -2057,7 +2091,12 @@
   ],
   "want_targets": [],
   "want_mutations": [],
-  "source": "contract:PLAN.md"
+  "source": "contract:PLAN.md",
+  "failure": {
+   "want_categories": [],
+   "want_targets": [],
+   "want_mutations": []
+  }
  },
  {
   "command": "git commit -m done",
@@ -2138,7 +2177,12 @@
   ],
   "want_targets": [],
   "want_mutations": [],
-  "source": "contract:PLAN.md"
+  "source": "contract:PLAN.md",
+  "failure": {
+   "want_categories": [],
+   "want_targets": [],
+   "want_mutations": []
+  }
  },
  {
   "command": "git rebase main",
@@ -2317,7 +2361,12 @@
   ],
   "want_targets": [],
   "want_mutations": [],
-  "source": "contract:PLAN.md"
+  "source": "contract:PLAN.md",
+  "failure": {
+   "want_categories": [],
+   "want_targets": [],
+   "want_mutations": []
+  }
  },
  {
   "command": "gh pr merge 12",
@@ -2536,7 +2585,14 @@
   ],
   "want_targets": [],
   "want_mutations": [],
-  "source": "contract:PLAN.md"
+  "source": "contract:PLAN.md",
+  "failure": {
+   "want_categories": [
+    "verify.run"
+   ],
+   "want_targets": [],
+   "want_mutations": []
+  }
  },
  {
   "command": "go build ./...",
@@ -2715,7 +2771,14 @@
   "want_targets": [],
   "want_mutations": [],
   "source": "contract:PLAN.md",
-  "note": "Round 14 ruling: search.query publishes no free-form pattern target."
+  "note": "Round 14 ruling: search.query publishes no free-form pattern target.",
+  "failure": {
+   "want_categories": [
+    "search.query"
+   ],
+   "want_targets": [],
+   "want_mutations": []
+  }
  },
  {
   "command": "grep -R error logs",
@@ -2758,7 +2821,12 @@
   "want_targets": [],
   "want_mutations": [],
   "source": "contract:PLAN.md",
-  "output": "Acta\n"
+  "output": "Acta\n",
+  "failure": {
+   "want_categories": [],
+   "want_targets": [],
+   "want_mutations": []
+  }
  },
  {
   "command": "cat CONTRIBUTING",
@@ -2954,7 +3022,14 @@
   ],
   "want_targets": [],
   "want_mutations": [],
-  "source": "contract:PLAN.md"
+  "source": "contract:PLAN.md",
+  "failure": {
+   "want_categories": [
+    "command.interactive"
+   ],
+   "want_targets": [],
+   "want_mutations": []
+  }
  },
  {
   "command": "nano file.go",
@@ -3213,7 +3288,14 @@
   ],
   "want_targets": [],
   "want_mutations": [],
-  "source": "contract:PLAN.md"
+  "source": "contract:PLAN.md",
+  "failure": {
+   "want_categories": [
+    "env.inspect"
+   ],
+   "want_targets": [],
+   "want_mutations": []
+  }
  },
  {
   "command": "printenv HOME",
@@ -3407,5 +3489,13 @@
   "want_mutations": [],
   "source": "ruling:LOOP-LEDGER.md",
   "note": "The standing ruling keeps only the host after the final at-sign."
+ },
+ {
+  "command": "/bin/bash -lc \"logout; rm victim.txt\"",
+  "want_categories": [],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r24-contract",
+  "note": "A login-shell logout ends the shell before the following command can run."
  }
 ]

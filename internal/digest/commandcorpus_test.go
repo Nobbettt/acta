@@ -1,7 +1,10 @@
 package digest
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"reflect"
 	"slices"
@@ -32,8 +35,8 @@ func TestCommandCorpus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var corpus []commandCorpusCase
-	if err := json.Unmarshal(data, &corpus); err != nil {
+	corpus, err := decodeCommandCorpus(data)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if len(corpus) < 200 || len(corpus) > 400 {
@@ -52,6 +55,55 @@ func TestCommandCorpus(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDecodeCommandCorpusRejectsUnknownFields(t *testing.T) {
+	_, err := decodeCommandCorpus([]byte(`[{"command":"echo ok","source":"x","want_category":["fs.delete"]}]`))
+	if err == nil || !strings.Contains(err.Error(), `entry 0 ("echo ok"): json: unknown field "want_category"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestDecodeCommandCorpusRejectsTrailingValue(t *testing.T) {
+	_, err := decodeCommandCorpus([]byte(`[] {}`))
+	if err == nil || !strings.Contains(err.Error(), "trailing JSON value") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func decodeCommandCorpus(data []byte) ([]commandCorpusCase, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	var entries []json.RawMessage
+	if err := dec.Decode(&entries); err != nil {
+		return nil, err
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("trailing JSON value")
+		}
+		return nil, fmt.Errorf("trailing JSON value: %w", err)
+	}
+	corpus := make([]commandCorpusCase, len(entries))
+	for i, entry := range entries {
+		dec := json.NewDecoder(bytes.NewReader(entry))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&corpus[i]); err != nil {
+			return nil, fmt.Errorf("entry %d (%q): %w", i, corpus[i].Command, err)
+		}
+	}
+	return corpus, nil
+}
+
+func TestClassifyCorpusCommandBoundsRetrievalOutput(t *testing.T) {
+	got := classifyCorpusCommand(commandCorpusCase{
+		Command: "cat README.md",
+		Output:  strings.Repeat("x", maxCommandOutputChars+1),
+	}, true)
+	compareCorpusWant(t, "oversized cat README.md", commandCorpusWant{
+		Categories: []string{},
+		Targets:    []CommandTarget{},
+		Mutations:  []ShellMutation{},
+	}, got)
 }
 
 func validateCorpusCase(t *testing.T, index int, tc commandCorpusCase) {
@@ -92,11 +144,13 @@ func classifyCorpusCommand(tc commandCorpusCase, exitOK bool) commandCorpusWant 
 	if facts == nil {
 		facts = &commandFacts{}
 	}
-	if retrieval := retrievalFromCommand(tc.Command, tc.Output, ws); retrieval != nil {
-		classifyPaths(facts, retrieval.files, ws)
-	} else {
-		classifyPaths(facts, nil, ws)
+	var paths []string
+	if exitOK {
+		if retrieval := retrievalFromCommand(tc.Command, boundedOutput(tc.Output), ws); retrieval != nil {
+			paths = retrieval.files
+		}
 	}
+	classifyPaths(facts, paths, ws)
 	e := Event{Kind: KindCommand, Command: tc.Command, Categories: facts.categories, srcLine: 2, IsError: !exitOK}
 	d := &Digest{}
 	if tc.Retry {
