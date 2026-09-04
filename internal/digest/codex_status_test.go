@@ -85,7 +85,7 @@ func TestCodexFileChangeRejectsTraversal(t *testing.T) {
 	}
 }
 
-func TestCodexFileChangeUsesProcessWorkspaceAlias(t *testing.T) {
+func TestCodexFileChangeUsesProvenWorkspaceAlias(t *testing.T) {
 	root := t.TempDir()
 	workspaceDir := filepath.Join(root, "workspace")
 	if err := os.Mkdir(workspaceDir, 0o755); err != nil {
@@ -95,8 +95,6 @@ func TestCodexFileChangeUsesProcessWorkspaceAlias(t *testing.T) {
 	if err := os.Symlink(workspaceDir, alias); err != nil {
 		t.Fatal(err)
 	}
-	t.Chdir(alias)
-
 	raw := strings.Join([]string{
 		`{"type":"thread.started","thread_id":"t-1"}`,
 		`{"type":"turn.started"}`,

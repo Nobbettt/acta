@@ -3497,5 +3497,119 @@
   "want_mutations": [],
   "source": "review-r24-contract",
   "note": "A login-shell logout ends the shell before the following command can run."
+ },
+ {
+  "command": "pushd /tmp && curl -o tool.tgz https://example.com/tool.tgz",
+  "want_categories": [
+   "network.egress",
+   "workspace.escape"
+  ],
+  "want_targets": [
+   {
+    "kind": "url",
+    "value": "https://example.com"
+   }
+  ],
+  "want_mutations": [],
+  "source": "review-r26-PPP"
+ },
+ {
+  "command": "echo ${X:-safe;rm victim.txt}",
+  "want_categories": [],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r26-PPP"
+ },
+ {
+  "command": "command false || rm victim.txt",
+  "want_categories": [
+   "fs.delete"
+  ],
+  "want_targets": [
+   {
+    "kind": "path",
+    "value": "victim.txt"
+   }
+  ],
+  "want_mutations": [
+   {
+    "kind": "delete",
+    "path": "victim.txt",
+    "from": "",
+    "to": ""
+   }
+  ],
+  "source": "review-r26-PPP"
+ },
+ {
+  "command": "cd \"$OUTSIDE\" && rm victim.txt",
+  "want_categories": [],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r26-PPP"
+ },
+ {
+  "command": "export GIT_WORK_TREE=/tmp OTHER=x && git rm victim.txt",
+  "want_categories": [
+   "workspace.escape"
+  ],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r26-PPP"
+ },
+ {
+  "command": "git -C /tmp/other rm victim.txt",
+  "want_categories": [
+   "workspace.escape"
+  ],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r26-QQQ"
+ },
+ {
+  "command": "mv -t archive a b",
+  "want_categories": [],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r26-QQQ"
+ },
+ {
+  "command": "mv a b archive/",
+  "want_categories": [],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r26-QQQ"
+ },
+ {
+  "command": "docker compose up -d --detach=false",
+  "want_categories": [
+   "container.run"
+  ],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r26-QQQ"
+ },
+ {
+  "command": "npm install --global --global=false left-pad",
+  "want_categories": [
+   "package.install"
+  ],
+  "want_targets": [
+   {
+    "kind": "package",
+    "value": "left-pad"
+   }
+  ],
+  "want_mutations": [],
+  "source": "review-r26-QQQ"
+ },
+ {
+  "command": "git tag --annotate v1.2.3 --message release",
+  "want_categories": [
+   "vcs.mutate"
+  ],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r26-QQQ"
  }
 ]

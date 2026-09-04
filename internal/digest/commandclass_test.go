@@ -767,17 +767,20 @@ func TestClassifyCommandRequiresUnambiguousWholeChainStatus(t *testing.T) {
 }
 
 func TestClassifyCommandWithholdsPathsAfterUntrackedParentShellEnvironment(t *testing.T) {
-	commands := []string{
-		`/bin/bash -lc "export GIT_DIR=/tmp/other/.git GIT_WORK_TREE=/tmp/other && git rm victim.txt"`,
-		`/bin/bash -lc "GIT_WORK_TREE=/tmp/other; git rm victim.txt"`,
-		`/bin/bash -lc "GIT_WORK_TREE=/tmp/other >/dev/null; git rm victim.txt"`,
-		`/bin/bash -lc "declare -x GIT_WORK_TREE=/tmp/other; git rm victim.txt"`,
+	cases := []struct {
+		command string
+		want    []string
+	}{
+		{`/bin/bash -lc "export GIT_DIR=/tmp/other/.git GIT_WORK_TREE=/tmp/other && git rm victim.txt"`, []string{"workspace.escape"}},
+		{`/bin/bash -lc "GIT_WORK_TREE=/tmp/other; git rm victim.txt"`, []string{"fs.delete"}},
+		{`/bin/bash -lc "GIT_WORK_TREE=/tmp/other >/dev/null; git rm victim.txt"`, []string{"fs.delete"}},
+		{`/bin/bash -lc "declare -x GIT_WORK_TREE=/tmp/other; git rm victim.txt"`, []string{"fs.delete"}},
 	}
-	for _, command := range commands {
-		facts := classifyCommand(command, "", true, testWorkspace())
-		if facts == nil || !reflect.DeepEqual(facts.categories, []string{"fs.delete"}) ||
+	for _, c := range cases {
+		facts := classifyCommand(c.command, "", true, testWorkspace())
+		if facts == nil || !reflect.DeepEqual(facts.categories, c.want) ||
 			len(facts.targets) != 0 || len(facts.mutations) != 0 {
-			t.Errorf("classifyCommand(%q) = %+v, want category-only fs.delete", command, facts)
+			t.Errorf("classifyCommand(%q) = %+v, want categories %v only", c.command, facts, c.want)
 		}
 	}
 }
@@ -1076,9 +1079,8 @@ func TestClassifyCommandTreatsBareCdAndPopdAsCwdUncertain(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			facts := classifyCommand(c.command, "", true, testWorkspace())
-			if facts == nil || !reflect.DeepEqual(facts.categories, []string{"fs.delete"}) || len(facts.targets) != 0 || len(facts.mutations) != 0 {
-				t.Fatalf("classifyCommand(%q) = %+v, want category-only fs.delete", c.command, facts)
+			if facts := classifyCommand(c.command, "", true, testWorkspace()); facts != nil {
+				t.Fatalf("classifyCommand(%q) = %+v, want nil for an unknown cwd", c.command, facts)
 			}
 		})
 	}

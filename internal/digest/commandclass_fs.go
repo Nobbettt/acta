@@ -70,7 +70,16 @@ func classifyFS(segment commandSegment) *commandFacts {
 		if workTree, ok := gitWorkTree(segment.tokens); ok && fsEscapes([]string{workTree}, segment.ws, segment.cwdUncertain) {
 			return &commandFacts{categories: []string{"workspace.escape"}}
 		}
-		return &commandFacts{categories: []string{"fs.delete"}}
+		if dir, ok := gitCommandDirectory(segment.tokens, segment.cwd, segment.cwdKnown && !segment.cwdUncertain); ok {
+			operands, _ := fsOperands(verb, args)
+			for i, operand := range operands {
+				if !fsOperandAbsolute(operand) {
+					operands[i] = path.Join(dir, canonicalWorkspacePath(operand))
+				}
+			}
+			return fsDelete(operands, segment.ws, false)
+		}
+		return nil
 	}
 	if scan.unknownFlag {
 		var category string
@@ -215,6 +224,36 @@ func gitWorkTree(tokens []string) (value string, ok bool) {
 		return value, true
 	}
 	return configuredValue, configured
+}
+
+// gitCommandDirectory returns the literal directory selected by git's -C
+// flags. Each relative occurrence is resolved against the preceding one, as
+// Git does; an absolute occurrence restores certainty after an unknown cwd.
+func gitCommandDirectory(tokens []string, cwd string, cwdKnown bool) (string, bool) {
+	tokens = execLeadingTokens(tokens)
+	if len(tokens) == 0 || path.Base(tokens[0]) != "git" {
+		return "", false
+	}
+	scan := scanCommandArgs(tokens[1:], gitGlobalFlagModel)
+	if len(scan.operandIndexes) == 0 {
+		return "", false
+	}
+	verbIndex := scan.operandIndexes[0]
+	found := false
+	for _, flag := range scan.flags {
+		if flag.index >= verbIndex || flag.name != "-C" {
+			continue
+		}
+		found = true
+		if flag.value == "" || strings.ContainsAny(flag.value, fsShellMetacharacters) {
+			cwd, cwdKnown = "", false
+		} else if fsOperandAbsolute(flag.value) {
+			cwd, cwdKnown = canonicalWorkspacePath(flag.value), true
+		} else if cwdKnown {
+			cwd = path.Join(cwd, canonicalWorkspacePath(flag.value))
+		}
+	}
+	return cwd, found && cwdKnown
 }
 
 type commandFlagArity uint8
@@ -428,14 +467,15 @@ func commandBooleanValue(model commandFlagModel, name string) bool {
 }
 
 func (scan commandArgScan) hasFlag(names ...string) bool {
+	found, enabled := false, false
 	for _, flag := range scan.flags {
 		for _, name := range names {
-			if flag.name == name && flag.enabled() {
-				return true
+			if flag.name == name {
+				found, enabled = true, flag.enabled()
 			}
 		}
 	}
-	return false
+	return found && enabled
 }
 
 func (scan commandArgScan) hasModeFlag(names ...string) bool {
@@ -640,28 +680,17 @@ func fsDelete(operands []string, ws *workspace, cwdUncertain bool) *commandFacts
 // fsMove derives the candidate paths for a move. classifyFS removes them when
 // fsRuntimeOutcomeUnproven finds a conditional mode; otherwise the plain
 // two-operand form uses the accepted assumption documented by that gate.
-// `mv a b c` moves each source into a directory, but this classifier does not
-// derive that multi-source shape, so guessing wrong cannot report files at
-// paths that never existed.
+// Multi-source moves are deliberately uncredited: command text alone does not
+// prove each source/destination pair.
 func fsMove(args, operands []string, ws *workspace, cwdUncertain bool) *commandFacts {
 	if dest, ok := fsCopyTargetFlag("mv", args); ok {
-		if dest == "" || len(operands) == 0 {
+		if dest == "" || len(operands) != 1 {
 			return nil
 		}
-		facts := &commandFacts{}
-		for _, src := range operands {
-			facts.merge(fsMoveIntoDir(src, dest, ws, cwdUncertain))
-		}
-		if facts.empty() {
-			return nil
-		}
-		return facts
+		return fsMoveIntoDir(operands[0], dest, ws, cwdUncertain)
 	}
-	if len(operands) < 2 {
+	if len(operands) != 2 {
 		return nil
-	}
-	if len(operands) > 2 {
-		return fsDestinationOnly("fs.move", operands[len(operands)-1], ws, cwdUncertain)
 	}
 	src, dest := operands[0], operands[1]
 	if strings.HasSuffix(dest, "/") || fsDestinationNamesDirectory(dest) || fsIsWorkspaceRoot(dest, ws) {

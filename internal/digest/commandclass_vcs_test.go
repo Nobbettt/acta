@@ -84,6 +84,7 @@ func TestClassifyVCSCategories(t *testing.T) {
 		{"stash", "git stash", true, []string{"vcs.mutate"}},
 		{"stash push", "git stash push -m wip", true, []string{"vcs.mutate"}},
 		{"tag create", "git tag v1.2.3", true, []string{"vcs.mutate"}},
+		{"annotated tag with long flags", "git tag --annotate v1.2.3 --message release", true, []string{"vcs.mutate"}},
 		{"tag long delete", "git tag --delete v1", true, []string{"vcs.mutate"}},
 		{"tag long force", "git tag --force v1", true, []string{"vcs.mutate"}},
 		{"restore", "git restore internal/digest/trace.go", true, []string{"vcs.mutate"}},

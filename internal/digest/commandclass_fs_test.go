@@ -11,12 +11,15 @@ import (
 // command. It exercises the classifier directly so the expectations stay exact
 // while the sibling classifiers grow their own categories.
 func fsSegment(command string, exitOK bool) commandSegment {
+	ws := testWorkspace()
 	return commandSegment{
-		raw:     command,
-		tokens:  tokensForSegment(command),
-		command: command,
-		exitOK:  exitOK,
-		ws:      testWorkspace(),
+		raw:      command,
+		tokens:   tokensForSegment(command),
+		command:  command,
+		exitOK:   exitOK,
+		ws:       ws,
+		cwd:      canonicalWorkspacePath(ws.root),
+		cwdKnown: true,
 	}
 }
 
@@ -123,12 +126,12 @@ func TestClassifyFS(t *testing.T) {
 		// "dist" in this segment's own token list; it must not be credited as
 		// part of the path either.
 		{"rm inside a subshell fragment credits nothing", "rm -rf dist)", true, nil},
-		{"git rm behind a global flag keeps only its category", "git -C other/repo rm x.txt", true, &commandFacts{
+		{"git rm behind a literal in-workspace directory resolves beneath it", "git -C other/repo rm x.txt", true, &commandFacts{
 			categories: []string{"fs.delete"},
+			targets:    fsPathTargets("other/repo/x.txt"),
+			mutations:  []ShellMutation{{Kind: "delete", Path: "other/repo/x.txt"}},
 		}},
-		{"git rm behind a relative work tree keeps only its category", "GIT_WORK_TREE=other git rm x.txt", true, &commandFacts{
-			categories: []string{"fs.delete"},
-		}},
+		{"git rm behind an unresolved relative work tree credits nothing", "GIT_WORK_TREE=other git rm x.txt", true, nil},
 		{"git rm behind an outside environment work tree escapes", "GIT_WORK_TREE=/tmp/other git rm x.txt", true, &commandFacts{
 			categories: []string{"workspace.escape"},
 		}},
@@ -222,9 +225,7 @@ func TestClassifyFS(t *testing.T) {
 		}},
 		{"failed mv moved nothing", "mv old.txt new.txt", false, nil},
 		{"mv help moves nothing", "mv -h old.txt new.txt", true, nil},
-		{"mv into an unproven directory keeps only the category", "mv a.txt b.txt archive", true, &commandFacts{
-			categories: []string{"fs.move"},
-		}},
+		{"mv with multiple sources credits nothing", "mv a.txt b.txt archive", true, nil},
 		{"mv out of the workspace", "mv old.txt /tmp/new.txt", true, &commandFacts{
 			categories: []string{"workspace.escape"},
 		}},
@@ -311,14 +312,7 @@ func TestClassifyFS(t *testing.T) {
 			targets:    fsPathTargets("notes.md", "=archive/notes.md"),
 			mutations:  []ShellMutation{{Kind: "move", From: "notes.md", To: "=archive/notes.md"}},
 		}},
-		{"mv -t with multiple sources credits each move", "mv -t archive a.txt b.txt", true, &commandFacts{
-			categories: []string{"fs.move"},
-			targets:    fsPathTargets("a.txt", "archive/a.txt", "b.txt", "archive/b.txt"),
-			mutations: []ShellMutation{
-				{Kind: "move", From: "a.txt", To: "archive/a.txt"},
-				{Kind: "move", From: "b.txt", To: "archive/b.txt"},
-			},
-		}},
+		{"mv -t with multiple sources credits nothing", "mv -t archive a.txt b.txt", true, nil},
 		{"mv -t to the source directory changes nothing", "mv -t archive archive/a.txt", true, nil},
 		{"mv trailing directory equal to source changes nothing", "mv archive/a.txt archive/", true, nil},
 		{"mv -t with no source credits nothing", "mv -t archive", true, nil},
@@ -760,9 +754,11 @@ func TestDisabledBooleanFlagsDoNotEnableModes(t *testing.T) {
 		forbidden string
 	}{
 		{"npm global false stays local", "npm install --global=false left-pad", "package.install", "workspace.escape"},
+		{"npm final global false stays local", "npm install --global --global=false left-pad", "package.install", "workspace.escape"},
 		{"npm package lock only false installs", "npm install --package-lock-only=false left-pad", "package.install", ""},
 		{"npm dry run false installs", "npm install --dry-run=false left-pad", "package.install", ""},
 		{"compose detach false stays foreground", "docker compose up --detach=false", "container.run", "process.background"},
+		{"compose final detach false stays foreground", "docker compose up -d --detach=false", "container.run", "process.background"},
 		{"compose short detach false stays foreground", "docker compose up -d=false", "container.run", "process.background"},
 		{"unsupported curl version value remains informational", "curl --version=false https://example.com", "", "network.egress"},
 	}

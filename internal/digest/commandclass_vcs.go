@@ -133,9 +133,9 @@ var gitFlagModels = map[string]commandFlagModel{
 		"--points-at": flagValue, "--format": flagValue, "--sort": flagValue,
 	},
 	"tag": {
-		"-a": flagBoolean, "-l": flagBoolean, "-v": flagBoolean,
+		"-a": flagBoolean, "--annotate": flagBoolean, "-l": flagBoolean, "-v": flagBoolean,
 		"-d": flagBoolean, "-f": flagBoolean, "-n": flagAttachedValue,
-		"-m": flagValue, "-F": flagValue,
+		"-m": flagValue, "--message": flagValue, "-F": flagValue,
 		"--list": flagBoolean, "--verify": flagBoolean,
 		"--delete": flagBoolean, "--force": flagBoolean,
 		"--contains": flagValue, "--no-contains": flagValue,

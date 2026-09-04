@@ -147,6 +147,62 @@ func TestControlPlaneClassificationSurvivesARedigest(t *testing.T) {
 	}
 }
 
+func TestRedigestIsIndependentOfProcessWorkingDirectory(t *testing.T) {
+	root := t.TempDir()
+	workspaceDir := filepath.Join(root, "workspace")
+	if err := os.Mkdir(workspaceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "agent-cwd")
+	if err := os.Symlink(workspaceDir, alias); err != nil {
+		t.Fatal(err)
+	}
+	runDir := filepath.Join(root, "run")
+	if err := os.Mkdir(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lines := []string{
+		`{"type":"thread.started","thread_id":"thread-alias"}`,
+		`{"type":"turn.started"}`,
+		`{"type":"item.completed","item":{"id":"f1","type":"file_change","status":"completed","changes":[{"path":"` + filepath.ToSlash(filepath.Join(alias, "sample.txt")) + `","kind":"update"}]}}`,
+		`{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"rm stage-control/task.json","status":"completed","exit_code":0,"aggregated_output":""}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`,
+	}
+	rawName := "codex-events.jsonl"
+	if err := os.WriteFile(filepath.Join(runDir, rawName), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rec := validTestRecord(workspaceDir, rawName)
+	rec.RunDir = runDir
+	rec.RawStdoutPath = filepath.Join(runDir, rawName)
+	rec.RawStderrPath = filepath.Join(runDir, "agent.stderr.log")
+	writeRecord(t, runDir, rec)
+	options := Options{ControlPlaneDir: filepath.Join(alias, "stage-control")}
+
+	t.Chdir(alias)
+	fromAlias, err := FromRunDirWithOptions(context.Background(), runDir, "", options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+	fromOther, err := FromRunDirWithOptions(context.Background(), runDir, "", options)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a, _ := json.Marshal(fromAlias)
+	b, _ := json.Marshal(fromOther)
+	if string(a) != string(b) {
+		t.Fatalf("re-digest depends on process cwd\n  alias cwd: %s\n  other cwd: %s", a, b)
+	}
+	if !reflect.DeepEqual(fromOther.Files, []FileTouch{{Path: "sample.txt", Edited: true}}) {
+		t.Fatalf("recovered files = %+v, want sample.txt edit", fromOther.Files)
+	}
+	if got := commandCategories(t, fromOther); !reflect.DeepEqual(got, []string{"control.access", "fs.delete"}) {
+		t.Fatalf("categories = %v, want [control.access fs.delete]", got)
+	}
+}
+
 func commandCategories(t *testing.T, d *Digest) []string {
 	t.Helper()
 	for _, event := range d.Timeline {

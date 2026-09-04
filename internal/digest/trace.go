@@ -95,19 +95,6 @@ func newWorkspace(dir string) *workspace {
 	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
 		add(resolved)
 	}
-	// Stage launchers start Acta in the agent workspace as well as passing it
-	// via --cwd. On aliased mounts, getcwd can expose another valid prefix that
-	// symlink resolution cannot discover.
-	if cwd, err := os.Getwd(); err == nil {
-		if dirInfo, dirErr := os.Stat(abs); dirErr == nil {
-			if cwdInfo, cwdErr := os.Stat(cwd); cwdErr == nil && os.SameFile(dirInfo, cwdInfo) {
-				add(cwd)
-				if resolved, resolveErr := filepath.EvalSymlinks(cwd); resolveErr == nil {
-					add(resolved)
-				}
-			}
-		}
-	}
 	for _, v := range append([]string(nil), w.variants...) {
 		add(togglePrivatePrefix(v))
 	}
@@ -154,6 +141,27 @@ func (w *workspace) rel(p string) (string, bool) {
 		}
 		if matched {
 			return clean[len(prefix):], true
+		}
+	}
+	// A provider may spell an absolute path through an alias that the recorded
+	// workspace path cannot reveal. Prove the alias from the candidate itself;
+	// ambient process state must never change a re-digest.
+	rootInfo, err := os.Stat(w.root)
+	if err != nil || !rootInfo.IsDir() {
+		return p, false
+	}
+	native := filepath.Clean(filepath.FromSlash(clean))
+	for ancestor := native; ; ancestor = filepath.Dir(ancestor) {
+		if info, statErr := os.Stat(ancestor); statErr == nil && info.IsDir() && os.SameFile(rootInfo, info) {
+			rel, relErr := filepath.Rel(ancestor, native)
+			if relErr == nil {
+				return canonicalWorkspacePath(rel), true
+			}
+			return p, false
+		}
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			break
 		}
 	}
 	return p, false

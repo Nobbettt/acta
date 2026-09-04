@@ -260,6 +260,10 @@ func splitRawChain(command string) ([]commandChainRaw, bool) {
 			// A command substitution has its own control flow and exit statuses.
 			// None of its apparent commands may borrow the outer command's status.
 			return nil, false
+		case c == '$' && !inSingle && !inDouble && i+1 < len(command) && command[i+1] == '{':
+			// Parameter expansions have their own quoting and separator grammar.
+			// Until it is modelled, apparent commands inside one prove nothing.
+			return nil, false
 		case inSingle || inDouble:
 			// inside a quote: none of the separators below count
 		case c == '#' && wordStart:
@@ -684,6 +688,13 @@ func pruneUnexecuted(raw []commandChainRaw) []commandChainRaw {
 }
 
 func knownShellOutcome(tokens []string) shellOutcome {
+	tokens = execLeadingTokens(tokens)
+	if len(tokens) > 0 && tokens[0] == "command" {
+		tokens = tokens[1:]
+		for len(tokens) > 0 && (tokens[0] == "-p" || tokens[0] == "--") {
+			tokens = tokens[1:]
+		}
+	}
 	if len(tokens) != 1 {
 		return shellOutcomeUnknown
 	}
@@ -834,7 +845,7 @@ func classifyCommand(command, outputText string, exitOK bool, ws *workspace) *co
 						(len(outsideFacts.targets) != 0 || len(outsideFacts.mutations) != 0) {
 						segmentFacts.merge(&commandFacts{categories: []string{"workspace.escape"}})
 					}
-				} else {
+				} else if cwdKnown {
 					for _, category := range fsFacts.categories {
 						if strings.HasPrefix(category, "fs.") {
 							segmentFacts.merge(&commandFacts{categories: []string{category}})
@@ -871,7 +882,13 @@ func nextLiteralWorkingDirectory(tokens []string, statusProven bool, cwd string,
 	for len(tokens) > 0 && execIsAssignment(tokens[0]) {
 		tokens = tokens[1:]
 	}
-	if len(tokens) == 0 || tokens[0] != "cd" {
+	if len(tokens) == 0 {
+		return cwd, known
+	}
+	if tokens[0] == "popd" {
+		return "", false
+	}
+	if tokens[0] != "cd" && tokens[0] != "pushd" {
 		return cwd, known
 	}
 	if !statusProven {
@@ -909,8 +926,17 @@ func nextLiteralGitWorkTree(tokens []string, statusProven bool, value string, kn
 	switch {
 	case len(tokens) == 1:
 		assignment = tokens[0]
-	case len(tokens) == 2 && tokens[0] == "export":
-		assignment = tokens[1]
+	case len(tokens) >= 2 && tokens[0] == "export":
+		for _, token := range tokens[1:] {
+			name, _, _ := strings.Cut(token, "=")
+			if name != "GIT_WORK_TREE" {
+				continue
+			}
+			if assignment != "" {
+				return "", false
+			}
+			assignment = token
+		}
 	default:
 		return "", false
 	}
