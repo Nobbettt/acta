@@ -107,6 +107,25 @@ func TestShellTokens(t *testing.T) {
 	}
 }
 
+func TestShellTokensRemovesContinuationsAndSeparatesOperators(t *testing.T) {
+	cases := []struct {
+		command string
+		want    []string
+	}{
+		{"rm foo\\\nbar", []string{"rm", "foobar"}},
+		{"rm old.txt>/dev/null", []string{"rm", "old.txt", ">", "/dev/null"}},
+		{"curl https://example.com|cat", []string{"curl", "https://example.com", "|", "cat"}},
+		{`printf '%s' 'a|b'`, []string{"printf", "%s", "a|b"}},
+		{`printf a\|b`, []string{"printf", "a|b"}},
+		{"rm old.txt 2>&1", []string{"rm", "old.txt", "2>&", "1"}},
+	}
+	for _, c := range cases {
+		if got := shellTokens(c.command); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("shellTokens(%q) = %#v, want %#v", c.command, got, c.want)
+		}
+	}
+}
+
 func TestRetrievalFromCommand(t *testing.T) {
 	ws := testWorkspace()
 	output := "some output\nlines here"
@@ -141,11 +160,11 @@ func TestRetrievalFromCommand(t *testing.T) {
 			map[string][]Span{"main.go": {{1, 50}}},
 		},
 		{
-			"nl piped to sed keeps file credit",
+			"pipeline status cannot prove nl read the file",
 			`nl -ba pkg/mod.py | sed -n '250,310p'`,
 			numbered,
-			[]string{"pkg/mod.py"},
-			map[string][]Span{"pkg/mod.py": {{250, 310}}},
+			nil,
+			nil,
 		},
 		{
 			"program output piped to sed credits nothing",
@@ -165,6 +184,27 @@ func TestRetrievalFromCommand(t *testing.T) {
 			"single-file grep",
 			`grep -n "pattern" pkg/mod.py`,
 			output,
+			[]string{"pkg/mod.py"},
+			nil,
+		},
+		{
+			"filename-shaped search pattern is not a file",
+			`rg README.md .`,
+			"notes.txt:README.md",
+			nil,
+			nil,
+		},
+		{
+			"filename-shaped explicit pattern is not a file",
+			`rg -e README.md .`,
+			"notes.txt:README.md",
+			nil,
+			nil,
+		},
+		{
+			"filename-shaped pattern does not hide the scoped file",
+			`rg "config.yaml" pkg/mod.py`,
+			"pkg/mod.py: config.yaml",
 			[]string{"pkg/mod.py"},
 			nil,
 		},
@@ -263,8 +303,15 @@ func TestRetrievalRetainsOnlyUnambiguousReadContent(t *testing.T) {
 		"export const ready = true;\n",
 		ws,
 	)
-	if filtered == nil || len(filtered.readRanges) != 0 {
-		t.Fatalf("filtered output must not be presented as a contiguous range: %#v", filtered)
+	if filtered != nil {
+		t.Fatalf("pipeline output cannot prove the leading read succeeded: %#v", filtered)
+	}
+}
+
+func TestRetrievalFromCommandRejectsPipelineMaskedReadFailure(t *testing.T) {
+	got := retrievalFromCommand("cat missing.txt | printf fallback", "fallback", testWorkspace())
+	if got != nil {
+		t.Fatalf("retrievalFromCommand credited an unproven pipeline read: %+v", got)
 	}
 }
 

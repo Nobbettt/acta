@@ -84,6 +84,9 @@ const (
 	TypeFileRead               = "file.read"
 	TypeFileWritten            = "file.written"
 	TypeFileWriteIncomplete    = "file.write.incomplete"
+	TypeFileDeleted            = "file.deleted"
+	TypeFileMoved              = "file.moved"
+	TypeFilePatched            = "file.patched"
 	TypeDiffGenerated          = "diff.generated"
 	TypeTokensReported         = "tokens.reported"
 )
@@ -186,6 +189,7 @@ func IsReasoningFreeType(typ string) bool {
 		TypeToolCallCompleted, TypeToolCallIncomplete, TypeToolResultOrphaned,
 		TypeShellCommandComplete, TypeShellCommandIncomplete, TypeWebSearchCompleted,
 		TypeWebSearchIncomplete, TypeFileRead, TypeFileWritten, TypeFileWriteIncomplete,
+		TypeFileDeleted, TypeFileMoved, TypeFilePatched,
 		TypeDiffGenerated, TypeTokensReported:
 		return true
 	default:
@@ -1101,7 +1105,8 @@ func (b *builder) appendTimelineEvent(record *runrecord.Record, item digest.Even
 		Output:       item.Output, OutputChars: item.OutputChars, OutputTruncated: item.OutputTruncated,
 		Text: text, TextChars: item.TextChars, TextTruncated: item.TextTruncated,
 		Query: item.Query, Action: item.Action,
-		Files: item.Files, Changes: item.Changes, Spans: item.Spans,
+		Files: item.Files, Categories: item.Categories, Targets: item.Targets,
+		Changes: item.Changes, Spans: item.Spans,
 		Patches: item.FilePatches,
 		Details: item.Details, RawEventLines: item.RawEventLines, Redacted: item.Redacted,
 	}, rawTimelineArtifactRefs(b.bundleDir, record, item)...)
@@ -1109,9 +1114,11 @@ func (b *builder) appendTimelineEvent(record *runrecord.Record, item digest.Even
 		return err
 	}
 	if item.Kind != digest.KindFileEdit {
-		return b.appendFileReadEvents(seq, eventTime, item)
+		if err := b.appendFileReadEvents(seq, eventTime, item); err != nil {
+			return err
+		}
 	}
-	return nil
+	return b.appendShellMutationEvents(seq, eventTime, item)
 }
 
 // timelineTimes picks the wall-clock timestamp for a timeline event: the
@@ -1164,6 +1171,60 @@ func (b *builder) appendFileReadEvents(sourceSeq int, eventTime time.Time, item 
 		}
 	}
 	return nil
+}
+
+// appendShellMutationEvents fans a classified shell command out into the file
+// timeline, the same way appendFileReadEvents does for reads: one event per
+// workspace change the command proved, carrying the sequence of the command
+// event it was derived from. A patch whose rewritten paths the command text
+// never named records no mutation, so it emits no event here — the fs.patch
+// category on the command alone carries that fact.
+func (b *builder) appendShellMutationEvents(sourceSeq int, eventTime time.Time, item digest.Event) error {
+	if len(item.ShellMutations) == 0 {
+		return nil
+	}
+	// Emitted in command order: classifyCommand already produces ShellMutations
+	// causally (e.g. `rm b && mv a b` yields delete-b then move-a->b), and a
+	// consumer replaying the file timeline in sequence order depends on that
+	// order to know which file survives.
+	for _, mutation := range item.ShellMutations {
+		var (
+			typ     string
+			payload any
+		)
+		switch mutation.Kind {
+		case "delete":
+			typ = TypeFileDeleted
+			payload = filePathPayload{Path: mutation.Path, SourceEventSequence: sourceSeq, Command: item.Command}
+		case "move":
+			if mutation.From == "" || mutation.To == "" {
+				continue
+			}
+			typ = TypeFileMoved
+			payload = fileMovedPayload{From: mutation.From, To: mutation.To, SourceEventSequence: sourceSeq, Command: item.Command}
+		case "patch":
+			typ = TypeFilePatched
+			payload = filePathPayload{Path: mutation.Path, SourceEventSequence: sourceSeq, Command: item.Command}
+		default:
+			continue
+		}
+		if shellMutationPath(mutation) == "" {
+			continue
+		}
+		if _, err := b.append(typ, eventTime, payload); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// shellMutationPath is the path that must be non-empty for a mutation to be
+// publishable: its origin for a move, the file itself otherwise.
+func shellMutationPath(mutation digest.ShellMutation) string {
+	if mutation.Kind == "move" {
+		return mutation.From
+	}
+	return mutation.Path
 }
 
 func (b *builder) append(typ string, timestamp time.Time, payload any, refs ...ArtifactRef) (int, error) {
@@ -1409,6 +1470,8 @@ type timelinePayload struct {
 	Query           string                   `json:"query,omitempty"`
 	Action          json.RawMessage          `json:"action,omitempty"`
 	Files           []string                 `json:"files,omitempty"`
+	Categories      []string                 `json:"categories,omitempty"`
+	Targets         []digest.CommandTarget   `json:"targets,omitempty"`
 	Changes         []digest.FileMutation    `json:"changes,omitempty"`
 	Spans           map[string][]digest.Span `json:"spans,omitempty"`
 	Patches         []digest.FilePatch       `json:"patches,omitempty"`
@@ -1424,6 +1487,21 @@ type fileReadPayload struct {
 	SourceEventSequence int                `json:"source_event_sequence"`
 	Tool                string             `json:"tool,omitempty"`
 	Command             string             `json:"command,omitempty"`
+}
+
+// filePathPayload backs file.deleted and file.patched: one proven path plus the
+// command event it was derived from.
+type filePathPayload struct {
+	Path                string `json:"path"`
+	SourceEventSequence int    `json:"source_event_sequence"`
+	Command             string `json:"command,omitempty"`
+}
+
+type fileMovedPayload struct {
+	From                string `json:"from"`
+	To                  string `json:"to"`
+	SourceEventSequence int    `json:"source_event_sequence"`
+	Command             string `json:"command,omitempty"`
 }
 
 type diffPayload struct {

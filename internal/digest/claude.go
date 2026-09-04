@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -211,12 +212,14 @@ func (s *claudeParseState) finalize() *Digest {
 		d.Termination.ProviderReason = "provider_stream_degraded"
 		d.Termination.ErrorMessage = "stream has no recognizable lifecycle events"
 	}
-	if d.Metrics.ProjectionTruncated && d.Termination.Outcome != OutcomeFailed {
-		d.Termination.Outcome = OutcomeError
-		d.Termination.ProviderReason = "projection_limit_exceeded"
-		d.Termination.ErrorMessage = fmt.Sprintf("normalized projection exceeded limits; dropped %d event(s)", d.Metrics.DroppedEvents)
-	}
+	pending := make([]int, 0, len(s.pending))
 	for _, idx := range s.pending {
+		pending = append(pending, idx)
+	}
+	sort.Ints(pending)
+	// Work backward so dropping an event cannot invalidate an index still to do.
+	for i := len(pending) - 1; i >= 0; i-- {
+		idx := pending[i]
 		if idx < 0 || idx >= len(d.Timeline) {
 			continue
 		}
@@ -224,13 +227,29 @@ func (s *claudeParseState) finalize() *Digest {
 		if e.Status == "completed" || e.Status == "failed" || e.Status == "denied" {
 			continue
 		}
+		before := *e
 		e.Phase = "incomplete"
 		e.Status = "incomplete"
 		e.CompletedAt = nil
 		if e.Kind == KindFileEdit {
 			e.fileSnapshots = s.writeTracker.finish(e.ID, e.Files)
 		}
+		if e.Kind == KindCommand {
+			// Mirrors codex.go's finalize path (codexItemEvent called with
+			// completedLine 0): a command that never got a tool_result still
+			// gets classified, with no trusted output and exitOK false so only
+			// its read-only categories, never a state-changing one, can be
+			// credited.
+			classifyEventCommand(e, "", false, s.ws)
+			applyRunState(d, e, "")
+		}
+		s.finishAppendedEvent(idx, before)
 		d.Metrics.IncompleteToolCalls++
+	}
+	if d.Metrics.ProjectionTruncated && d.Termination.Outcome != OutcomeFailed {
+		d.Termination.Outcome = OutcomeError
+		d.Termination.ProviderReason = "projection_limit_exceeded"
+		d.Termination.ErrorMessage = fmt.Sprintf("normalized projection exceeded limits; dropped %d event(s)", d.Metrics.DroppedEvents)
 	}
 	return d
 }
@@ -431,6 +450,7 @@ func (s *claudeParseState) consumeToolResult(content *ClaudeContent, toolUseResu
 	}
 	delete(s.pending, content.ToolUseID)
 	e := &s.d.Timeline[idx]
+	before := *e
 	e.completedLine = lineNo
 	e.RawEventLines = rawEventLines(e.srcLine, lineNo)
 	e.Phase = "completed"
@@ -458,25 +478,72 @@ func (s *claudeParseState) consumeToolResult(content *ClaudeContent, toolUseResu
 			e.ExitCode = &code
 		}
 	}
-	if e.IsError {
-		if e.Kind == KindFileEdit {
-			e.fileSnapshots = s.writeTracker.finish(e.ID, e.Files)
-		}
-		return
-	}
 	if e.Kind == KindFileEdit {
 		e.fileSnapshots = s.writeTracker.finish(e.ID, e.Files)
 	}
 
 	bounded := boundedOutput(outputText)
+	if e.Kind == KindCommand {
+		// is_error is optional in the stream and defaults to false, so a tool
+		// result can carry a nonzero exit_code without ever setting it. The
+		// exit code, when present, is the more direct proof.
+		exitOK := !e.IsError && (e.ExitCode == nil || *e.ExitCode == 0)
+		// Retrieval inference stays success-only, but a command is classified
+		// whether or not it succeeded: the per-category gates decide what a
+		// failed command may still be credited with.
+		if exitOK {
+			applyStep(e, retrievalFromCommand(e.Command, bounded, s.ws))
+		}
+		classifyEventCommand(e, bounded, exitOK, s.ws)
+		applyRunState(s.d, e, bounded)
+		// e was appended before its completion and classification existed.
+		// Replace its original projection charge with the normalized completed
+		// event, applying the same admission limit appendEvent uses.
+		s.finishAppendedEvent(idx, before)
+		return
+	}
+	if e.IsError {
+		return
+	}
 	switch {
-	case e.Kind == KindCommand:
-		applyStep(e, retrievalFromCommand(e.Command, bounded, s.ws))
 	case e.Tool == "Read" && e.inputFilePath != "":
 		applyStep(e, inferReadStep(e.inputFilePath, bounded, s.ws))
 	case e.Tool == "Grep":
 		applyStep(e, inferSearchFileStepFromPath(e.inputPath, bounded, s.ws))
 	}
+}
+
+// finishAppendedEvent accounts for a Claude event that was admitted when its
+// tool_use started and then replaced in place. If the normalized
+// replacement no longer fits, remove it exactly as appendEvent would have
+// rejected an event that arrived fully formed; retaining an over-budget
+// classification would make the final digest impossible to marshal.
+func (s *claudeParseState) finishAppendedEvent(index int, before Event) {
+	event := &s.d.Timeline[index]
+	normalizeEvent(event)
+	beforeBytes, beforeErr := eventProjectionBytes(before)
+	afterBytes, afterErr := eventProjectionBytes(*event)
+	base := s.d.projectionBytes - beforeBytes
+	if beforeErr == nil && afterErr == nil && base >= 0 && afterBytes <= s.d.projectionLimit()-base {
+		s.d.projectionBytes = base + afterBytes
+		return
+	}
+
+	copy(s.d.Timeline[index:], s.d.Timeline[index+1:])
+	s.d.Timeline[len(s.d.Timeline)-1] = Event{}
+	s.d.Timeline = s.d.Timeline[:len(s.d.Timeline)-1]
+	if beforeErr == nil && beforeBytes <= s.d.projectionBytes {
+		s.d.projectionBytes -= beforeBytes
+	} else {
+		s.d.projectionBytes = 0
+	}
+	for id, pendingIndex := range s.pending {
+		if pendingIndex > index {
+			s.pending[id] = pendingIndex - 1
+		}
+	}
+	s.d.Metrics.DroppedEvents++
+	s.d.Metrics.ProjectionTruncated = true
 }
 
 func (s *claudeParseState) stamp(event *Event, at time.Time, completed bool) {

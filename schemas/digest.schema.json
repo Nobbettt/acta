@@ -54,6 +54,14 @@
       "type": "object", "additionalProperties": false, "required": ["path"],
       "properties": {"path": {"type": "string"}, "kind": {"type": "string"}}
     },
+    "target": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "value"],
+      "properties": {"kind": {"enum": ["path", "package", "url", "host", "pattern", "ref", "tool"]}, "value": {"type": "string", "minLength": 1}}
+    },
+    "shellMutation": {
+      "type": "object", "additionalProperties": false, "required": ["kind"],
+      "properties": {"kind": {"enum": ["delete", "move", "patch"]}, "path": {"type": "string", "minLength": 1}, "from": {"type": "string", "minLength": 1}, "to": {"type": "string", "minLength": 1}}
+    },
     "timelineEvent": {
       "type": "object",
       "additionalProperties": false,
@@ -71,6 +79,9 @@
         "output_truncated": {"type": "boolean"}, "text": {"type": "string"}, "text_chars": {"type": "integer", "minimum": 0},
         "text_truncated": {"type": "boolean"}, "query": {"type": "string"}, "action": {},
         "files": {"type": "array", "items": {"type": "string"}},
+        "categories": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "targets": {"type": "array", "items": {"$ref": "#/$defs/target"}},
+        "shell_mutations": {"type": "array", "items": {"$ref": "#/$defs/shellMutation"}},
         "changes": {"type": "array", "items": {"$ref": "#/$defs/mutation"}},
         "spans": {"type": "object", "additionalProperties": {"type": "array", "items": {"$ref": "#/$defs/span"}}},
         "read_ranges": {"type": "object", "additionalProperties": {"type": "array", "items": {"$ref": "#/$defs/range"}}},

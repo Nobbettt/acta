@@ -5,6 +5,16 @@ and Semantic Versioning. Dates use ISO 8601.
 
 ## Unreleased
 
+### Added
+
+- Digest timeline entries and shell-command event payloads carry `categories`
+  and `targets` derived from the command text, and from its output only when
+  the command is a single segment.
+- `file.deleted`, `file.moved`, and `file.patched` events record workspace
+  changes proven by a shell command rather than by an edit tool.
+- `digest.FromRunDirWithOptions` re-digests a bundle under the control-plane
+  directory the run declared, so `control.access` reproduces offline.
+
 ### Changed
 
 - Run-record, digest, and Acta-event writers now emit schema v3, which adds

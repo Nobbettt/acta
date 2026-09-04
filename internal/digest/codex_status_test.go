@@ -27,6 +27,38 @@ func TestCodexItemFailed(t *testing.T) {
 	}
 }
 
+// An item.started with no matching item.completed has not proven it ran to
+// completion, let alone succeeded: Failed() treats an empty status as "not
+// failed", so without an explicit completion gate the finalize path would
+// credit a fs.delete (and the file.deleted mutation that backs it) for a
+// command that is not known to have run at all.
+func TestCodexIncompleteCommandCreditsNoStateChange(t *testing.T) {
+	raw := strings.Join([]string{
+		`{"type":"thread.started","thread_id":"t-1"}`,
+		`{"type":"turn.started"}`,
+		`{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"rm src/old.go"}}`,
+	}, "\n") + "\n"
+	d, _ := parseCodex(strings.NewReader(raw), newWorkspace("/work/repo"))
+	var cmd *Event
+	for i := range d.Timeline {
+		if d.Timeline[i].Kind == KindCommand {
+			cmd = &d.Timeline[i]
+		}
+	}
+	if cmd == nil {
+		t.Fatal("no command event in timeline")
+	}
+	if cmd.Status != "incomplete" {
+		t.Fatalf("status = %q, want incomplete", cmd.Status)
+	}
+	if len(cmd.Categories) != 0 {
+		t.Errorf("categories = %v, want none for a command that never reported completion", cmd.Categories)
+	}
+	if len(cmd.ShellMutations) != 0 {
+		t.Errorf("shell mutations = %+v, want none", cmd.ShellMutations)
+	}
+}
+
 func TestCodexFileChangeRejectsTraversal(t *testing.T) {
 	raw := strings.Join([]string{
 		`{"type":"thread.started","thread_id":"t-1"}`,

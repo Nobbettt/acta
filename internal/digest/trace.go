@@ -56,6 +56,9 @@ type step struct {
 type workspace struct {
 	variants []string
 	root     string
+	// controlPrefix is the caller-declared control-plane directory, relative to
+	// the root. Empty — the default — means control.access is never credited.
+	controlPrefix string
 }
 
 func newWorkspace(dir string) *workspace {
@@ -451,15 +454,6 @@ func fileAfterCommand(tokens []string, commandWord string, ws *workspace) string
 
 var readLikeWords = []string{"sed", "cat", "head", "tail", "nl"}
 
-func hasReadLikeCommand(rawCommand string, tokens []string) bool {
-	for _, word := range readLikeWords {
-		if slices.Contains(tokens, word) || commandHasWord(rawCommand, word) {
-			return true
-		}
-	}
-	return false
-}
-
 func hasGrepLikeCommand(rawCommand string, tokens []string) bool {
 	return slices.Contains(tokens, "rg") || slices.Contains(tokens, "grep") ||
 		commandHasWord(rawCommand, "rg") || commandHasWord(rawCommand, "grep")
@@ -569,17 +563,18 @@ func fileSpanStep(filePath, outputText string) *step {
 	return s
 }
 
-func readLikeStep(rawCommand, outputText string, ws *workspace) *step {
+func readLikeStep(chain []chainSegment, outputText string, ws *workspace) *step {
 	merged := &step{}
-	segments := splitCommandSegments(rawCommand)
-	for _, segment := range segments {
-		mergeStep(merged, readSegmentStep(segment, outputText, ws))
+	for _, segment := range chain {
+		if !segment.cwdUncertain && !segment.orGated {
+			mergeStep(merged, readSegmentStep(segment.raw, outputText, ws))
+		}
 	}
 	if len(merged.files) == 0 && len(merged.spans) == 0 {
 		return nil
 	}
-	if len(segments) == 1 {
-		attachReadRange(merged, outputText, !strings.Contains(segments[0], "|"))
+	if len(chain) == 1 {
+		attachReadRange(merged, outputText, !strings.Contains(chain[0].raw, "|"))
 	}
 	return merged
 }
@@ -632,9 +627,11 @@ func searchCommandCanExposeFileContent(tokens []string, outputText string) bool 
 
 func explicitSingleSearchFile(tokens []string, ws *workspace) string {
 	start := -1
+	word := ""
 	for i, token := range tokens {
 		if token == "grep" || token == "rg" {
 			start = i + 1
+			word = token
 			break
 		}
 	}
@@ -642,8 +639,26 @@ func explicitSingleSearchFile(tokens []string, ws *workspace) string {
 		return ""
 	}
 	stop := firstPipeIndexAfter(tokens, start)
+	args := tokens[start:stop]
+	if execSearchPattern(word, args) == "" {
+		return ""
+	}
+	scan := scanCommandArgs(args, execSearchFlagModelFor(word))
+	if scan.unknownFlag {
+		return ""
+	}
+	if _, ok := scan.flagValue("-f", "--file"); ok {
+		return "" // the pattern file is a second input, not search result content
+	}
+	operands := scan.operands
+	if _, explicit := scan.flagValue("-e", "--regexp"); !explicit {
+		if len(operands) == 0 {
+			return ""
+		}
+		operands = operands[1:] // the first operand is the pattern, never a file
+	}
 	var candidates []string
-	for _, token := range tokens[start:stop] {
+	for _, token := range operands {
 		if normalized := normalizeCommandPathToken(token, ws); normalized != "" && !slices.Contains(candidates, normalized) {
 			candidates = append(candidates, normalized)
 		}
@@ -656,11 +671,11 @@ func explicitSingleSearchFile(tokens []string, ws *workspace) string {
 
 // searchFileStepFromCommand credits a file-only retrieval when a grep/rg
 // command was explicitly scoped to exactly one file and produced output.
-func searchFileStepFromCommand(rawCommand, outputText string, ws *workspace) *step {
+func searchFileStepFromCommand(chain []chainSegment, outputText string, ws *workspace) *step {
 	var files []string
-	for _, segment := range splitCommandSegments(rawCommand) {
-		tokens := tokensForSegment(segment)
-		if len(tokens) == 0 || !hasGrepLikeCommand(segment, tokens) {
+	for _, segment := range chain {
+		tokens := tokensForSegment(segment.raw)
+		if segment.cwdUncertain || segment.orGated || len(tokens) == 0 || !hasGrepLikeCommand(segment.raw, tokens) {
 			continue
 		}
 		if !searchCommandCanExposeFileContent(tokens, outputText) {
@@ -829,20 +844,20 @@ func attachReadRange(s *step, outputText string, allowPlain bool) {
 // single-file grep/rg yields file-only, everything else yields nothing.
 func retrievalFromCommand(command, outputText string, ws *workspace) *step {
 	rawCommand := unwrapShell(command)
-	tokens := commandTokens(command)
-
-	if slices.Contains(tokens, "Read") || commandHasWord(rawCommand, "Read") {
+	chain := splitCommandChain(rawCommand)
+	if len(chain) == 0 {
 		return nil
 	}
-	if hasReadLikeCommand(rawCommand, tokens) {
-		if s := readLikeStep(rawCommand, outputText, ws); s != nil {
-			return s
+	for _, segment := range chain {
+		tokens := tokensForSegment(segment.raw)
+		if slices.Contains(tokens, "Read") || commandHasWord(segment.raw, "Read") {
+			return nil
 		}
 	}
-	if hasGrepLikeCommand(rawCommand, tokens) {
-		return searchFileStepFromCommand(rawCommand, outputText, ws)
+	if s := readLikeStep(chain, outputText, ws); s != nil {
+		return s
 	}
-	return nil
+	return searchFileStepFromCommand(chain, outputText, ws)
 }
 
 // boundedOutput excludes very large outputs from retrieval inference because

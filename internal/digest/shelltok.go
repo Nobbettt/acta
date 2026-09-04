@@ -12,9 +12,17 @@ import (
 // It has no $(), backtick, or expansion awareness; heuristics downstream fail
 // conservatively when tokens look wrong.
 func shellTokens(s string) []string {
+	s = removeShellLineContinuations(s)
 	var tokens []string
 	var current strings.Builder
 	inToken := false
+	flush := func() {
+		if inToken {
+			tokens = append(tokens, current.String())
+			current.Reset()
+			inToken = false
+		}
+	}
 	i := 0
 	for i < len(s) {
 		c := s[i]
@@ -57,31 +65,80 @@ func shellTokens(s string) []string {
 			inToken = true
 			i += 2
 		case ' ', '\t', '\n', '\r':
-			if inToken {
-				tokens = append(tokens, current.String())
+			flush()
+			i++
+		case '<', '>', '|', '&', ';':
+			op := ""
+			if (c == '<' || c == '>') && inToken && isDigits(current.String()) {
+				op = current.String()
 				current.Reset()
 				inToken = false
+			} else {
+				flush()
 			}
-			i++
+			end := shellOperatorEnd(s, i)
+			tokens = append(tokens, op+s[i:end])
+			i = end
 		default:
 			current.WriteByte(c)
 			inToken = true
 			i++
 		}
 	}
-	if inToken {
-		tokens = append(tokens, current.String())
-	}
+	flush()
 	return tokens
 }
 
-// unwrapShell strips a `/bin/zsh -lc "..."` (or similar) wrapper.
+func removeShellLineContinuations(s string) string {
+	if !strings.Contains(s, "\\\n") {
+		return s
+	}
+	var out strings.Builder
+	out.Grow(len(s))
+	inSingle, inDouble := false, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '\\' && !inSingle && i+1 < len(s) {
+			if s[i+1] == '\n' {
+				i++
+				continue
+			}
+			out.WriteByte(c)
+			i++
+			out.WriteByte(s[i])
+			continue
+		}
+		out.WriteByte(c)
+		if c == '\'' && !inDouble {
+			inSingle = !inSingle
+		} else if c == '"' && !inSingle {
+			inDouble = !inDouble
+		}
+	}
+	return out.String()
+}
+
+func shellOperatorEnd(s string, start int) int {
+	if s[start] == ';' {
+		return start + 1
+	}
+	end := start + 1
+	for end < len(s) && strings.ContainsRune("<>|&", rune(s[end])) {
+		end++
+	}
+	return end
+}
+
+// unwrapShell strips a `/bin/zsh -lc "..."` (or similar) wrapper only when
+// that is the whole invocation. Anything after the command string may change
+// which exit status the outer shell reports, so dropping it would detach the
+// classified command from the status used to prove it succeeded.
 func unwrapShell(command string) string {
 	if len(command) > maxCommandTokenizationChars {
 		return command
 	}
 	tokens := shellTokens(command)
-	if len(tokens) >= 3 && isShell(tokens[0]) && tokens[1] == "-lc" {
+	if len(tokens) == 3 && isShell(tokens[0]) && tokens[1] == "-lc" {
 		return tokens[2]
 	}
 	return command
@@ -95,13 +152,6 @@ func isShell(tok string) bool {
 		return true
 	}
 	return false
-}
-
-func commandTokens(command string) []string {
-	if len(command) > maxCommandTokenizationChars {
-		return nil
-	}
-	return shellTokens(unwrapShell(command))
 }
 
 func tokensForSegment(segment string) []string {

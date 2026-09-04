@@ -458,9 +458,19 @@ func codexItemEvent(d *Digest, item *CodexItem, srcLine int, completedLine int, 
 		e.IsError = e.IsError || item.Failed()
 		setEventOutput(&e, item.AggregatedOutput)
 		d.Metrics.Commands++
+		// Retrieval inference stays success-only, but a command is classified
+		// whether or not it succeeded: the per-category gates decide what a
+		// failed command may still be credited with.
 		if !e.IsError {
 			applyStep(&e, retrievalFromCommand(item.Command, boundedOutput(item.AggregatedOutput), ws))
 		}
+		// completedLine is 0 only when this event is built from finalize's
+		// started-but-never-completed path (codexParseState.finalize). Failed
+		// treats an empty status as "not failed", so without this, an item that
+		// never ran to completion would still classify as exitOK: true.
+		exitOK := completedLine != 0 && !item.Failed()
+		classifyEventCommand(&e, item.AggregatedOutput, exitOK, ws)
+		applyRunState(d, &e, item.AggregatedOutput)
 	case "file_change":
 		e.Kind = KindFileEdit
 		e.Files = codexChangePaths(item, ws)

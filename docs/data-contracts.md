@@ -20,6 +20,40 @@ producer has `name`, release/development `version`, source `commit`, and build
 `date`; name and version are required in current schemas. Raw provider streams
 are vendor evidence and do not use Acta schema versions.
 
+## Shell command classification
+
+Digest timeline entries and the `shell.command.completed` /
+`shell.command.incomplete` payloads carry two optional facets derived from a
+shell command: `categories`, a sorted deduped list of what the command did
+(`vcs.read`, `fs.delete`, `package.install`, …), and `targets`, the things it
+acted on. A target is `{kind, value}`, where `kind` is one of `path`,
+`package`, `url`, `host`, `pattern`, `ref` or `tool`. A category is credited
+only when the command text — or, for a single-segment command, its bounded
+output — proves it; nothing is inferred from intent, so an unclassifiable
+command carries neither field. `tool` is reserved: no current classifier emits
+it, and it stays in the enum because widening a published enum later is the
+breaking direction.
+
+`control.access` is credited only against a caller-declared control-plane
+directory (`digest.Options.ControlPlaneDir`). Acta declares none of its own, and
+a re-digest must be given the same directory — `digest.FromRunDirWithOptions` —
+to reproduce it.
+
+Digest timeline entries additionally carry `shell_mutations`, a list of
+`{kind, path}` or `{kind, from, to}` records (`kind` is `delete`, `move` or
+`patch`) proving the workspace changes a shell command made outside an edit
+tool. It is the digest-side source the `file.deleted` / `file.moved` /
+`file.patched` events below are projected from; it is v3-only and does not
+appear in the event stream payloads.
+
+Three event types carry workspace changes a shell command proved, alongside the
+command event the same way `file.read` does. Each names one proven path, and a
+change whose paths live only in a patch body emits nothing:
+
+- `file.deleted` — `{path, source_event_sequence, command}`
+- `file.moved` — `{from, to, source_event_sequence, command}`
+- `file.patched` — `{path, source_event_sequence, command}`
+
 ## Compatibility rules
 
 - Version 2 is the first published run-record, digest, and Acta-event contract;
