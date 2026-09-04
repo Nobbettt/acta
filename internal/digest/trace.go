@@ -30,7 +30,6 @@ var (
 	sedRangeRe            = regexp.MustCompile(`^(\d+)\s*,\s*(\d+)\s*p$`)
 	pathWithLineRe        = regexp.MustCompile(`^(.+?):(\d+)(?::.*)?$`)
 	pathLikeRe            = regexp.MustCompile(`(?:/|\.{0,2}/)?[A-Za-z0-9_.@%+=~:/-]+\.[A-Za-z0-9_+-]+`)
-	segmentSplitRe        = regexp.MustCompile(`\n|&&|\|\||;`)
 )
 
 var knownRootFilenames = map[string]bool{

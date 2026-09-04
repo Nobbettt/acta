@@ -326,8 +326,9 @@ func splitRawChain(command string) ([]commandChainRaw, bool) {
 			// the segment async; see chainSegment.orGated. `N>&M`/`N<&M` (fd
 			// duplication, e.g. `2>&1`) and `&>`/`&>>` (redirect both streams)
 			// are excluded — that `&` is not the detach operator.
-			if !(i > 0 && (command[i-1] == '>' || command[i-1] == '<')) &&
-				!(i+1 < len(command) && command[i+1] == '>') {
+			afterRedirect := i > 0 && (command[i-1] == '>' || command[i-1] == '<')
+			beforeRedirect := i+1 < len(command) && command[i+1] == '>'
+			if !afterRedirect && !beforeRedirect {
 				async = true
 			}
 			wordStart = true

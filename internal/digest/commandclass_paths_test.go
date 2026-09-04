@@ -65,7 +65,8 @@ func TestClassifyPathsReadFacets(t *testing.T) {
 			classifyPaths(facts, c.paths, testWorkspace())
 			got := slices.Clone(facts.categories)
 			slices.Sort(got)
-			if !reflect.DeepEqual(got, c.want) && !(len(got) == 0 && len(c.want) == 0) {
+			bothEmpty := len(got) == 0 && len(c.want) == 0
+			if !reflect.DeepEqual(got, c.want) && !bothEmpty {
 				t.Errorf("classifyPaths(%v) = %v, want %v", c.paths, got, c.want)
 			}
 		})
@@ -168,7 +169,8 @@ func TestClassifyPathsMutationAndTargetFacets(t *testing.T) {
 			classifyPaths(&facts, nil, testWorkspace())
 			got := slices.Clone(facts.categories)
 			slices.Sort(got)
-			if !reflect.DeepEqual(got, c.want) && !(len(got) == 0 && len(c.want) == 0) {
+			bothEmpty := len(got) == 0 && len(c.want) == 0
+			if !reflect.DeepEqual(got, c.want) && !bothEmpty {
 				t.Errorf("classifyPaths = %v, want %v", got, c.want)
 			}
 		})

@@ -205,7 +205,7 @@ func classifyVCS(segment commandSegment) *commandFacts {
 	if !vcsExecutionProven(segment) {
 		return nil
 	}
-	verb, args, redirected, informational, ok := gitInvocationDetail(segment.tokens)
+	verb, args, redirected, informational, ok := gitInvocation(segment.tokens)
 	if !ok {
 		return nil
 	}
@@ -304,15 +304,9 @@ func vcsExecutionProven(segment commandSegment) bool {
 // `git tag > tags.txt` reads the redirection's target filename as the tag name
 // to create, crediting vcs.mutate for a command that listed and changed
 // nothing.
-func gitInvocation(tokens []string) (verb string, args []string, redirected bool, ok bool) {
-	verb, args, redirected, _, ok = gitInvocationDetail(tokens)
-	return verb, args, redirected, ok
-}
-
-// gitInvocationDetail additionally reports whether a global informational flag
-// appeared before the verb, which makes the whole invocation documentation
-// rather than work.
-func gitInvocationDetail(tokens []string) (verb string, args []string, redirected, informational, ok bool) {
+// It also reports whether a global informational flag appeared before the verb,
+// which makes the whole invocation documentation rather than work.
+func gitInvocation(tokens []string) (verb string, args []string, redirected, informational, ok bool) {
 	redirected = gitEnvironmentRedirectsRepository(tokens)
 	tokens = execLeadingTokens(tokens)
 	if len(tokens) == 0 || path.Base(tokens[0]) != "git" {

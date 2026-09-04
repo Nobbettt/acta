@@ -180,16 +180,3 @@ func commandHasWord(command, word string) bool {
 	wordReMu.Unlock()
 	return re.MatchString(command)
 }
-
-func splitCommandSegments(command string) []string {
-	if len(command) > maxCommandTokenizationChars {
-		return []string{command}
-	}
-	var segments []string
-	for _, segment := range segmentSplitRe.Split(command, -1) {
-		if s := strings.TrimSpace(segment); s != "" {
-			segments = append(segments, s)
-		}
-	}
-	return segments
-}
