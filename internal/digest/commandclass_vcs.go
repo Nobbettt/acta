@@ -312,7 +312,8 @@ func gitInvocation(tokens []string) (verb string, args []string, redirected, inf
 	if len(tokens) == 0 || path.Base(tokens[0]) != "git" {
 		return "", nil, false, false, false
 	}
-	scan := scanCommandArgs(tokens[1:], gitGlobalFlagModel)
+	globalArgs := tokens[1:]
+	scan := scanCommandArgs(globalArgs, gitGlobalFlagModel)
 	if len(scan.operands) == 0 {
 		return "", nil, false, false, false
 	}
@@ -322,6 +323,9 @@ func gitInvocation(tokens []string) (verb string, args []string, redirected, inf
 			continue
 		}
 		if flag.arity == 0 {
+			return "", nil, false, false, false
+		}
+		if flag.arity == flagBoolean && strings.Contains(globalArgs[flag.index], "=") {
 			return "", nil, false, false, false
 		}
 		if slices.Contains(gitRepoRedirectFlags, flag.name) {

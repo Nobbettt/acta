@@ -43,20 +43,18 @@ func TestClassifyCommandKeepsLiteralBackticks(t *testing.T) {
 	}
 }
 
-func TestClassifyCommandTaintsPathsAfterParentShellCodeLoaders(t *testing.T) {
+func TestClassifyCommandWithholdsCommandsAfterParentShellCodeLoaders(t *testing.T) {
 	commands := []string{
 		"eval 'cd /tmp' && rm victim.txt",
 		"source setup.sh && rm victim.txt",
 		". setup.sh && rm victim.txt",
+		"eval 'exit 0' && npm install lodash",
+		"</dev/null eval 'cd /tmp' && rm victim.txt",
+		"time </dev/null eval 'exit 0' && npm install lodash",
 	}
 	for _, command := range commands {
-		facts := classifyCommand(command, "", true, testWorkspace())
-		if facts == nil || !reflect.DeepEqual(facts.categories, []string{"fs.delete"}) {
-			t.Errorf("classifyCommand(%q) = %+v, want category-only fs.delete", command, facts)
-			continue
-		}
-		if len(facts.targets) != 0 || len(facts.mutations) != 0 {
-			t.Errorf("classifyCommand(%q) published cwd-tainted paths: %+v", command, facts)
+		if facts := classifyCommand(command, "", true, testWorkspace()); facts != nil {
+			t.Errorf("classifyCommand(%q) = %+v, want nil after unmodelled parent-shell code", command, facts)
 		}
 	}
 }

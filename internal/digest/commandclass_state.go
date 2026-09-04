@@ -85,7 +85,7 @@ func commandRanEarlier(d *Digest, e *Event) bool {
 // Whitespace inside quotes and command-separating newlines are semantic and
 // must survive, or two different programs can be credited as one retry.
 func normalizeCommandText(command string) string {
-	command = strings.Trim(command, " \t\r")
+	command = strings.Trim(command, " \t")
 	var normalized strings.Builder
 	normalized.Grow(len(command))
 	inSingle, inDouble, space := false, false, false
@@ -108,7 +108,7 @@ func normalizeCommandText(command string) string {
 			}
 			continue
 		}
-		if !inSingle && !inDouble && (c == ' ' || c == '\t' || c == '\r') {
+		if !inSingle && !inDouble && (c == ' ' || c == '\t') {
 			space = normalized.Len() > 0 && last != '\n'
 			continue
 		}

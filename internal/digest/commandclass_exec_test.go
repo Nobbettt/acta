@@ -525,7 +525,7 @@ func TestClassifyExecPackageInstall(t *testing.T) {
 			command: "pip install --timeout 60 --retries 2 --root /tmp/out --trusted-host pypi.org " +
 				"--upgrade-strategy eager --no-binary :all: --only-binary wheel --log pip.log " +
 				"--exists-action i --progress-bar off --global-option build --config-settings key=value requests",
-			want:    []string{"package.install"},
+			want:    []string{"package.install", "workspace.escape"},
 			targets: []CommandTarget{{Kind: "package", Value: "requests"}},
 		},
 		{
@@ -992,9 +992,9 @@ func TestClassifyExecArchiveAndPermission(t *testing.T) {
 			targets: urlTarget("https://example.com"),
 		},
 		{
-			name:    "outside absolute output is not an extract",
+			name:    "outside absolute output escapes",
 			command: "curl -o /tmp/tool.tgz https://example.com/tool.tgz",
-			want:    []string{"network.egress"},
+			want:    []string{"network.egress", "workspace.escape"},
 			targets: urlTarget("https://example.com"),
 		},
 		{
@@ -1059,9 +1059,9 @@ func TestClassifyExecArchiveAndPermission(t *testing.T) {
 			want:    []string{"network.egress"},
 			targets: urlTarget("https://example.com"),
 		},
-		{name: "chmod", command: "chmod +x scripts/run.sh", want: []string{"permission.changed"}},
-		{name: "sudo chown", command: "sudo chown acta:acta /srv/app", want: []string{"permission.changed"}},
-		{name: "chgrp", command: "chgrp staff notes.md", want: []string{"permission.changed"}},
+		{name: "chmod", command: "chmod +x scripts/run.sh", want: []string{"permission.changed"}, targets: []CommandTarget{{Kind: "path", Value: "scripts/run.sh"}}},
+		{name: "sudo chown", command: "sudo chown acta:acta /srv/app", want: []string{"workspace.escape"}},
+		{name: "chgrp", command: "chgrp staff notes.md", want: []string{"permission.changed"}, targets: []CommandTarget{{Kind: "path", Value: "notes.md"}}},
 		// Negatives.
 		{name: "failed tar extracted nothing", command: "tar -xzf release.tgz", failed: true},
 		{name: "failed chmod changed nothing", command: "chmod +x scripts/run.sh", failed: true},

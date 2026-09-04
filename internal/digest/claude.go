@@ -391,7 +391,7 @@ func (s *claudeParseState) consumeToolUse(e *Event, content *ClaudeContent) {
 	switch {
 	case content.Name == "Bash":
 		e.Kind = KindCommand
-		e.Command = strings.TrimSpace(input.Command)
+		e.Command = strings.Trim(input.Command, " \t\n")
 		s.d.Metrics.Commands++
 	case claudeEditTools[content.Name]:
 		e.Kind = KindFileEdit

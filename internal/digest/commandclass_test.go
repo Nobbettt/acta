@@ -358,11 +358,8 @@ func TestClassifyCommandAbandonsWholeCommandOnAmbiguousHeredoc(t *testing.T) {
 }
 
 // One exit status cannot be attributed to a segment the chain does not prove
-// ran and succeeded. That is not only the `||` case: `;` and a newline both
-// discard the preceding segment's status, and the head of `A && B || C` is
-// exactly as unproven as either side of a bare `||`, because the `||` still
-// governs the whole chain. Only a chain that is a single segment, or whose
-// separators are all `&&`, proves anything.
+// ran and succeeded. A literal failure can prove its final `||` branch ran;
+// unknown commands, earlier terms, semicolon lists, and newlines cannot.
 func TestClassifyCommandSuppressesStateChangeAcrossOr(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -371,7 +368,7 @@ func TestClassifyCommandSuppressesStateChangeAcrossOr(t *testing.T) {
 		wantDeleted bool
 	}{
 		{"rm rescued by || echo credits nothing", "rm stale.txt || echo already gone", true, false},
-		{"a failed command rescuing exit status credits nothing", "false || rm stale.txt", true, false},
+		{"a literal failure proves the rescuing command ran", "false || rm stale.txt", false, true},
 		{"a plain && chain still credits the delete", "mkdir out && rm stale.txt", false, true},
 		{"a semicolon discards the earlier segment's status", "rm stale.txt; echo done", true, false},
 		{"a newline discards the earlier segment's status", "rm stale.txt\necho done", true, false},
@@ -816,16 +813,28 @@ func TestClassifyCommandWithholdsCommandsAfterUncertainExit(t *testing.T) {
 func TestClassifyCommandKeepsBranchProvenToRunAfterSkippedTerms(t *testing.T) {
 	cases := []struct {
 		command string
+		exitOK  bool
 		want    string
 	}{
-		{"false && true || git status", "vcs.read"},
-		{"true || false && git status", "vcs.read"},
+		{"false && true || git status", true, "vcs.read"},
+		{"true || false && git status", true, "vcs.read"},
+		{"false || curl https://example.com", true, "network.egress"},
+		{"false || curl https://example.com", false, "network.egress"},
+		{"false || env", true, "env.inspect"},
+		{"false || rm victim.txt", true, "fs.delete"},
+		{"false || npm install lodash", true, "package.install"},
 	}
 	for _, c := range cases {
-		facts := classifyCommand(c.command, "", true, testWorkspace())
+		facts := classifyCommand(c.command, "", c.exitOK, testWorkspace())
 		if facts == nil || !slices.Contains(facts.categories, c.want) {
 			t.Errorf("classifyCommand(%q) = %+v, want %s", c.command, facts, c.want)
 		}
+	}
+}
+
+func TestClassifyCommandDoesNotUseMaskedSuccessForConditionalMutation(t *testing.T) {
+	if facts := classifyCommand("false || rm victim.txt; true", "", true, testWorkspace()); facts != nil {
+		t.Errorf("classifyCommand credited a mutation whose failure could be masked: %+v", facts)
 	}
 }
 
@@ -983,7 +992,7 @@ func TestClassifyCommandDoesNotHideBackgroundAfterEscapedRedirection(t *testing.
 // foreground command loses its credit for no reason the shell would agree
 // with.
 func TestClassifyCommandDoesNotTreatFdDuplicationAmpersandAsBackground(t *testing.T) {
-	command := "rm -rf dist 2>&1"
+	command := "rm -r dist 2>&1"
 	facts := classifyCommand(command, "", true, testWorkspace())
 	if facts == nil || !slices.Contains(facts.categories, "fs.delete") {
 		t.Fatalf("classifyCommand(%q) = %+v, want fs.delete: 2>&1 duplicates a file descriptor, it does not background the command", command, facts)
@@ -1000,8 +1009,8 @@ func TestClassifyCommandTreatsBareCdAndPopdAsCwdUncertain(t *testing.T) {
 		name    string
 		command string
 	}{
-		{"bare cd then a relative delete", "cd && rm -rf build"},
-		{"popd then a relative delete", "popd && rm -rf build"},
+		{"bare cd then a relative delete", "cd && rm -r build"},
+		{"popd then a relative delete", "popd && rm -r build"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

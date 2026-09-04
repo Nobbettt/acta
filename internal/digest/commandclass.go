@@ -36,7 +36,7 @@ type ShellMutation struct {
 type commandSegment struct {
 	raw     string   // this segment of the command
 	tokens  []string // tokensForSegment(raw), may be empty
-	command string   // the full unwrapped command
+	command string   // command text used to prove this segment executed
 	output  string   // see trustedOutput: empty unless the command is one segment
 	exitOK  bool     // the command exited zero
 	ws      *workspace
@@ -464,9 +464,9 @@ func stripHeredocBodies(raw []commandChainRaw) (out []commandChainRaw, ok bool) 
 	return out, true
 }
 
-// chainSegment is one command segment plus whether its exit status is usable
-// as proof that it ran and succeeded. The command reports a single exit code
-// for the whole chain. That code proves every segment ran and succeeded only
+// chainSegment is one command segment plus whether command text proves it ran
+// and whether the final exit status proves it succeeded. The command reports
+// a single exit code for the whole chain. That code proves every segment ran and succeeded only
 // when the chain is a single segment, or every separator in it is `&&` — a
 // `&&` chain short-circuits on the first failure, so if it reaches the last
 // segment and exits zero, every segment before it must have succeeded too.
@@ -494,6 +494,8 @@ func stripHeredocBodies(raw []commandChainRaw) (out []commandChainRaw, ok bool) 
 type chainSegment struct {
 	raw          string
 	orGated      bool
+	executed     bool
+	statusProven bool
 	cwdUncertain bool
 	piped        bool
 }
@@ -501,14 +503,12 @@ type chainSegment struct {
 // splitCommandChain is splitCommandSegments with heredoc bodies removed
 // before segmenting, plus the all-`&&` provenance check described on
 // chainSegment, so classifyCommand never has to track shell semantics
-// itself. Status proof is deliberately all-or-nothing: only a single simple
-// command or an unbroken `&&` chain can prove a state change. A pipeline,
-// background operator or subshell anywhere revokes that proof for every
-// segment. Cwd changes taint paths separately, while pruneUnexecuted removes
-// commands after an executed exit/exec. This loses recall, but never assigns
-// one shell construct's successful status to a different command. Returns nil
-// when a heredoc's shape could not be resolved — see stripHeredocBodies — so
-// the caller credits nothing for the whole command.
+// itself. A single simple command, an unbroken `&&` chain, or the final branch
+// proven to run from literal outcomes can prove a state change. A pipeline,
+// background operator or subshell never can. Cwd changes taint paths
+// separately, while pruneUnexecuted removes commands after an executed
+// exit/exec. Returns nil when a heredoc's shape could not be resolved — see
+// stripHeredocBodies — so the caller credits nothing for the whole command.
 func splitCommandChain(command string) []chainSegment {
 	if len(command) > maxCommandTokenizationChars {
 		return []chainSegment{{raw: command}}
@@ -528,15 +528,20 @@ func splitCommandChain(command string) []chainSegment {
 		if changesWorkingDirectory(tokens) {
 			cwdUncertain = true
 		}
-		if (i > 0 && r.sep != "&&") || r.piped || r.async || r.subshell {
+		if (i > 0 && r.sep != "&&") || r.piped || r.async || r.subshell ||
+			containsShellControlCommand(tokens, "eval", "source", ".") {
 			proven = false
 		}
 	}
-	segments := make([]chainSegment, 0, len(raw))
-	for _, r := range pruneUnexecuted(raw) {
+	pruned := pruneUnexecuted(raw)
+	segments := make([]chainSegment, 0, len(pruned))
+	for i, r := range pruned {
 		segments = append(segments, chainSegment{
-			raw:          r.raw,
-			orGated:      !proven,
+			raw:      r.raw,
+			orGated:  !proven,
+			executed: r.executed,
+			statusProven: proven || r.executed && i == len(pruned)-1 &&
+				!r.piped && !r.async && !r.subshell,
 			cwdUncertain: cwdUncertain,
 			piped:        r.piped,
 		})
@@ -630,13 +635,16 @@ func pruneUnexecuted(raw []commandChainRaw) []commandChainRaw {
 		r.executed = certain
 		out = append(out, r)
 		tokens := tokensForSegment(r.raw)
+		loadsParentShell := containsShellControlCommand(tokens, "eval", "source", ".")
 		if !certain {
-			mayHaveTerminated = mayHaveTerminated || containsShellControlCommand(tokens, "exit", "exec")
+			mayHaveTerminated = mayHaveTerminated || loadsParentShell ||
+				containsShellControlCommand(tokens, "exit", "exec")
 			outcome = shellOutcomeUnknown
 			continue
 		}
 		outcome = knownShellOutcome(tokens)
 		terminated = containsShellControlCommand(tokens, "exit", "exec")
+		mayHaveTerminated = mayHaveTerminated || loadsParentShell
 	}
 	return out
 }
@@ -771,12 +779,16 @@ func classifyCommand(command, outputText string, exitOK bool, ws *workspace) *co
 	for _, c := range chain {
 		segmentFacts := &commandFacts{}
 		tokens := tokensForSegment(c.raw)
+		executionCommand := rawCommand
+		if c.executed {
+			executionCommand = c.raw
+		}
 		segment := commandSegment{
 			raw:          c.raw,
 			tokens:       tokens,
-			command:      rawCommand,
+			command:      executionCommand,
 			output:       output,
-			exitOK:       exitOK && !c.orGated,
+			exitOK:       exitOK && c.statusProven,
 			ws:           ws,
 			cwdUncertain: c.cwdUncertain,
 		}
@@ -816,7 +828,7 @@ func classifyCommand(command, outputText string, exitOK bool, ws *workspace) *co
 // run one invisibly. Losing a path target is safer than resolving a real
 // cwd-changing command against the wrong root.
 func changesWorkingDirectory(tokens []string) bool {
-	if shellStageStartsWith(tokens, "eval", "source", ".") {
+	if containsShellControlCommand(tokens, "eval", "source", ".") {
 		return true
 	}
 	return slices.ContainsFunc(tokens, func(token string) bool {
@@ -844,8 +856,14 @@ func containsShellControlCommand(tokens []string, words ...string) bool {
 }
 
 func shellStageStartsWith(tokens []string, words ...string) bool {
-	tokens = execLeadingTokens(tokens)
 	for len(tokens) > 0 {
+		tokens = execLeadingTokens(tokens)
+		for len(tokens) >= 2 && isRedirection(tokens[0]) {
+			tokens = tokens[2:]
+		}
+		if len(tokens) == 0 {
+			return false
+		}
 		word := path.Base(strings.Trim(tokens[0], "()"))
 		if word == "" {
 			tokens = tokens[1:]

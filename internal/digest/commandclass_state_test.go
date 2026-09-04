@@ -40,6 +40,18 @@ func TestApplyRunStateDoesNotMergeSignificantWhitespace(t *testing.T) {
 	if slices.Contains(e.Categories, "command.retried") {
 		t.Errorf("a command list merged with a single invocation as a retry: %v", e.Categories)
 	}
+
+	for _, commands := range [][2]string{
+		{"rm a b", "rm a\rb"},
+		{"echo a b", "echo a\rb"},
+	} {
+		prior.Command = commands[0]
+		e = Event{Kind: KindCommand, Command: commands[1], srcLine: 2}
+		applyRunState(&Digest{Timeline: []Event{prior}}, &e, "")
+		if slices.Contains(e.Categories, "command.retried") {
+			t.Errorf("commands %q and %q merged as retries: %v", commands[0], commands[1], e.Categories)
+		}
+	}
 }
 
 // command.retried is a property of the run, not the command: the first run of a

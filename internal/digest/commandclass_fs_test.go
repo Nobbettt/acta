@@ -49,15 +49,9 @@ func TestClassifyFS(t *testing.T) {
 			targets:    fsPathTargets("src/old.go"),
 			mutations:  []ShellMutation{{Kind: "delete", Path: "src/old.go"}},
 		}},
-		{"rm force withholds the runtime outcome", "rm -rf build", true, &commandFacts{
-			categories: []string{"fs.delete"},
-		}},
-		{"rm interactive attempt withholds the outcome", "rm -i src/old.go", true, &commandFacts{
-			categories: []string{"fs.delete"},
-		}},
-		{"rm prompt-once attempt withholds the outcome", "rm -I a.txt b.txt c.txt d.txt", true, &commandFacts{
-			categories: []string{"fs.delete"},
-		}},
+		{"rm force cannot prove a deletion", "rm -rf build", true, nil},
+		{"rm interactive cannot prove a deletion", "rm -i src/old.go", true, nil},
+		{"rm prompt-once cannot prove a deletion", "rm -I a.txt b.txt c.txt d.txt", true, nil},
 		{"rm end of flags", "rm -- -weird.txt", true, &commandFacts{
 			categories: []string{"fs.delete"},
 			targets:    fsPathTargets("-weird.txt"),
@@ -140,9 +134,7 @@ func TestClassifyFS(t *testing.T) {
 		{"rm help deletes nothing", "rm --help src/old.go", true, nil},
 		{"rm attached help deletes nothing", "rm --help=all src/old.go", true, nil},
 		// sudo and an env-assignment prefix must not hide the real verb.
-		{"sudo rm", "sudo rm -rf node_modules", true, &commandFacts{
-			categories: []string{"fs.delete"},
-		}},
+		{"sudo conditional rm proves nothing", "sudo rm -rf node_modules", true, nil},
 		{"sudo git rm", "sudo git rm docs/old.md", true, &commandFacts{
 			categories: []string{"fs.delete"},
 			targets:    fsPathTargets("docs/old.md"),
@@ -174,23 +166,21 @@ func TestClassifyFS(t *testing.T) {
 			targets:    []CommandTarget{{Kind: "path", Value: "old.txt"}, {Kind: "path", Value: "new.txt"}},
 			mutations:  []ShellMutation{{Kind: "move", From: "old.txt", To: "new.txt"}},
 		}},
-		{"mv no-clobber keeps only the attempted category", "mv -n old.txt new.txt", true, &commandFacts{
+		{"mv no-clobber cannot prove a move", "mv -n old.txt new.txt", true, nil},
+		{"mv long no-clobber cannot prove a move", "mv --no-clobber old.txt new.txt", true, nil},
+		{"mv update cannot prove a move", "mv -u old.txt new.txt", true, nil},
+		{"mv long update cannot prove a move", "mv --update old.txt new.txt", true, nil},
+		{"mv interactive cannot prove a move", "mv -i old.txt new.txt", true, nil},
+		{"mv long interactive cannot prove a move", "mv --interactive old.txt new.txt", true, nil},
+		{"mv carriage return destination stays literal", "mv src 'dir/..\r'", true, &commandFacts{
 			categories: []string{"fs.move"},
+			targets:    fsPathTargets("src", "dir/..\r"),
+			mutations:  []ShellMutation{{Kind: "move", From: "src", To: "dir/..\r"}},
 		}},
-		{"mv long no-clobber keeps only the attempted category", "mv --no-clobber old.txt new.txt", true, &commandFacts{
+		{"mv carriage return source basename stays literal", "mv 'src/.\r' backup/", true, &commandFacts{
 			categories: []string{"fs.move"},
-		}},
-		{"mv update keeps only the attempted category", "mv -u old.txt new.txt", true, &commandFacts{
-			categories: []string{"fs.move"},
-		}},
-		{"mv long update keeps only the attempted category", "mv --update old.txt new.txt", true, &commandFacts{
-			categories: []string{"fs.move"},
-		}},
-		{"mv interactive keeps only the attempted category", "mv -i old.txt new.txt", true, &commandFacts{
-			categories: []string{"fs.move"},
-		}},
-		{"mv long interactive keeps only the attempted category", "mv --interactive old.txt new.txt", true, &commandFacts{
-			categories: []string{"fs.move"},
+			targets:    fsPathTargets("src/.\r", "backup/.\r"),
+			mutations:  []ShellMutation{{Kind: "move", From: "src/.\r", To: "backup/.\r"}},
 		}},
 		{"mv no-target-directory proves the destination", "mv -T old.txt new.txt", true, &commandFacts{
 			categories: []string{"fs.move"},
@@ -345,24 +335,12 @@ func TestClassifyFS(t *testing.T) {
 			categories: []string{"fs.create"},
 			targets:    fsPathTargets("dest.txt"),
 		}},
-		{"cp no-clobber keeps only the attempted category", "cp -n source.txt dest.txt", true, &commandFacts{
-			categories: []string{"fs.create"},
-		}},
-		{"cp long no-clobber keeps only the attempted category", "cp --no-clobber source.txt dest.txt", true, &commandFacts{
-			categories: []string{"fs.create"},
-		}},
-		{"cp update keeps only the attempted category", "cp -u source.txt dest.txt", true, &commandFacts{
-			categories: []string{"fs.create"},
-		}},
-		{"cp long update keeps only the attempted category", "cp --update source.txt dest.txt", true, &commandFacts{
-			categories: []string{"fs.create"},
-		}},
-		{"cp interactive keeps only the attempted category", "cp -i source.txt dest.txt", true, &commandFacts{
-			categories: []string{"fs.create"},
-		}},
-		{"cp long interactive keeps only the attempted category", "cp --interactive source.txt dest.txt", true, &commandFacts{
-			categories: []string{"fs.create"},
-		}},
+		{"cp no-clobber cannot prove a creation", "cp -n source.txt dest.txt", true, nil},
+		{"cp long no-clobber cannot prove a creation", "cp --no-clobber source.txt dest.txt", true, nil},
+		{"cp update cannot prove a creation", "cp -u source.txt dest.txt", true, nil},
+		{"cp long update cannot prove a creation", "cp --update source.txt dest.txt", true, nil},
+		{"cp interactive cannot prove a creation", "cp -i source.txt dest.txt", true, nil},
+		{"cp long interactive cannot prove a creation", "cp --interactive source.txt dest.txt", true, nil},
 		{"cp no-target-directory proves the destination", "cp -T source.txt dest.txt", true, &commandFacts{
 			categories: []string{"fs.create"},
 			targets:    fsPathTargets("dest.txt"),
@@ -377,9 +355,8 @@ func TestClassifyFS(t *testing.T) {
 		}},
 		{"touch no-create proves no creation", "touch -c absent.txt", true, nil},
 		{"touch long no-create proves no creation", "touch --no-create absent.txt", true, nil},
-		{"mkdir parents keeps only the attempted category", "mkdir -p src/new/pkg", true, &commandFacts{
-			categories: []string{"fs.create"},
-		}},
+		{"mkdir parents cannot prove a creation", "mkdir -p src/new/pkg", true, nil},
+		{"mkdir long parents cannot prove a creation", "mkdir --parents src/new/pkg", true, nil},
 		{"mkdir without parents proves the directory", "mkdir src/new/pkg", true, &commandFacts{
 			categories: []string{"fs.create"},
 			targets:    fsPathTargets("src/new/pkg"),
@@ -388,6 +365,9 @@ func TestClassifyFS(t *testing.T) {
 		{"cp without a destination", "cp only.txt", true, nil},
 		// Only the destination is written, so only it can escape.
 		{"cp out of the workspace", "cp src/a.go /tmp/a.go", true, &commandFacts{
+			categories: []string{"workspace.escape"},
+		}},
+		{"cp carriage return after root stays outside", "cp src/a.go '/repo\r'", true, &commandFacts{
 			categories: []string{"workspace.escape"},
 		}},
 		{"cp from outside into the workspace", "cp /tmp/a.go src/a.go", true, &commandFacts{
@@ -531,9 +511,7 @@ func TestClassifyFS(t *testing.T) {
 		// A value-taking short flag clustered with others (e.g. -pm, -amr, -rt)
 		// must not leak its value into the operand list either — the value
 		// scanner previously only recognised the flag spelled on its own.
-		{"mkdir -pm does not credit the mode as a created path when clustered", "mkdir -pm 700 new", true, &commandFacts{
-			categories: []string{"fs.create"},
-		}},
+		{"mkdir -pm cannot prove a creation", "mkdir -pm 700 new", true, nil},
 		{"touch -amr does not credit the reference file as created when clustered", "touch -amr ref.txt new.txt", true, &commandFacts{
 			categories: []string{"fs.create"},
 			targets:    fsPathTargets("new.txt"),
@@ -577,42 +555,63 @@ func TestClassifyFS(t *testing.T) {
 		// so the sole remaining operand is the UNTOUCHED original, not the file
 		// patch actually wrote — crediting it as a target/mutation would report
 		// a file.patched event for a file that was never modified.
-		{"patch --output= does not credit the untouched input file", "patch --output=new.txt orig.txt < fix.diff", true, &commandFacts{
+		{"patch --output= credits the effective output file", "patch --output=new.txt orig.txt < fix.diff", true, &commandFacts{
 			categories: []string{"fs.patch"},
+			targets:    fsPathTargets("new.txt"),
+			mutations:  []ShellMutation{{Kind: "patch", Path: "new.txt"}},
 		}},
-		{"patch -o attached does not credit the untouched input file", "patch -onew.txt orig.txt < fix.diff", true, &commandFacts{
+		{"patch -o attached credits the effective output file", "patch -onew.txt orig.txt < fix.diff", true, &commandFacts{
 			categories: []string{"fs.patch"},
+			targets:    fsPathTargets("new.txt"),
+			mutations:  []ShellMutation{{Kind: "patch", Path: "new.txt"}},
 		}},
-		{"patch -o clustered does not credit the untouched input file", "patch -Nfo new.txt orig.txt < fix.diff", true, &commandFacts{
+		{"patch -o clustered credits the effective output file", "patch -Nfo new.txt orig.txt < fix.diff", true, &commandFacts{
 			categories: []string{"fs.patch"},
+			targets:    fsPathTargets("new.txt"),
+			mutations:  []ShellMutation{{Kind: "patch", Path: "new.txt"}},
 		}},
 		// The separate-token spelling must follow the same output rule after its
 		// value is consumed by the flag scanner.
-		{"patch -o separate token still proves no target", "patch -o new.txt orig.txt < fix.diff", true, &commandFacts{
+		{"patch -o separate token credits the effective output file", "patch -o new.txt orig.txt < fix.diff", true, &commandFacts{
 			categories: []string{"fs.patch"},
+			targets:    fsPathTargets("new.txt"),
+			mutations:  []ShellMutation{{Kind: "patch", Path: "new.txt"}},
 		}},
 		{"patch stdout output changes no file", "patch -o - orig.txt < fix.diff", true, nil},
 		{"patch dev-null output changes no file", "patch --output=/dev/null orig.txt < fix.diff", true, nil},
 		{"patch dev-zero output changes no workspace file", "patch --output=/dev/zero orig.txt < fix.diff", true, nil},
 		{"patch cleaned device alias changes no workspace file", "patch --output=/dev/../dev/null orig.txt < fix.diff", true, nil},
-		{"patch outside output changes no workspace file", "patch --output=/tmp/new.txt orig.txt < fix.diff", true, nil},
+		{"patch outside output escapes the workspace", "patch --output=/tmp/new.txt orig.txt < fix.diff", true, &commandFacts{
+			categories: []string{"workspace.escape"},
+		}},
 		{"patch dev-stdout output changes no file", "patch -o /dev/stdout orig.txt < fix.diff", true, nil},
 		{"patch dev-stderr output changes no file", "patch --output=/dev/stderr orig.txt < fix.diff", true, nil},
 		{"patch fd output changes no workspace file", "patch -o /dev/fd/3 orig.txt < fix.diff", true, nil},
 		// -d/--directory (in any spelling) chdirs before applying, so the real
 		// rewritten path is dir/orig.txt, never the workspace-root orig.txt this
 		// classifier would otherwise credit.
-		{"patch --directory= does not credit the root-relative path", "patch --directory=frontend orig.txt < fix.diff", true, &commandFacts{
+		{"patch --directory= credits the effective path", "patch --directory=frontend orig.txt < fix.diff", true, &commandFacts{
 			categories: []string{"fs.patch"},
+			targets:    fsPathTargets("frontend/orig.txt"),
+			mutations:  []ShellMutation{{Kind: "patch", Path: "frontend/orig.txt"}},
 		}},
-		{"patch -d attached does not credit the root-relative path", "patch -dfrontend orig.txt < fix.diff", true, &commandFacts{
+		{"patch -d attached credits the effective path", "patch -dfrontend orig.txt < fix.diff", true, &commandFacts{
 			categories: []string{"fs.patch"},
+			targets:    fsPathTargets("frontend/orig.txt"),
+			mutations:  []ShellMutation{{Kind: "patch", Path: "frontend/orig.txt"}},
 		}},
-		{"patch -d separate token does not credit the root-relative path", "patch -d frontend orig.txt < fix.diff", true, &commandFacts{
+		{"patch -d separate token credits the effective path", "patch -d frontend orig.txt < fix.diff", true, &commandFacts{
 			categories: []string{"fs.patch"},
+			targets:    fsPathTargets("frontend/orig.txt"),
+			mutations:  []ShellMutation{{Kind: "patch", Path: "frontend/orig.txt"}},
 		}},
-		{"patch --directory separate token does not credit the root-relative path", "patch --directory frontend orig.txt < fix.diff", true, &commandFacts{
+		{"patch --directory separate token credits the effective path", "patch --directory frontend orig.txt < fix.diff", true, &commandFacts{
 			categories: []string{"fs.patch"},
+			targets:    fsPathTargets("frontend/orig.txt"),
+			mutations:  []ShellMutation{{Kind: "patch", Path: "frontend/orig.txt"}},
+		}},
+		{"patch outside directory escapes the workspace", "patch -d /tmp orig.txt < fix.diff", true, &commandFacts{
+			categories: []string{"workspace.escape"},
 		}},
 		{"patch from a heredoc", "patch -p1 <<'EOF'", true, &commandFacts{
 			categories: []string{"fs.patch"},
@@ -632,8 +631,8 @@ func TestClassifyFS(t *testing.T) {
 		{"patch lowercase version probe changes nothing", "patch -v", true, nil},
 		{"git apply help changes nothing", "git apply --help fix.diff", true, nil},
 		{"git revert --abort applies nothing", "git revert --abort", true, nil},
-		{"patch out of the workspace still has no path", "patch /tmp/foo.go < fix.diff", true, &commandFacts{
-			categories: []string{"fs.patch"},
+		{"patch out of the workspace escapes", "patch /tmp/foo.go < fix.diff", true, &commandFacts{
+			categories: []string{"workspace.escape"},
 		}},
 		{"patch inside a quoted argument", `echo "git apply fix.diff"`, true, nil},
 		// A pipeline tail's own flag must not be mistaken for one of
@@ -659,25 +658,18 @@ func TestClassifyFS(t *testing.T) {
 	}
 }
 
-func TestClassifyCommandWithholdsConditionalFSValues(t *testing.T) {
-	cases := []struct {
-		command  string
-		category string
-	}{
-		{"rm -f missing.txt", "fs.delete"},
-		{"rm -i old.txt", "fs.delete"},
-		{"mv -u old.txt new.txt", "fs.move"},
-		{"cp -u source.txt dest.txt", "fs.create"},
-		{"mkdir -p existing", "fs.create"},
-	}
-	for _, test := range cases {
-		t.Run(test.command, func(t *testing.T) {
-			facts := classifyCommand(test.command, "", true, testWorkspace())
-			if facts == nil || !reflect.DeepEqual(facts.categories, []string{test.category}) {
-				t.Fatalf("categories = %+v, want only %q", facts, test.category)
-			}
-			if len(facts.targets) != 0 || len(facts.mutations) != 0 {
-				t.Fatalf("conditional facts = %+v, want category only", facts)
+func TestClassifyCommandSuppressesUnprovenConditionalFSChanges(t *testing.T) {
+	for _, command := range []string{
+		"rm -f missing.txt",
+		"rm -i old.txt",
+		"mv -u old.txt new.txt",
+		"cp -u source.txt dest.txt",
+		"mkdir -p existing",
+		"mkdir --parents existing",
+	} {
+		t.Run(command, func(t *testing.T) {
+			if facts := classifyCommand(command, "", true, testWorkspace()); facts != nil {
+				t.Fatalf("classifyCommand(%q) = %+v, want nil", command, facts)
 			}
 		})
 	}
@@ -715,6 +707,7 @@ func TestFSOperands(t *testing.T) {
 		// A clustered value flag consumes the next token as its value, exactly
 		// as the flag spelled on its own already does.
 		{"mkdir -pm skips the mode value even clustered", "mkdir", []string{"-pm", "700", "new"}, []string{"new"}, false},
+		{"mkdir --parents keeps the directory operand", "mkdir", []string{"--parents", "new"}, []string{"new"}, false},
 		{"touch -amr skips the reference value even clustered", "touch", []string{"-amr", "ref.txt", "new.txt"}, []string{"new.txt"}, false},
 	}
 	for _, c := range cases {

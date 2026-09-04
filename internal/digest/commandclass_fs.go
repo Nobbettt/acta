@@ -41,6 +41,9 @@ func classifyFS(segment commandSegment) *commandFacts {
 			return nil
 		}
 	}
+	if fsRuntimeOutcomeUnproven(verb, scan) {
+		return nil
+	}
 	if scan.unknownFlag {
 		var category string
 		switch verb {
@@ -83,40 +86,30 @@ func classifyFS(segment commandSegment) *commandFacts {
 		// The operands name a patch file or a commit, never the files rewritten.
 		facts = fsPatch(ownArgs, nil, false, segment.ws, segment.cwdUncertain)
 	}
-	if facts != nil && fsRuntimeOutcomeUnproven(verb, scan, operands, segment.ws) {
-		facts.targets = nil
-		facts.mutations = nil
-	}
 	return facts
 }
 
 // fsRuntimeOutcomeUnproven is the single gate for filesystem operations whose
 // successful exit still does not prove a particular path changed. Conditional
-// modes can decline or skip an operation, so the attempted operation's
-// category survives but its path targets and derived file events do not.
-func fsRuntimeOutcomeUnproven(verb string, scan commandArgScan, operands []string, ws *workspace) bool {
+// modes can decline or skip an operation, so neither a state-change category
+// nor its path targets and derived file events are proven.
+//
+// This is deliberately stricter than the cwd-uncertainty rule, and the two are
+// easy to confuse. An unresolved `cd` means the act happened somewhere this
+// classifier cannot name, so the category survives and only the path is
+// withheld. A conditional mode means the act may not have happened AT ALL —
+// `rm -f missing` exits zero having deleted nothing, `cp -n` skips an existing
+// destination, `mv -i` waits for an answer that may be no — so there is no
+// category to credit either. A test that means to exercise cwd taint must
+// therefore avoid `-f`, or it will be measuring this gate instead.
+func fsRuntimeOutcomeUnproven(verb string, scan commandArgScan) bool {
 	switch verb {
 	case "rm":
 		return scan.hasFlag("-f", "-i", "-I")
 	case "mv", "cp":
-		if scan.hasFlag("-i", "--interactive", "-n", "--no-clobber", "-u", "--update") {
-			return true
-		}
-		if len(operands) != 2 || scan.hasFlag("-t", "--target-directory", "-T", "--no-target-directory") {
-			return false
-		}
-		// A plain two-operand cp/mv with no conditional flag keeps its path.
-		// Either the destination names a directory — a trailing slash, a dot
-		// spelling, the workspace root — and the written path is
-		// dest/basename(src), or it is the canonical rename to dest itself.
-		// This is the one place the package accepts the ordinary reading of a
-		// command over strict provability: a destination that is secretly a
-		// pre-existing directory would land the file elsewhere. Calling the
-		// whole form unprovable instead would mean file.moved is never emitted
-		// for any command, which deletes the fact rather than getting it right.
-		return false
+		return scan.hasFlag("-i", "--interactive", "-n", "--no-clobber", "-u", "--update")
 	case "mkdir":
-		return scan.hasFlag("-p")
+		return scan.hasFlag("-p", "--parents")
 	}
 	return false
 }
@@ -173,7 +166,8 @@ var fsFlagModels = map[string]commandFlagModel{
 	},
 	"mkdir": {
 		"-p": flagBoolean, "-v": flagBoolean, "-Z": flagBoolean,
-		"-m": flagValue, "--mode": flagValue, "--context": flagValue,
+		"--parents": flagBoolean,
+		"-m":        flagValue, "--mode": flagValue, "--context": flagValue,
 	},
 	"touch": {
 		"-a": flagBoolean, "-c": flagBoolean, "-f": flagBoolean,
@@ -421,14 +415,14 @@ func fsOperandAbsolute(operand string) bool {
 // at all — the raw operand, checked here before that clean, is the only place
 // this shape is still visible.
 func fsSourceBasenameIsDotOrDotDot(src string) bool {
-	clean := filepath.ToSlash(strings.TrimSpace(src))
+	clean := filepath.ToSlash(src)
 	return path.Base(clean) == "." || path.Base(clean) == ".."
 }
 
 // fsDestinationNamesDirectory reports the operand spellings that prove the
 // destination is a directory before path cleaning discards that syntax.
 func fsDestinationNamesDirectory(dest string) bool {
-	dest = strings.TrimRight(filepath.ToSlash(strings.TrimSpace(dest)), "/")
+	dest = strings.TrimRight(filepath.ToSlash(dest), "/")
 	return dest != "" && (path.Base(dest) == "." || path.Base(dest) == "..")
 }
 
@@ -438,7 +432,7 @@ func fsDestinationNamesDirectory(dest string) bool {
 // write into the root (`cp src/a.go .`) looks identical to one that left the
 // workspace entirely.
 func fsIsWorkspaceRoot(operand string, ws *workspace) bool {
-	rel, ok := ws.rel(strings.TrimSpace(operand))
+	rel, ok := ws.rel(operand)
 	if ok && path.Clean(filepath.ToSlash(rel)) == "." {
 		return true
 	}
@@ -781,15 +775,10 @@ func outputTargetsWorkspaceFile(destination string, ws *workspace, cwdUncertain 
 	return ok
 }
 
-// fsPatchDirectory reports whether args set patch's own -d/--directory flag,
-// in any of GNU patch's accepted spellings — see commandFlagValue. patch chdirs into
-// that directory before applying, so the operand's real base directory is
-// unknowable from the command text alone: `patch --directory=frontend
-// orig.txt < fix.diff` rewrote frontend/orig.txt, not the workspace-root
-// orig.txt fsPatch would otherwise credit.
-func fsPatchDirectory(args []string) bool {
-	_, ok := commandFlagValue(args, fsFlagModels["patch"], "-d", "--directory")
-	return ok
+// fsPatchDirectory returns patch's -d/--directory value in any accepted
+// spelling. patch chdirs there before applying a relative file operand.
+func fsPatchDirectory(args []string) (string, bool) {
+	return commandFlagValue(args, fsFlagModels["patch"], "-d", "--directory")
 }
 
 // fsPatch credits the patch itself, and a path only where the command proves
@@ -797,24 +786,57 @@ func fsPatchDirectory(args []string) bool {
 // name the patch or the commit, never the files rewritten: those live in the
 // patch body, which the digest never sees. The one provable shape is
 // `patch <file> < f.diff` — with the diff arriving on stdin, the single
-// remaining operand is the file that was rewritten — unless -o/--output sent
-// that rewrite somewhere else, or -d/--directory chdir'd before applying it,
-// either of which the command text does not resolve.
+// remaining operand is the file that was rewritten. -o/--output names the
+// effective output directly, while -d/--directory relocates a relative
+// operand beneath its resolved directory.
 func fsPatch(args, operands []string, redirected bool, ws *workspace, cwdUncertain bool) *commandFacts {
 	scan := scanCommandArgs(args, fsFlagModels["patch"])
 	output, redirectsOutput := fsPatchOutput(args)
-	if scan.hasFlag(fsInspectFlags...) || redirectsOutput && !outputTargetsWorkspaceFile(output, ws, cwdUncertain) {
+	if scan.hasFlag(fsInspectFlags...) {
 		return nil
 	}
 	facts := &commandFacts{categories: []string{"fs.patch"}}
 	if scan.unknownFlag {
 		return facts
 	}
-	if !redirected || len(operands) != 1 || redirectsOutput || fsPatchDirectory(args) {
+	if !redirected {
 		return facts
 	}
-	paths := fsPaths(operands, ws, cwdUncertain)
+	var destination string
+	if redirectsOutput {
+		cleanOutput := canonicalWorkspacePath(output)
+		if output == "" || output == "-" || cleanOutput == "/dev/null" || cleanOutput == "/dev/zero" ||
+			cleanOutput == "/dev/stdout" || cleanOutput == "/dev/stderr" || strings.HasPrefix(cleanOutput, "/dev/fd/") {
+			return nil
+		}
+		if !outputTargetsWorkspaceFile(output, ws, cwdUncertain) {
+			if fsEscapes([]string{output}, ws, cwdUncertain) {
+				return &commandFacts{categories: []string{"workspace.escape"}}
+			}
+			return nil
+		}
+		destination = output
+	} else {
+		if len(operands) != 1 {
+			return facts
+		}
+		destination = operands[0]
+		if directory, hasDirectory := fsPatchDirectory(args); hasDirectory && !fsOperandAbsolute(destination) {
+			dir, ok := fsDirectoryPath(directory, ws, cwdUncertain)
+			if !ok {
+				if fsEscapes([]string{directory}, ws, cwdUncertain) {
+					return &commandFacts{categories: []string{"workspace.escape"}}
+				}
+				return facts
+			}
+			destination = path.Join(dir, filepath.ToSlash(destination))
+		}
+	}
+	paths := fsPaths([]string{destination}, ws, cwdUncertain)
 	if len(paths) != 1 {
+		if fsEscapes([]string{destination}, ws, cwdUncertain) {
+			return &commandFacts{categories: []string{"workspace.escape"}}
+		}
 		return facts
 	}
 	appendCommandTarget(facts, CommandTarget{Kind: "path", Value: paths[0]})

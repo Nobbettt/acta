@@ -868,9 +868,13 @@ var (
 	execTarFlagModel = commandFlagModel{
 		"-c": flagBoolean, "-x": flagBoolean, "-t": flagBoolean,
 		"-d": flagBoolean, "-u": flagBoolean, "-A": flagBoolean,
+		"--extract": flagBoolean, "--create": flagBoolean, "--list": flagBoolean,
+		"--diff": flagBoolean, "--compare": flagBoolean, "--update": flagBoolean,
+		"--append": flagBoolean, "--catenate": flagBoolean, "--concatenate": flagBoolean,
 		"-a": flagBoolean, "-j": flagBoolean, "-J": flagBoolean,
 		"-k": flagBoolean, "-m": flagBoolean, "-O": flagBoolean,
-		"-p": flagBoolean, "-v": flagBoolean, "-w": flagBoolean, "-z": flagBoolean,
+		"--to-stdout": flagBoolean,
+		"-p":          flagBoolean, "-v": flagBoolean, "-w": flagBoolean, "-z": flagBoolean,
 		"-f": flagValue, "--file": flagValue, "-C": flagValue, "--directory": flagValue,
 		"-X": flagValue, "--exclude-from": flagValue, "-T": flagValue, "--files-from": flagValue,
 		"--transform": flagValue, "--strip-components": flagValue, "--to-command": flagValue,
@@ -971,9 +975,11 @@ func execArchiveWritesToDisk(cmd execCommand) bool {
 		}
 		return false
 	case "curl":
-		return execOutputTargetsWorkspaceFile(cmd, execCurlFlagModel, "-o", "--output")
+		_, ok := execOutputFile(cmd, execCurlFlagModel, "-o", "--output")
+		return ok
 	case "wget":
-		return execOutputTargetsWorkspaceFile(cmd, execWgetFlagModel, "-O", "--output-document")
+		_, ok := execOutputFile(cmd, execWgetFlagModel, "-O", "--output-document")
+		return ok
 	}
 	return false
 }
@@ -984,15 +990,21 @@ func execArchive(cmd execCommand) *commandFacts {
 	if !cmd.seg.exitOK || !execArchiveWritesToDisk(cmd) {
 		return nil
 	}
-	var scan commandArgScan
-	var destinations []string
+	var inside, escaped bool
 	switch cmd.word {
 	case "tar":
-		scan, destinations = execTarScan(cmd.args), []string{"-C", "--directory"}
+		inside, escaped = execArchiveDestinationsWorkspace(cmd, execTarScan(cmd.args), "-C", "--directory")
 	case "unzip":
-		scan, destinations = scanCommandArgs(cmd.args, execUnzipFlagModel), []string{"-d"}
+		inside, escaped = execArchiveDestinationsWorkspace(cmd, scanCommandArgs(cmd.args, execUnzipFlagModel), "-d")
+	case "gunzip":
+		inside, escaped = execPathsWorkspace(cmd, scanCommandArgs(cmd.args, execGunzipFlagModel).operands)
+	case "curl":
+		output, _ := execOutputFile(cmd, execCurlFlagModel, "-o", "--output")
+		inside, escaped = execPathsWorkspace(cmd, []string{output})
+	case "wget":
+		output, _ := execOutputFile(cmd, execWgetFlagModel, "-O", "--output-document")
+		inside, escaped = execPathsWorkspace(cmd, []string{output})
 	}
-	inside, escaped := execArchiveDestinationsWorkspace(cmd, scan, destinations...)
 	if escaped {
 		return execFacts("workspace.escape")
 	}
@@ -1002,17 +1014,18 @@ func execArchive(cmd execCommand) *commandFacts {
 	return execFacts("archive.extract")
 }
 
-// execOutputTargetsWorkspaceFile reports whether an explicit output flag names
-// a file inside the recorded workspace. Device paths, stdout, outside absolute
-// paths, shell expressions, and relative paths after an uncertain cwd all fail
-// closed through this one resolver-backed predicate.
-func execOutputTargetsWorkspaceFile(cmd execCommand, model commandFlagModel, short, long string) bool {
+// execOutputFile returns the explicit disk output named by a download command.
+// Standard streams, device paths, shell expressions and opaque flags do not
+// prove a file write.
+func execOutputFile(cmd execCommand, model commandFlagModel, short, long string) (string, bool) {
 	scan := scanCommandArgs(cmd.args, model)
 	value, ok := scan.flagValue(short, long)
-	if scan.unknownFlag || !ok || value == "-" {
-		return false
+	clean := canonicalWorkspacePath(value)
+	if scan.unknownFlag || !ok || value == "" || value == "-" || strings.ContainsAny(value, fsShellMetacharacters) ||
+		strings.HasPrefix(clean, "/dev/") {
+		return "", false
 	}
-	return execArchivePathTargetsWorkspace(cmd, value)
+	return value, true
 }
 
 // execArchiveDestinationsWorkspace resolves the directory where extraction
@@ -1047,44 +1060,105 @@ func execArchiveDestinationsWorkspace(cmd execCommand, scan commandArgScan, name
 		if !known {
 			return false, false
 		}
-		if _, ok := fsDirectoryPath(base, cmd.seg.ws, false); ok {
-			return true, false
-		}
-		return false, fsEscapes([]string{base}, cmd.seg.ws, false)
+		return execPathsWorkspace(cmd, []string{base})
 	}
 
-	inside = true
+	var values []string
 	for _, flag := range scan.flags {
 		if !slices.Contains(names, flag.name) {
 			continue
 		}
-		if _, ok := fsDirectoryPath(flag.value, cmd.seg.ws, cmd.seg.cwdUncertain); !ok {
-			inside = false
-		}
-		if flag.value != "" && fsEscapes([]string{flag.value}, cmd.seg.ws, cmd.seg.cwdUncertain) {
-			escaped = true
-		}
+		values = append(values, flag.value)
 	}
-	return inside, escaped
+	if len(values) == 0 {
+		return true, false
+	}
+	return execPathsWorkspace(cmd, values)
 }
 
-func execArchivePathTargetsWorkspace(cmd execCommand, value string) bool {
-	if strings.ContainsAny(value, fsShellMetacharacters) || cmd.seg.cwdUncertain && !fsOperandAbsolute(value) {
-		return false
+// execPathsWorkspace is the single workspace-containment predicate for
+// exec-side mutation destinations. It distinguishes a proven in-workspace
+// destination from a proven escape while leaving expressions and relative
+// paths under an uncertain cwd unclassified.
+func execPathsWorkspace(cmd execCommand, values []string) (inside, escaped bool) {
+	inside = len(values) != 0
+	for _, value := range values {
+		if value == "" {
+			inside = false
+			continue
+		}
+		if _, ok := fsDirectoryPath(value, cmd.seg.ws, cmd.seg.cwdUncertain); !ok {
+			inside = false
+		}
 	}
-	_, ok := normalizeWorkspacePath(value, cmd.seg.ws)
-	return ok
+	return inside, fsEscapes(values, cmd.seg.ws, cmd.seg.cwdUncertain)
 }
 
 // permission.changed ---------------------------------------------------------
 
 var execPermissionCommands = map[string]bool{"chmod": true, "chown": true, "chgrp": true}
 
+var execChmodFlagModel = commandFlagModel{
+	"-R": flagBoolean, "-f": flagBoolean, "-v": flagBoolean, "-c": flagBoolean,
+	"--recursive": flagBoolean, "--changes": flagBoolean, "--quiet": flagBoolean,
+	"--silent": flagBoolean, "--verbose": flagBoolean, "--preserve-root": flagBoolean,
+	"--no-preserve-root": flagBoolean, "--reference": flagValue,
+}
+
+var execOwnerFlagModel = commandFlagModel{
+	"-R": flagBoolean, "-h": flagBoolean, "-f": flagBoolean, "-v": flagBoolean,
+	"-c": flagBoolean, "-H": flagBoolean, "-L": flagBoolean, "-P": flagBoolean,
+	"--recursive": flagBoolean, "--dereference": flagBoolean, "--no-dereference": flagBoolean,
+	"--changes": flagBoolean, "--quiet": flagBoolean, "--silent": flagBoolean,
+	"--verbose": flagBoolean, "--preserve-root": flagBoolean, "--no-preserve-root": flagBoolean,
+	"--from": flagValue, "--reference": flagValue,
+}
+
+func execPermissionFlagModelFor(word string) commandFlagModel {
+	if word == "chmod" {
+		return execChmodFlagModel
+	}
+	return execOwnerFlagModel
+}
+
+func execPermissionPaths(cmd execCommand) ([]string, bool) {
+	scan := scanCommandArgs(cmd.args, execPermissionFlagModelFor(cmd.word))
+	if scan.unknownFlag {
+		return nil, false
+	}
+	paths := scan.operands
+	if !scan.hasFlag("--reference") {
+		if len(paths) == 0 {
+			return nil, false
+		}
+		paths = paths[1:]
+	}
+	return paths, len(paths) != 0
+}
+
 func execPermission(cmd execCommand) *commandFacts {
 	if !execPermissionCommands[cmd.word] || !cmd.seg.exitOK {
 		return nil
 	}
-	return execFacts("permission.changed")
+	paths, ok := execPermissionPaths(cmd)
+	if !ok {
+		return nil
+	}
+	inside, escaped := execPathsWorkspace(cmd, paths)
+	facts := &commandFacts{}
+	if inside {
+		facts.categories = append(facts.categories, "permission.changed")
+		for _, p := range fsPaths(paths, cmd.seg.ws, cmd.seg.cwdUncertain) {
+			appendCommandTarget(facts, CommandTarget{Kind: "path", Value: p})
+		}
+	}
+	if escaped {
+		facts.categories = append(facts.categories, "workspace.escape")
+	}
+	if facts.empty() {
+		return nil
+	}
+	return facts
 }
 
 // env.inspect ----------------------------------------------------------------
@@ -1191,16 +1265,46 @@ func execGitConfigWrites(configArgs []string) bool {
 	return len(scan.operands) >= 2
 }
 
-// execEscapeFlags credits the flag forms that reach outside the workspace
-// without naming a path: a global package install, a user-site install, and a
-// global git config write. The path-shaped escapes belong to the fs classifier.
+func execPackageDestinationFlags(word string) []string {
+	switch word {
+	case "pip", "pip3":
+		return []string{"-t", "--target", "--prefix", "--root"}
+	case "npm", "pnpm", "yarn":
+		return []string{"--prefix", "--cwd", "--modules-folder"}
+	case "cargo":
+		return []string{"--manifest-path"}
+	case "gem":
+		return []string{"-i", "--install-dir", "-n", "--bindir", "--build-root"}
+	}
+	return nil
+}
+
+func execPackageDestinations(scan commandArgScan, word string) []string {
+	names := execPackageDestinationFlags(word)
+	var values []string
+	for _, flag := range scan.flags {
+		if slices.Contains(names, flag.name) {
+			values = append(values, flag.value)
+		}
+	}
+	return values
+}
+
+// execEscapeFlags credits global and user package installs, package destination
+// flags outside the workspace, and global git config writes.
 func execEscapeFlags(cmd execCommand) *commandFacts {
 	if !cmd.seg.exitOK {
 		return nil
 	}
 	args, isInstall := execInstallArgs(cmd)
-	if isInstall && scanCommandArgs(args, execPackageFlagModelFor(cmd.word)).unknownFlag {
-		return nil
+	if isInstall {
+		scan := scanCommandArgs(args, execPackageFlagModelFor(cmd.word))
+		if scan.unknownFlag {
+			return nil
+		}
+		if _, escaped := execPathsWorkspace(cmd, execPackageDestinations(scan, cmd.word)); escaped {
+			return execFacts("workspace.escape")
+		}
 	}
 	switch {
 	case isInstall && execNodeManagers[cmd.word] && execHasFlag(args, execPackageFlagModelFor(cmd.word), "-g", "--global"):
@@ -1236,6 +1340,8 @@ func execFlagModelFor(cmd execCommand) commandFlagModel {
 		return execUnzipFlagModel
 	case cmd.word == "gunzip":
 		return execGunzipFlagModel
+	case execPermissionCommands[cmd.word]:
+		return execPermissionFlagModelFor(cmd.word)
 	case cmd.word == "git" && execSub(cmd.args) == "config":
 		return execGitConfigFlagModel
 	case cmd.word == "git":

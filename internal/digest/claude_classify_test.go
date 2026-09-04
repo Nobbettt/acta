@@ -109,6 +109,27 @@ func TestClaudeNonzeroExitWithoutIsErrorDoesNotCreditRead(t *testing.T) {
 	}
 }
 
+func TestClaudeBashCommandPreservesCarriageReturn(t *testing.T) {
+	lines := []string{
+		`{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"env\r"}}]}}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"env\\r: command not found"}]} ,"tool_use_result":{"exit_code":127}}`,
+	}
+	d, err := parseClaude(strings.NewReader(claudeSuccessfulStream(lines...)), newWorkspace(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Timeline) != 1 {
+		t.Fatalf("timeline = %d events, want 1", len(d.Timeline))
+	}
+	e := d.Timeline[0]
+	if e.Command != "env\r" {
+		t.Errorf("command = %q, want carriage return preserved", e.Command)
+	}
+	if slices.Contains(e.Categories, "env.inspect") {
+		t.Errorf("categories = %v, want no env.inspect for command word env\\r", e.Categories)
+	}
+}
+
 func TestClaudeCommandClassificationCannotCrossProjectionBudget(t *testing.T) {
 	state := &claudeParseState{
 		d:         &Digest{},

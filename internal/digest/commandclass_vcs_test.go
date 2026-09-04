@@ -55,6 +55,7 @@ func TestClassifyVCSCategories(t *testing.T) {
 		// a read is an observation, so it survives a nonzero exit
 		{"failed status still read", "git status", false, []string{"vcs.read"}},
 		{"failed unknown global option never invokes status", "git --definitely-unknown status", false, nil},
+		{"failed valued boolean global option never invokes status", "git --no-pager=false status", false, nil},
 		{"status help credits nothing", "git status --help", true, nil},
 		{"global help before mutation credits nothing", "git --help commit", true, nil},
 		{"global version before mutation credits nothing", "git --version commit", true, nil},
