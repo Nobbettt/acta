@@ -261,7 +261,7 @@ func execNetwork(cmd execCommand) *commandFacts {
 	if cmd.word == "rsync" {
 		remoteOperands := 0
 		for _, operand := range operands {
-			if execHostFromSpec(operand) != "" {
+			if execHostFromSpec(operand) != "" || strings.HasPrefix(operand, "rsync://") {
 				remoteOperands++
 			}
 		}
@@ -425,6 +425,9 @@ func execRemoteHost(word string, operands []string) string {
 // grammar; returning an unsafe spelling still lets the remote form prove a
 // target-free network.egress.
 func execHostFromSpec(operand string) string {
+	if strings.Contains(operand, "://") {
+		return ""
+	}
 	if at := strings.LastIndexByte(operand, '@'); at >= 0 {
 		if strings.Contains(operand[:at], "/") {
 			return ""

@@ -1,0 +1,3411 @@
+[
+  {
+    "command": "pwd && rg --files -g 'AGENTS.md' -g '!node_modules' -g '!vendor' | head -50 && rg --files -g '!node_modules' -g '!vendor' | head -120",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:lemon-ui-alpha-lemon-clock"
+  },
+  {
+    "command": "sed -n '1,240p' src/lib/format.ts && sed -n '1,280p' src/lib/format.test.ts && rg -n \"toLocale|Intl\\.DateTimeFormat|format(Date|Time)|hour12|AM|PM|timestamp|createdAt|updatedAt|startedAt|completedAt\" src --glob '*.{ts,tsx}'",
+    "want_categories": [
+      "search.query"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:lemon-ui-alpha-lemon-clock",
+    "note": "Round 14 ruling: search.query publishes no free-form pattern target."
+  },
+  {
+    "command": "sed -n '70,180p' src/lib/trajectory.ts && sed -n '80,135p' src/lib/pineapple.ts && sed -n '440,485p' src/lib/pineapple.ts && sed -n '840,900p' src/lib/pineapple.ts && sed -n '270,330p' src/components/ProcessSidebar.tsx && sed -n '330,380p' src/views/TrajectoryView.tsx && sed -n '610,770p' src/views/TrajectoryView.tsx && rg -n \"startedAt:|updated:|formatRunDate|formatEventTime|event\\.time|Started|Completed|Updated|Last activity\" src --glob '*.{ts,tsx}'",
+    "want_categories": [
+      "search.query"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:lemon-ui-alpha-lemon-clock",
+    "note": "Round 14 ruling: search.query publishes no free-form pattern target."
+  },
+  {
+    "command": "sed -n '940,1010p' src/lib/pineapple.ts && sed -n '1,130p' src/lib/trajectory.test.ts && sed -n '1,120p' src/components/WorkflowStages.test.tsx && sed -n '1,130p' src/components/ProcessSidebar.test.tsx && cat package.json && git status --short && printf '%s' \"$KIWI_STAGE_RESULT_PATH\"",
+    "want_categories": [
+      "vcs.read"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:lemon-ui-alpha-lemon-clock"
+  },
+  {
+    "command": "cat .kiwi-stage-control/kiwi-fb5407c0-99f7-4bdf-96dd-038e89ad65a6-planner-1/kiwi-stage-result.json && git status --short",
+    "want_categories": [
+      "vcs.read"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:lemon-ui-alpha-lemon-clock"
+  },
+  {
+    "command": "pwd && rg --files -g 'AGENTS.md' -g '!node_modules' -g '!vendor' | sort && rg -n \"(AM|PM|hour12|toLocale(Time|String)|date.*format|format.*date|time.*format|format.*time)\" . --glob '!node_modules/**' --glob '!vendor/**' --glob '!dist/**' --glob '!build/**'",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:lemon-ui-alpha-lemon-clock",
+    "note": "Round 14 removes free-form search targets; the pipeline-wide proof ruling intentionally withholds all categories."
+  },
+  {
+    "command": "sed -n '1,140p' src/lib/format.ts\nsed -n '1,150p' src/lib/trajectory.ts\nrg -n \"Intl\\.DateTimeFormat|toLocale(Date|Time|String)|format(EventTime|RunDate|Timestamp|Date|Time)\" src --glob '!mocks/fixtures/**'\nrg --files src | rg '(test|spec)\\.(ts|tsx)$'\ncat package.json\ngit status --short\nprintenv KIWI_STAGE_RESULT_PATH",
+    "want_categories": [
+      "env.inspect",
+      "search.query",
+      "vcs.read"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:lemon-ui-alpha-lemon-clock",
+    "note": "Round 14 ruling: search.query publishes no free-form pattern target."
+  },
+  {
+    "command": "sed -n '1,240p' src/lib/format.test.ts\nrg -n \"([0-9]{1,2}:[0-9]{2}(:[0-9]{2})?\\s*(AM|PM)|AM|PM|startedAt|updated:)\" src --glob '*.{test,spec}.{ts,tsx}' --glob '!mocks/fixtures/**'\nrg -n \"eventTime\\(|recordedRunBoundaryEvents|Run Started|Run Completed\" src/lib/trajectory.test.ts",
+    "want_categories": [
+      "search.query"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:lemon-ui-alpha-lemon-clock",
+    "note": "Round 14 ruling: search.query publishes no free-form pattern target."
+  },
+  {
+    "command": "npm test -- --run src/lib/format.test.ts src/lib/trajectory.test.ts && npm test && npm run build",
+    "want_categories": [
+      "verify.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:lemon-ui-alpha-lemon-clock",
+    "note": "Only the explicit npm run build spelling is in the verification table."
+  },
+  {
+    "command": "npm ci --prefer-offline --no-audit --no-fund",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:lemon-ui-alpha-lemon-clock",
+    "note": "npm ci is not one of the contract's package-install verbs."
+  },
+  {
+    "command": "node -e \"for (const h of [0,8,16]) { const d = new Date(2026,7,13,h,5,9); console.log(new Intl.DateTimeFormat(undefined,{hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).format(d)) }\"\nrg -n \"toLocaleTimeString|hour12|hourCycle|hour:\\s*['\\\"]|AM|PM\" src --glob '!mocks/fixtures/**' --glob '!*.css' --glob '!*.svg'\ngit diff --check\ngit diff -- src/lib/format.ts src/lib/format.test.ts src/lib/trajectory.ts\ngit status --short",
+    "want_categories": [
+      "search.query",
+      "vcs.read"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:lemon-ui-alpha-lemon-clock",
+    "note": "Round 14 ruling: search.query publishes no free-form pattern target."
+  },
+  {
+    "command": "test -x node_modules/.bin/vitest && echo vitest-ready || echo vitest-missing\nls node_modules/.bin/tsc 2>/dev/null || true",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:lemon-ui-alpha-lemon-clock"
+  },
+  {
+    "command": "pwd && rg --files -g 'AGENTS.md' -g '!node_modules' -g '!dist' | head -50 && git status --short && git diff --stat && git diff",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:lemon-ui-alpha-lemon-clock",
+    "note": "Standing ruling: any pipeline revokes proof for every segment; the lost recall is intended."
+  },
+  {
+    "command": "rg -n \"toLocale(Time|Date)?String|Intl\\.DateTimeFormat|hour12|hourCycle|formatRunDate|formatEventTime|timestamp|created_at|updated_at|started_at|finished_at\" src --glob '!**/*.test.*' --glob '!**/*.css' && find . -maxdepth 2 -type f \\( -name 'package.json' -o -name 'vitest.config.*' -o -name 'vite.config.*' \\) -print && sed -n '1,140p' src/lib/format.ts && sed -n '1,180p' package.json",
+    "want_categories": [
+      "search.query"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:lemon-ui-alpha-lemon-clock",
+    "note": "Round 14 ruling: search.query publishes no free-form pattern target."
+  },
+  {
+    "command": "npm test -- --run src/lib/format.test.ts src/lib/trajectory.test.ts && npm run build && git diff --check && rg -n \"\\b(AM|PM)\\b|toLocaleTimeString|toLocaleDateString|new Intl\\.DateTimeFormat\" src --glob '!mocks/fixtures/**' --glob '!**/*.test.*'",
+    "want_categories": [
+      "search.query",
+      "vcs.read",
+      "verify.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:lemon-ui-alpha-lemon-clock",
+    "note": "Round 14 ruling: search.query publishes no free-form pattern target."
+  },
+  {
+    "command": "node - <<'NODE'\nfor (const value of ['2026-08-13T08:05:09','2026-08-13T16:25:41','2026-08-13T00:07:03']) {\n const d = new Date(value)\n console.log(value, new Intl.DateTimeFormat(undefined,{hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).format(d), new Intl.DateTimeFormat(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(d))\n}\nNODE\nrg -n \"event\\.time|time:|formatEventTime|formatRunDate|AM|PM|[0-9]{1,2}:[0-9]{2}\" src/lib/*.test.ts src/components/*.test.tsx src/views/*.test.tsx 2>/dev/null | head -250\nrg -n 'KIWI_STAGE_RESULT_PATH' .kiwi-stage-control /tmp 2>/dev/null | head -20\nprintenv KIWI_STAGE_RESULT_PATH",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:lemon-ui-alpha-lemon-clock",
+    "note": "Round 14 removes free-form search targets; the pipeline-wide proof ruling intentionally withholds all categories."
+  },
+  {
+    "command": "sed -n '1p' \"$KIWI_STAGE_RESULT_PATH\" && git diff --check && git status --short",
+    "want_categories": [
+      "vcs.read"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:lemon-ui-alpha-lemon-clock"
+  },
+  {
+    "command": "pwd && rg --files -g 'AGENTS.md' -g '!node_modules' -g '!vendor' | head -50 && git status --short && git diff --stat && git diff",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:lemon-ui-alpha-lemon-clock",
+    "note": "Standing ruling: any pipeline revokes proof for every segment; the lost recall is intended."
+  },
+  {
+    "command": "rg -n \"toLocale(Time|Date)String|Intl\\.DateTimeFormat|hour12|hourCycle|AM|PM|formatRunDate|formatEventTime\" src --glob '!**/*.snap' && sed -n '1,180p' package.json && find .kiwi-stage-control -maxdepth 3 -type f -print",
+    "want_categories": [
+      "search.query"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:lemon-ui-alpha-lemon-clock",
+    "note": "Round 14 ruling: search.query publishes no free-form pattern target."
+  },
+  {
+    "command": "npm test && npm run build",
+    "want_categories": [
+      "verify.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:lemon-ui-alpha-lemon-clock"
+  },
+  {
+    "command": "node - <<'NODE'\nfor (const value of ['2026-08-13T08:05:09','2026-08-13T16:25:41','2026-08-13T00:07:03']) {\n  const date = new Date(value)\n  const event = new Intl.DateTimeFormat(undefined, {hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).format(date)\n  const run = new Intl.DateTimeFormat(undefined, {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(date)\n  console.log(value, event, run)\n}\nNODE\nrg -n '\"scripts\"|packageManager|lockfileVersion' package-lock.json pnpm-lock.yaml yarn.lock 2>/dev/null | head -30\nprintf '%s\\n' \"$KIWI_STAGE_RESULT_PATH\"",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:lemon-ui-alpha-lemon-clock",
+    "note": "Round 14 removes free-form search targets; the pipeline-wide proof ruling intentionally withholds all categories."
+  },
+  {
+    "command": "sed -n '1p' \"$KIWI_STAGE_RESULT_PATH\" && git status --short",
+    "want_categories": [
+      "vcs.read"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:lemon-ui-alpha-lemon-clock"
+  },
+  {
+    "command": "printenv KIWI_STAGE_RESULT_PATH",
+    "want_categories": [
+      "env.inspect"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:lemon-ui-alpha-lemon-clock"
+  },
+  {
+    "command": "jq -e '.verdict == \"ready_for_pr\" and .patch_hash == \"sha256:ec5e24cbbcfae1f72752a02ea54340ab188b6cc646444466f0b6b10ba2c716e6\" and (.bindings | length == 5) and (.rationales | length == 3) and (.metadata.pull_request_title | length > 0) and (.metadata.pull_request_body | contains(\"## Summary\") and contains(\"## Validation\"))' .kiwi-stage-control/kiwi-fb5407c0-99f7-4bdf-96dd-038e89ad65a6-pr_writer-1/kiwi-stage-result.json",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:lemon-ui-alpha-lemon-clock"
+  },
+  {
+    "command": "node -e 'const fs=require(\"fs\"); const p=process.env.KIWI_STAGE_RESULT_PATH; const x=JSON.parse(fs.readFileSync(p,\"utf8\")); if(x.verdict!==\"ready_for_pr\"||x.patch_hash!==\"sha256:ec5e24cbbcfae1f72752a02ea54340ab188b6cc646444466f0b6b10ba2c716e6\"||x.bindings.length!==5||x.rationales.length!==3||!x.metadata.pull_request_body.includes(\"## Summary\")||!x.metadata.pull_request_body.includes(\"## Validation\")) process.exit(1); console.log(\"stage result valid\")'",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:lemon-ui-alpha-lemon-clock"
+  },
+  {
+    "command": "/bin/zsh -lc \"sed -n '1,3p' src/format.ts\"",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:proof-workspace-codex"
+  },
+  {
+    "command": "/bin/zsh -lc 'cat AGENTS.md'",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:proof-workspace-codex"
+  },
+  {
+    "command": "/bin/zsh -lc 'git status --short'",
+    "want_categories": [
+      "vcs.read"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:proof-workspace-codex"
+  },
+  {
+    "command": "/bin/zsh -lc 'rm stale.txt'",
+    "want_categories": [
+      "fs.delete"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "stale.txt"
+      }
+    ],
+    "want_mutations": [
+      {
+        "kind": "delete",
+        "path": "stale.txt",
+        "from": "",
+        "to": ""
+      }
+    ],
+    "source": "real:proof-workspace-codex"
+  },
+  {
+    "command": "/bin/zsh -lc 'mv old.txt renamed.txt'",
+    "want_categories": [
+      "fs.move"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "old.txt"
+      },
+      {
+        "kind": "path",
+        "value": "renamed.txt"
+      }
+    ],
+    "want_mutations": [
+      {
+        "kind": "move",
+        "path": "",
+        "from": "old.txt",
+        "to": "renamed.txt"
+      }
+    ],
+    "source": "real:proof-workspace-codex"
+  },
+  {
+    "command": "/bin/zsh -lc 'rg -n \"TODO\" src'",
+    "want_categories": [
+      "search.query"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:proof-workspace-codex",
+    "note": "Round 14 ruling: search.query publishes no free-form pattern target."
+  },
+  {
+    "command": "/bin/zsh -lc 'chmod 644 src/format.ts'",
+    "want_categories": [
+      "permission.changed"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "src/format.ts"
+      }
+    ],
+    "want_mutations": [],
+    "source": "real:proof-workspace-codex"
+  },
+  {
+    "command": "/bin/zsh -lc 'echo \"build && rm -rf dist\"'",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:proof-workspace-codex"
+  },
+  {
+    "command": "/bin/zsh -lc 'rm /tmp/definitely-not-here-92831'",
+    "want_categories": [
+      "workspace.escape"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:proof-workspace-codex"
+  },
+  {
+    "command": "/bin/zsh -lc 'curl --version'",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:proof-workspace-codex"
+  },
+  {
+    "command": "/bin/zsh -lc 'tar -czf /tmp/proof-archive.tgz src'",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:proof-workspace-codex"
+  },
+  {
+    "command": "/bin/zsh -lc 'cat .github/workflows/ci.yml'",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:proof-workspace-codex"
+  },
+  {
+    "command": "/bin/zsh -lc 'cat dist/bundle.js'",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:proof-workspace-codex"
+  },
+  {
+    "command": "/bin/zsh -lc 'git remote -v'",
+    "want_categories": [
+      "vcs.provenance"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:proof-workspace-codex"
+  },
+  {
+    "command": "/bin/zsh -lc 'rm renamed.txt; echo done'",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:proof-workspace-codex",
+    "note": "A semicolon discards the rm status, so success of the whole command proves no deletion."
+  },
+  {
+    "command": "/bin/zsh -lc \"printf 'notes\\\\n' > note.txt && cat > note2.txt <<'MARK'\nrm -rf src\nMARK\"",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:proof-workspace-codex",
+    "note": "The apparent rm is heredoc body text, not an executed command."
+  },
+  {
+    "command": "/bin/zsh -lc 'git commit -am \"wip; rm tracked.txt; done\"'",
+    "want_categories": [
+      "vcs.mutate"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "real:proof-workspace-codex",
+    "note": "Regression: exact three-token shell wrappers unwrap and git commit -am mutates."
+  },
+  {
+    "command": "git rm",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r1-contract"
+  },
+  {
+    "command": "git rm --cached",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r1-contract"
+  },
+  {
+    "command": "mv x dir/",
+    "want_categories": [
+      "fs.move"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "x"
+      },
+      {
+        "kind": "path",
+        "value": "dir/x"
+      }
+    ],
+    "want_mutations": [
+      {
+        "kind": "move",
+        "path": "",
+        "from": "x",
+        "to": "dir/x"
+      }
+    ],
+    "source": "review-r1-contract"
+  },
+  {
+    "command": "git apply",
+    "want_categories": [
+      "fs.patch"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r1-contract"
+  },
+  {
+    "command": "mv internal/old.go internal/digest/",
+    "want_categories": [
+      "fs.move"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "internal/old.go"
+      },
+      {
+        "kind": "path",
+        "value": "internal/digest/old.go"
+      }
+    ],
+    "want_mutations": [
+      {
+        "kind": "move",
+        "path": "",
+        "from": "internal/old.go",
+        "to": "internal/digest/old.go"
+      }
+    ],
+    "source": "review-r1-correctness"
+  },
+  {
+    "command": "mv a b c",
+    "want_categories": [
+      "fs.move"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r1-correctness",
+    "note": "Standing ruling: multi-source mv keeps only fs.move; unprovable destination targets are intentionally withheld."
+  },
+  {
+    "command": "git rm --cached secrets.env",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r1-correctness"
+  },
+  {
+    "command": "git rm --cached -r somedir",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r1-correctness"
+  },
+  {
+    "command": "rm old.log | tee cleanup.log",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r1-correctness",
+    "note": "Pipeline status proves tee, not rm, succeeded."
+  },
+  {
+    "command": "pip install ruff 2>&1 | tee install.log",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r1-correctness",
+    "note": "Pipeline status proves tee, not pip, succeeded."
+  },
+  {
+    "command": "npm install --save-dev jest >install.log",
+    "want_categories": [
+      "package.install"
+    ],
+    "want_targets": [
+      {
+        "kind": "package",
+        "value": "jest"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r1-correctness"
+  },
+  {
+    "command": "rm src/old.go",
+    "want_categories": [
+      "fs.delete"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "src/old.go"
+      }
+    ],
+    "want_mutations": [
+      {
+        "kind": "delete",
+        "path": "src/old.go",
+        "from": "",
+        "to": ""
+      }
+    ],
+    "source": "review-r1-correctness"
+  },
+  {
+    "command": "git remote -v",
+    "want_categories": [
+      "vcs.provenance"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r1-correctness"
+  },
+  {
+    "command": "git -C ../other-repo commit -m x",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r1-correctness"
+  },
+  {
+    "command": "git -C /elsewhere push --force",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r1-correctness"
+  },
+  {
+    "command": "sudo rm node_modules",
+    "want_categories": [
+      "fs.delete"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "node_modules"
+      }
+    ],
+    "want_mutations": [
+      {
+        "kind": "delete",
+        "path": "node_modules",
+        "from": "",
+        "to": ""
+      }
+    ],
+    "source": "review-r1-correctness"
+  },
+  {
+    "command": "sudo chown acta:acta x",
+    "want_categories": [
+      "permission.changed"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "x"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r1-correctness"
+  },
+  {
+    "command": "sudo git rm docs/old.md",
+    "want_categories": [
+      "fs.delete"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "docs/old.md"
+      }
+    ],
+    "want_mutations": [
+      {
+        "kind": "delete",
+        "path": "docs/old.md",
+        "from": "",
+        "to": ""
+      }
+    ],
+    "source": "review-r1-correctness"
+  },
+  {
+    "command": "gh release list",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r1-correctness"
+  },
+  {
+    "command": "gh release view v1.2.0",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r1-correctness"
+  },
+  {
+    "command": "gh release download v1.2.0",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r1-correctness"
+  },
+  {
+    "command": "gh release upload v1.2.0 asset.tgz",
+    "want_categories": [
+      "forge.mutate"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r1-correctness"
+  },
+  {
+    "command": "git config --global --list",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r1-correctness"
+  },
+  {
+    "command": "git config --global --get user.email",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r1-correctness"
+  },
+  {
+    "command": "git stash list",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r1-correctness"
+  },
+  {
+    "command": "git branch -a",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r1-correctness"
+  },
+  {
+    "command": "git branch",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r1-correctness"
+  },
+  {
+    "command": "git tag",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r1-correctness"
+  },
+  {
+    "command": "git tag -l 'v1.*'",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r1-correctness"
+  },
+  {
+    "command": "git stash drop",
+    "want_categories": [
+      "vcs.rewrite"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r1-correctness"
+  },
+  {
+    "command": "curl --version",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r1-correctness"
+  },
+  {
+    "command": "wget --help",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r1-correctness"
+  },
+  {
+    "command": "git reset HEAD~1",
+    "want_categories": [
+      "vcs.mutate"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r1-correctness",
+    "note": "The standing ruling says plain git reset mutates the index."
+  },
+  {
+    "command": "patch src/foo.go < fix.diff",
+    "want_categories": [
+      "fs.patch"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r1-quality",
+    "note": "Round 22 ruling: fs.patch is category-only and emits no file mutation."
+  },
+  {
+    "command": "cp -t backup a.txt b.txt",
+    "want_categories": [
+      "fs.create"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "backup/a.txt"
+      },
+      {
+        "kind": "path",
+        "value": "backup/b.txt"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r1-quality"
+  },
+  {
+    "command": "npm run check",
+    "want_categories": [
+      "verify.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r1-quality",
+    "note": "The standing ruling includes check in the verification script allowlist."
+  },
+  {
+    "command": "npm install --global=false left-pad",
+    "want_categories": [
+      "package.install"
+    ],
+    "want_targets": [
+      {
+        "kind": "package",
+        "value": "left-pad"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r10-contract"
+  },
+  {
+    "command": "docker compose up --detach=false",
+    "want_categories": [
+      "container.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r10-contract"
+  },
+  {
+    "command": "true || git status",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r10-contract"
+  },
+  {
+    "command": "false && git status",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r10-contract"
+  },
+  {
+    "command": "nc -l 127.0.0.1 8080",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r10-contract"
+  },
+  {
+    "command": "nc -l 8080",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r10-contract"
+  },
+  {
+    "command": "git --version commit",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r10-contract"
+  },
+  {
+    "command": "git --exec-path commit",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r10-contract"
+  },
+  {
+    "command": "exit 0 && rm victim.txt",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r10-correctness"
+  },
+  {
+    "command": "command -p cd /tmp",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r10-correctness"
+  },
+  {
+    "command": "npm config get global --global=false",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r10-correctness"
+  },
+  {
+    "command": "ssh \"$HOST\" true",
+    "want_categories": [
+      "network.egress"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r10-correctness"
+  },
+  {
+    "command": "scp /dev/null '[::1]:/tmp/'",
+    "want_categories": [
+      "network.egress"
+    ],
+    "want_targets": [
+      {
+        "kind": "host",
+        "value": "::1"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r10-correctness"
+  },
+  {
+    "command": "git status --help",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r10-quality"
+  },
+  {
+    "command": "git --help commit",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r10-quality"
+  },
+  {
+    "command": "command -p cd frontend && rm old.go",
+    "want_categories": [
+      "fs.delete"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r10-quality",
+    "note": "The cd makes the relative delete path unresolvable, but the successful action category remains proven."
+  },
+  {
+    "command": "mv src.txt dest/.",
+    "want_categories": [
+      "fs.move"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "src.txt"
+      },
+      {
+        "kind": "path",
+        "value": "dest/src.txt"
+      }
+    ],
+    "want_mutations": [
+      {
+        "kind": "move",
+        "path": "",
+        "from": "src.txt",
+        "to": "dest/src.txt"
+      }
+    ],
+    "source": "review-r10-quality"
+  },
+  {
+    "command": "mv -n src.txt dest.txt",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r10-quality"
+  },
+  {
+    "command": "touch -c absent.txt",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r10-quality"
+  },
+  {
+    "command": "screen -v",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r10-quality"
+  },
+  {
+    "command": "scp notes.txt 'deploy@[2001:db8::1]:/srv/notes.txt'",
+    "want_categories": [
+      "network.egress"
+    ],
+    "want_targets": [
+      {
+        "kind": "host",
+        "value": "2001:db8::1"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r10-quality"
+  },
+  {
+    "command": "curl https://hooks.slack.com/services/T00000000/B00000000/SECRET_TOKEN",
+    "want_categories": [
+      "network.egress"
+    ],
+    "want_targets": [
+      {
+        "kind": "url",
+        "value": "https://hooks.slack.com"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r11-contract"
+  },
+  {
+    "command": "git rev-parse HEAD | printf '0000000000000000000000000000000000000000\\n'",
+    "want_categories": [
+      "vcs.provenance"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r11-contract",
+    "note": "Pipeline output cannot prove a provenance target."
+  },
+  {
+    "command": "command false && git status",
+    "want_categories": [
+      "vcs.read"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r11-contract"
+  },
+  {
+    "command": "command false && nohup sleep 60",
+    "want_categories": [
+      "process.background"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r11-contract"
+  },
+  {
+    "command": "exit 0; curl https://never.example",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r11-contract"
+  },
+  {
+    "command": "exec true; curl https://never.example",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r11-contract"
+  },
+  {
+    "command": "git push -qn origin main",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r11-contract",
+    "note": "The clustered dry-run flag proves no forge mutation."
+  },
+  {
+    "command": "curl -o /dev/stdout https://example.com/archive.tgz",
+    "want_categories": [
+      "network.egress"
+    ],
+    "want_targets": [
+      {
+        "kind": "url",
+        "value": "https://example.com"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r11-contract"
+  },
+  {
+    "command": "wget -O /dev/stdout https://example.com/archive.tgz",
+    "want_categories": [
+      "network.egress"
+    ],
+    "want_targets": [
+      {
+        "kind": "url",
+        "value": "https://example.com"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r11-contract"
+  },
+  {
+    "command": "curl https://example.invalid/ |",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r11-correctness"
+  },
+  {
+    "command": "true || false || git status",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r11-correctness"
+  },
+  {
+    "command": "cat missing.txt | printf fallback",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r11-quality"
+  },
+  {
+    "command": "mv -t=archive notes.md",
+    "want_categories": [
+      "fs.move"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "notes.md"
+      },
+      {
+        "kind": "path",
+        "value": "=archive/notes.md"
+      }
+    ],
+    "want_mutations": [
+      {
+        "kind": "move",
+        "path": "",
+        "from": "notes.md",
+        "to": "=archive/notes.md"
+      }
+    ],
+    "source": "review-r11-quality"
+  },
+  {
+    "command": "printf x || git status",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r11-quality"
+  },
+  {
+    "command": "cp -n source.txt dest.txt",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r11-quality"
+  },
+  {
+    "command": "npm install --package-lock-only left-pad",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r11-quality",
+    "note": "Lockfile-only mode proves no package installation."
+  },
+  {
+    "command": "cp src/a.txt /repo/",
+    "want_categories": [
+      "fs.create"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "a.txt"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r11-quality"
+  },
+  {
+    "command": "pip install https://packages.example.test/sk-live-SECRET/pkg.whl",
+    "want_categories": [
+      "package.install"
+    ],
+    "want_targets": [
+      {
+        "kind": "package",
+        "value": "https://packages.example.test"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r12-contract"
+  },
+  {
+    "command": "curl -o /dev/zero https://example.com/tool.tgz",
+    "want_categories": [
+      "network.egress"
+    ],
+    "want_targets": [
+      {
+        "kind": "url",
+        "value": "https://example.com"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r12-contract"
+  },
+  {
+    "command": "git rm --ignore-unmatch missing.txt",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r12-contract"
+  },
+  {
+    "command": "cp src/a.go archive/nested/..",
+    "want_categories": [
+      "fs.create"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "archive/a.go"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r12-correctness"
+  },
+  {
+    "command": "npm install \"$(printf lodash)\"",
+    "want_categories": [
+      "package.install"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r12-correctness",
+    "note": "An unexpanded command substitution proves no package target."
+  },
+  {
+    "command": "git status >",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r12-correctness"
+  },
+  {
+    "command": "pytest -qh",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r12-correctness"
+  },
+  {
+    "command": "mv -u src.txt dst.txt",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r12-quality"
+  },
+  {
+    "command": "cp -u source.txt dest.txt",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r13-contract"
+  },
+  {
+    "command": "rm -i victim.txt </dev/null",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r13-correctness"
+  },
+  {
+    "command": "rm -f missing.txt",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r13-quality"
+  },
+  {
+    "command": "rm -rf build",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r13-quality",
+    "note": "Force mode can succeed without deleting anything."
+  },
+  {
+    "command": "mv -i old.txt new.txt",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r13-quality"
+  },
+  {
+    "command": "docker compose up -d=false",
+    "want_categories": [
+      "container.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r13-quality"
+  },
+  {
+    "command": "rm b.txt && mv a.txt b.txt && rm b.txt",
+    "want_categories": [
+      "fs.delete",
+      "fs.move"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "b.txt"
+      },
+      {
+        "kind": "path",
+        "value": "a.txt"
+      }
+    ],
+    "want_mutations": [
+      {
+        "kind": "delete",
+        "path": "b.txt",
+        "from": "",
+        "to": ""
+      },
+      {
+        "kind": "move",
+        "path": "",
+        "from": "a.txt",
+        "to": "b.txt"
+      },
+      {
+        "kind": "delete",
+        "path": "b.txt",
+        "from": "",
+        "to": ""
+      }
+    ],
+    "source": "review-r14-contract"
+  },
+  {
+    "command": "rm 'victim '",
+    "want_categories": [
+      "fs.delete"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "victim "
+      }
+    ],
+    "want_mutations": [
+      {
+        "kind": "delete",
+        "path": "victim ",
+        "from": "",
+        "to": ""
+      }
+    ],
+    "source": "review-r14-contract"
+  },
+  {
+    "command": "curl https://never.example/path;;",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r14-correctness"
+  },
+  {
+    "command": "mv a.txt dir/sub/..",
+    "want_categories": [
+      "fs.move"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "a.txt"
+      },
+      {
+        "kind": "path",
+        "value": "dir/a.txt"
+      }
+    ],
+    "want_mutations": [
+      {
+        "kind": "move",
+        "path": "",
+        "from": "a.txt",
+        "to": "dir/a.txt"
+      }
+    ],
+    "source": "review-r14-correctness"
+  },
+  {
+    "command": "rm missing.txt 'x>'",
+    "want_categories": [
+      "fs.delete"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "missing.txt"
+      },
+      {
+        "kind": "path",
+        "value": "x>"
+      }
+    ],
+    "want_mutations": [
+      {
+        "kind": "delete",
+        "path": "missing.txt",
+        "from": "",
+        "to": ""
+      },
+      {
+        "kind": "delete",
+        "path": "x>",
+        "from": "",
+        "to": ""
+      }
+    ],
+    "source": "review-r14-quality"
+  },
+  {
+    "command": "git --definitely-bogus status",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r14-quality"
+  },
+  {
+    "command": "git --definitely-unknown status",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r15-contract"
+  },
+  {
+    "command": "rsync https://example.com/a ./a",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r15-quality",
+    "note": "Regression: HTTPS is not an rsync remote operand."
+  },
+  {
+    "command": "curl -o /tmp/tool.tgz https://example.com/tool.tgz",
+    "want_categories": [
+      "network.egress",
+      "workspace.escape"
+    ],
+    "want_targets": [
+      {
+        "kind": "url",
+        "value": "https://example.com"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r17-contract"
+  },
+  {
+    "command": "wget -O /tmp/tool.tgz https://example.com/tool.tgz",
+    "want_categories": [
+      "network.egress",
+      "workspace.escape"
+    ],
+    "want_targets": [
+      {
+        "kind": "url",
+        "value": "https://example.com"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r17-contract"
+  },
+  {
+    "command": "chmod 600 /tmp/key",
+    "want_categories": [
+      "workspace.escape"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r17-contract"
+  },
+  {
+    "command": "pip install --target /tmp/vendor requests",
+    "want_categories": [
+      "package.install",
+      "workspace.escape"
+    ],
+    "want_targets": [
+      {
+        "kind": "package",
+        "value": "requests"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r17-contract"
+  },
+  {
+    "command": "mv a.txt a.txt",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r17-correctness"
+  },
+  {
+    "command": "chown --from=0:0 0:0 file.txt",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r17-correctness"
+  },
+  {
+    "command": "npm install --prefix /tmp --prefix . left-pad",
+    "want_categories": [
+      "package.install",
+      "workspace.escape"
+    ],
+    "want_targets": [
+      {
+        "kind": "package",
+        "value": "left-pad"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r17-correctness"
+  },
+  {
+    "command": "pip install --report /tmp/report.json requests",
+    "want_categories": [
+      "package.install",
+      "workspace.escape"
+    ],
+    "want_targets": [
+      {
+        "kind": "package",
+        "value": "requests"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r17-correctness"
+  },
+  {
+    "command": "wget -O inside -O /tmp/out https://example.com/a",
+    "want_categories": [
+      "network.egress",
+      "workspace.escape"
+    ],
+    "want_targets": [
+      {
+        "kind": "url",
+        "value": "https://example.com"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r17-correctness"
+  },
+  {
+    "command": "mkdir -p existing",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r17-quality"
+  },
+  {
+    "command": "sudo chown acta:acta /srv/app",
+    "want_categories": [
+      "workspace.escape"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r17-quality"
+  },
+  {
+    "command": "false || curl https://example.com",
+    "want_categories": [
+      "network.egress"
+    ],
+    "want_targets": [
+      {
+        "kind": "url",
+        "value": "https://example.com"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r17-quality"
+  },
+  {
+    "command": "false || git status",
+    "want_categories": [
+      "vcs.read"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r17-quality"
+  },
+  {
+    "command": "chmod 600 /tmp/outside && cd subdir",
+    "want_categories": [
+      "workspace.escape"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r19-contract"
+  },
+  {
+    "command": "pip install --target /tmp/vendor --target vendor requests",
+    "want_categories": [
+      "package.install",
+      "workspace.escape"
+    ],
+    "want_targets": [
+      {
+        "kind": "package",
+        "value": "requests"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r19-contract"
+  },
+  {
+    "command": "chown --from=root root config/settings.json",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r19-correctness"
+  },
+  {
+    "command": "rm --interactive=always victim.txt",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r19-quality"
+  },
+  {
+    "command": "npm install -g left-pad && cd subdir",
+    "want_categories": [
+      "package.install",
+      "workspace.escape"
+    ],
+    "want_targets": [
+      {
+        "kind": "package",
+        "value": "left-pad"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r19-quality"
+  },
+  {
+    "command": "rm -rf dist &",
+    "want_categories": [
+      "process.background"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r19-quality"
+  },
+  {
+    "command": "gh pr create --body \"Removed legacy code.\\nrm -rf legacy was run manually.\\nSee notes.\"",
+    "want_categories": [
+      "forge.mutate"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r2-contract"
+  },
+  {
+    "command": "git commit -m \"wip; rm tmp.txt; done\"",
+    "want_categories": [
+      "vcs.mutate"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r2-contract"
+  },
+  {
+    "command": "npm install \"\"",
+    "want_categories": [
+      "package.install"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r2-contract"
+  },
+  {
+    "command": "touch -t 202601010000 f",
+    "want_categories": [
+      "fs.create"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "f"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r2-contract"
+  },
+  {
+    "command": "touch -r ref.txt new.txt",
+    "want_categories": [
+      "fs.create"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "new.txt"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r2-contract"
+  },
+  {
+    "command": "mkdir -m 755 out",
+    "want_categories": [
+      "fs.create"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "out"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r2-contract"
+  },
+  {
+    "command": "rm $(cat list.txt)",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r2-correctness"
+  },
+  {
+    "command": "mv -t archive notes.md",
+    "want_categories": [
+      "fs.move"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "notes.md"
+      },
+      {
+        "kind": "path",
+        "value": "archive/notes.md"
+      }
+    ],
+    "want_mutations": [
+      {
+        "kind": "move",
+        "path": "",
+        "from": "notes.md",
+        "to": "archive/notes.md"
+      }
+    ],
+    "source": "review-r2-correctness"
+  },
+  {
+    "command": "git commit -m 'shift a << b' && git push",
+    "want_categories": [
+      "forge.mutate",
+      "vcs.mutate"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r2-correctness"
+  },
+  {
+    "command": "mkdir dist && cp a.txt dist/ || echo skipped",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r2-quality"
+  },
+  {
+    "command": "git --work-tree=/elsewhere add -A",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r2-quality"
+  },
+  {
+    "command": "git branch --list",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r2-quality"
+  },
+  {
+    "command": "git stash show",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r2-quality"
+  },
+  {
+    "command": "git push --dry-run",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r2-quality"
+  },
+  {
+    "command": "git config --global user.email",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r2-quality"
+  },
+  {
+    "command": "git add -i <<< q",
+    "want_categories": [
+      "command.interactive"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r21-contract"
+  },
+  {
+    "command": "BROWSER=true gh issue create --web",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r21-contract"
+  },
+  {
+    "command": "patch -o result.txt source.txt change.diff",
+    "want_categories": [
+      "fs.patch"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r21-correctness-1",
+    "note": "Round 22 ruling: fs.patch is category-only and emits no file mutation."
+  },
+  {
+    "command": "git cherry-pick abc123",
+    "want_categories": [
+      "fs.patch"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r21-correctness-2"
+  },
+  {
+    "command": "git revert abc123",
+    "want_categories": [
+      "fs.patch"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r21-correctness-2"
+  },
+  {
+    "command": "rsync build1.example.com:/src build2.example.com:/dst",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r21-quality"
+  },
+  {
+    "command": "gh pr create --web",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r21-quality"
+  },
+  {
+    "command": "gh issue create --web",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r21-quality"
+  },
+  {
+    "command": "mv a.txt b.txt | xargs -t archive",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r21-quality"
+  },
+  {
+    "command": "cp a.txt b.txt | xargs -t rm",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r21-quality"
+  },
+  {
+    "command": "rm a.txt b.txt",
+    "want_categories": [
+      "fs.delete"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "a.txt"
+      },
+      {
+        "kind": "path",
+        "value": "b.txt"
+      }
+    ],
+    "want_mutations": [
+      {
+        "kind": "delete",
+        "path": "a.txt",
+        "from": "",
+        "to": ""
+      },
+      {
+        "kind": "delete",
+        "path": "b.txt",
+        "from": "",
+        "to": ""
+      }
+    ],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "rm ../outside.txt",
+    "want_categories": [
+      "workspace.escape"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "rm '*.tmp'",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "mv old.txt new.txt",
+    "want_categories": [
+      "fs.move"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "old.txt"
+      },
+      {
+        "kind": "path",
+        "value": "new.txt"
+      }
+    ],
+    "want_mutations": [
+      {
+        "kind": "move",
+        "path": "",
+        "from": "old.txt",
+        "to": "new.txt"
+      }
+    ],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "cp input.txt output.txt",
+    "want_categories": [
+      "fs.create"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "output.txt"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "touch a.txt b.txt",
+    "want_categories": [
+      "fs.create"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "a.txt"
+      },
+      {
+        "kind": "path",
+        "value": "b.txt"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "mkdir out",
+    "want_categories": [
+      "fs.create"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "out"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "patch -p1 < fix.diff",
+    "want_categories": [
+      "fs.patch"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git apply --check fix.diff",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git status",
+    "want_categories": [
+      "vcs.read"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md",
+    "failure": {
+      "want_categories": [
+        "vcs.read"
+      ],
+      "want_targets": [],
+      "want_mutations": []
+    }
+  },
+  {
+    "command": "git diff --stat",
+    "want_categories": [
+      "vcs.read"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git log -5",
+    "want_categories": [
+      "vcs.read"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git show HEAD",
+    "want_categories": [
+      "vcs.read"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git blame file.go",
+    "want_categories": [
+      "vcs.read"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git ls-files",
+    "want_categories": [
+      "vcs.read"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git add file.go",
+    "want_categories": [
+      "vcs.mutate"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git commit -m done",
+    "want_categories": [
+      "vcs.mutate"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git checkout main",
+    "want_categories": [
+      "vcs.mutate"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git switch feature",
+    "want_categories": [
+      "vcs.mutate"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git branch feature",
+    "want_categories": [
+      "vcs.mutate"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git merge feature",
+    "want_categories": [
+      "vcs.mutate"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git stash",
+    "want_categories": [
+      "vcs.mutate"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git tag v1.0.0",
+    "want_categories": [
+      "vcs.mutate"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git restore file.go",
+    "want_categories": [
+      "vcs.mutate"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git commit --amend --no-edit",
+    "want_categories": [
+      "vcs.rewrite"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git rebase main",
+    "want_categories": [
+      "vcs.rewrite"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git push --force origin main",
+    "want_categories": [
+      "forge.mutate",
+      "vcs.rewrite"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git reset --hard HEAD~1",
+    "want_categories": [
+      "vcs.rewrite"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git filter-branch -- --all",
+    "want_categories": [
+      "vcs.rewrite"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git rev-parse HEAD",
+    "want_categories": [
+      "vcs.provenance"
+    ],
+    "want_targets": [
+      {
+        "kind": "ref",
+        "value": "0123456789abcdef0123456789abcdef01234567"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md",
+    "output": "0123456789abcdef0123456789abcdef01234567\n"
+  },
+  {
+    "command": "git remote -v",
+    "want_categories": [
+      "vcs.provenance"
+    ],
+    "want_targets": [
+      {
+        "kind": "url",
+        "value": "https://github.com"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md",
+    "output": "origin\thttps://user:token@github.com/acme/repo.git?key=secret (fetch)\norigin\thttps://user:token@github.com/acme/repo.git?key=secret (push)\n"
+  },
+  {
+    "command": "curl https://example.com",
+    "want_categories": [
+      "network.egress"
+    ],
+    "want_targets": [
+      {
+        "kind": "url",
+        "value": "https://example.com"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md",
+    "failure": {
+      "want_categories": [
+        "network.egress"
+      ],
+      "want_targets": [
+        {
+          "kind": "url",
+          "value": "https://example.com"
+        }
+      ],
+      "want_mutations": []
+    }
+  },
+  {
+    "command": "wget https://example.com",
+    "want_categories": [
+      "network.egress"
+    ],
+    "want_targets": [
+      {
+        "kind": "url",
+        "value": "https://example.com"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "ssh deploy@example.com true",
+    "want_categories": [
+      "network.egress"
+    ],
+    "want_targets": [
+      {
+        "kind": "host",
+        "value": "example.com"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "scp file.txt deploy@example.com:/srv/file.txt",
+    "want_categories": [
+      "network.egress"
+    ],
+    "want_targets": [
+      {
+        "kind": "host",
+        "value": "example.com"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "nc example.com 443",
+    "want_categories": [
+      "network.egress"
+    ],
+    "want_targets": [
+      {
+        "kind": "host",
+        "value": "example.com"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "rsync -a src/ deploy@example.com:/srv/src/",
+    "want_categories": [
+      "network.egress"
+    ],
+    "want_targets": [
+      {
+        "kind": "host",
+        "value": "example.com"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "rsync -a src/ backup/",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "gh pr create --title test",
+    "want_categories": [
+      "forge.mutate"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "gh pr merge 12",
+    "want_categories": [
+      "forge.mutate"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "gh pr close 12",
+    "want_categories": [
+      "forge.mutate"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "gh issue create --title bug",
+    "want_categories": [
+      "forge.mutate"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "gh issue comment 12 --body fixed",
+    "want_categories": [
+      "forge.mutate"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "gh issue close 12",
+    "want_categories": [
+      "forge.mutate"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git push origin main",
+    "want_categories": [
+      "forge.mutate"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "npm install lodash@4",
+    "want_categories": [
+      "package.install"
+    ],
+    "want_targets": [
+      {
+        "kind": "package",
+        "value": "lodash@4"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "pnpm add zod",
+    "want_categories": [
+      "package.install"
+    ],
+    "want_targets": [
+      {
+        "kind": "package",
+        "value": "zod"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "yarn add react",
+    "want_categories": [
+      "package.install"
+    ],
+    "want_targets": [
+      {
+        "kind": "package",
+        "value": "react"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "pip install requests",
+    "want_categories": [
+      "package.install"
+    ],
+    "want_targets": [
+      {
+        "kind": "package",
+        "value": "requests"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md",
+    "failure": {
+      "want_categories": [],
+      "want_targets": [],
+      "want_mutations": []
+    }
+  },
+  {
+    "command": "go get golang.org/x/tools",
+    "want_categories": [
+      "package.install"
+    ],
+    "want_targets": [
+      {
+        "kind": "package",
+        "value": "golang.org/x/tools"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "cargo add serde",
+    "want_categories": [
+      "package.install"
+    ],
+    "want_targets": [
+      {
+        "kind": "package",
+        "value": "serde"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "gem install rake",
+    "want_categories": [
+      "package.install"
+    ],
+    "want_targets": [
+      {
+        "kind": "package",
+        "value": "rake"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "brew install jq",
+    "want_categories": [
+      "package.install"
+    ],
+    "want_targets": [
+      {
+        "kind": "package",
+        "value": "jq"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "npm install -g typescript",
+    "want_categories": [
+      "package.install",
+      "workspace.escape"
+    ],
+    "want_targets": [
+      {
+        "kind": "package",
+        "value": "typescript"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "pip install --user requests",
+    "want_categories": [
+      "package.install",
+      "workspace.escape"
+    ],
+    "want_targets": [
+      {
+        "kind": "package",
+        "value": "requests"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git config --global user.email dev@example.com",
+    "want_categories": [
+      "workspace.escape"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "go test ./...",
+    "want_categories": [
+      "verify.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "go build ./...",
+    "want_categories": [
+      "verify.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "go vet ./...",
+    "want_categories": [
+      "verify.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "pytest",
+    "want_categories": [
+      "verify.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "vitest",
+    "want_categories": [
+      "verify.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "jest",
+    "want_categories": [
+      "verify.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "cargo test",
+    "want_categories": [
+      "verify.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "cargo build",
+    "want_categories": [
+      "verify.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "cargo clippy",
+    "want_categories": [
+      "verify.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "tsc",
+    "want_categories": [
+      "verify.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "eslint .",
+    "want_categories": [
+      "verify.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "ruff check .",
+    "want_categories": [
+      "verify.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "golangci-lint run",
+    "want_categories": [
+      "verify.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "make test",
+    "want_categories": [
+      "verify.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "make build",
+    "want_categories": [
+      "verify.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "make lint",
+    "want_categories": [
+      "verify.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "npm run test",
+    "want_categories": [
+      "verify.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "pnpm run lint",
+    "want_categories": [
+      "verify.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "yarn run typecheck",
+    "want_categories": [
+      "verify.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "npm run dev",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "rg -n TODO src",
+    "want_categories": [
+      "search.query"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md",
+    "note": "Round 14 ruling: search.query publishes no free-form pattern target."
+  },
+  {
+    "command": "grep -R error logs",
+    "want_categories": [
+      "search.query"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md",
+    "note": "Round 14 ruling: search.query publishes no free-form pattern target."
+  },
+  {
+    "command": "rg TODO file.go",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md",
+    "output": "file.go:1:TODO\n",
+    "note": "A successful single-file content search is credited as a read, not search.query."
+  },
+  {
+    "command": "head -50",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "python x.py | sed -n 1,5p",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "cat README.md",
+    "want_categories": [
+      "instructions.read"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md",
+    "output": "Acta\n"
+  },
+  {
+    "command": "cat CONTRIBUTING",
+    "want_categories": [
+      "instructions.read"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md",
+    "output": "Contributing\n",
+    "note": "Regression: named extensionless instruction basenames remain eligible reads."
+  },
+  {
+    "command": "cat .kiwi-stage-control/result.json",
+    "want_categories": [
+      "control.access"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md",
+    "output": "{}\n"
+  },
+  {
+    "command": "cat .github/workflows/ci.yml",
+    "want_categories": [
+      "path.sensitive"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md",
+    "output": "name: ci\n"
+  },
+  {
+    "command": "cat Dockerfile.dev",
+    "want_categories": [
+      "path.sensitive"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md",
+    "output": "FROM scratch\n"
+  },
+  {
+    "command": "cat .env.local",
+    "want_categories": [
+      "env.inspect",
+      "path.sensitive"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md",
+    "output": "KEY=value\n"
+  },
+  {
+    "command": "cat go.sum",
+    "want_categories": [
+      "path.generated"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md",
+    "output": "module sum\n"
+  },
+  {
+    "command": "cat dist/app.js",
+    "want_categories": [
+      "path.generated"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md",
+    "output": "bundle\n"
+  },
+  {
+    "command": "rm .kiwi-stage-control/result.json",
+    "want_categories": [
+      "control.access",
+      "fs.delete"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": ".kiwi-stage-control/result.json"
+      }
+    ],
+    "want_mutations": [
+      {
+        "kind": "delete",
+        "path": ".kiwi-stage-control/result.json",
+        "from": "",
+        "to": ""
+      }
+    ],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "rm .env.production",
+    "want_categories": [
+      "fs.delete",
+      "path.sensitive"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": ".env.production"
+      }
+    ],
+    "want_mutations": [
+      {
+        "kind": "delete",
+        "path": ".env.production",
+        "from": "",
+        "to": ""
+      }
+    ],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "touch package-lock.json",
+    "want_categories": [
+      "fs.create",
+      "path.generated"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "package-lock.json"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "touch denied.txt",
+    "want_categories": [
+      "fs.create"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "denied.txt"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md",
+    "output": "permission denied",
+    "failure": {
+      "want_categories": [
+        "sandbox.denied"
+      ],
+      "want_targets": [],
+      "want_mutations": []
+    }
+  },
+  {
+    "command": "echo sandbox",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md",
+    "output": "sandbox",
+    "failure": {
+      "want_categories": [
+        "sandbox.denied"
+      ],
+      "want_targets": [],
+      "want_mutations": []
+    }
+  },
+  {
+    "command": "git status",
+    "want_categories": [
+      "command.retried",
+      "vcs.read"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md",
+    "retry": true,
+    "failure": {
+      "want_categories": [
+        "command.retried",
+        "vcs.read"
+      ],
+      "want_targets": [],
+      "want_mutations": []
+    }
+  },
+  {
+    "command": "vim file.go",
+    "want_categories": [
+      "command.interactive"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "nano file.go",
+    "want_categories": [
+      "command.interactive"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "less README.md",
+    "want_categories": [
+      "command.interactive"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "top",
+    "want_categories": [
+      "command.interactive"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git rebase -i main",
+    "want_categories": [
+      "command.interactive",
+      "vcs.rewrite"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git add -i",
+    "want_categories": [
+      "command.interactive"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "sleep 10 &",
+    "want_categories": [
+      "process.background"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "nohup server",
+    "want_categories": [
+      "process.background"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "setsid server",
+    "want_categories": [
+      "process.background"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "screen -S work",
+    "want_categories": [
+      "process.background"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "tmux new-session",
+    "want_categories": [
+      "process.background"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "docker build .",
+    "want_categories": [
+      "container.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "podman run alpine true",
+    "want_categories": [
+      "container.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "docker compose up -d",
+    "want_categories": [
+      "container.run",
+      "process.background"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "docker ps",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "chmod 600 key.pem",
+    "want_categories": [
+      "path.sensitive",
+      "permission.changed"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "key.pem"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md",
+    "failure": {
+      "want_categories": [],
+      "want_targets": [],
+      "want_mutations": []
+    }
+  },
+  {
+    "command": "chown user:group file.txt",
+    "want_categories": [
+      "permission.changed"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "file.txt"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "chgrp staff file.txt",
+    "want_categories": [
+      "permission.changed"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "file.txt"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "tar -xf archive.tar",
+    "want_categories": [
+      "archive.extract"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md",
+    "failure": {
+      "want_categories": [],
+      "want_targets": [],
+      "want_mutations": []
+    }
+  },
+  {
+    "command": "tar -tf archive.tar",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "unzip archive.zip",
+    "want_categories": [
+      "archive.extract"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "unzip -l archive.zip",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "gunzip data.gz",
+    "want_categories": [
+      "archive.extract"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "curl -o tool.tgz https://example.com",
+    "want_categories": [
+      "archive.extract",
+      "network.egress"
+    ],
+    "want_targets": [
+      {
+        "kind": "url",
+        "value": "https://example.com"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "wget -O tool.tgz https://example.com",
+    "want_categories": [
+      "archive.extract",
+      "network.egress"
+    ],
+    "want_targets": [
+      {
+        "kind": "url",
+        "value": "https://example.com"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "env",
+    "want_categories": [
+      "env.inspect"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "printenv HOME",
+    "want_categories": [
+      "env.inspect"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "set",
+    "want_categories": [
+      "env.inspect"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "set -e",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "eval 'rm file.txt'",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "trap 'rm file.txt' EXIT",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "echo $(rm file.txt)",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "(rm file.txt)",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "echo ok # rm file.txt",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "echo first \\\n&& git status",
+    "want_categories": [
+      "vcs.read"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git status && git diff",
+    "want_categories": [
+      "vcs.read"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git status || git diff",
+    "want_categories": [
+      "vcs.read"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git status; git diff",
+    "want_categories": [
+      "vcs.read"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "rm file.txt && touch file.txt",
+    "want_categories": [
+      "fs.create",
+      "fs.delete"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "file.txt"
+      }
+    ],
+    "want_mutations": [
+      {
+        "kind": "delete",
+        "path": "file.txt",
+        "from": "",
+        "to": ""
+      }
+    ],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "rm file.txt & echo done",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "echo \"unterminated",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "cat <<'EOF'\nrm victim.txt\nEOF",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "echo \"rm victim.txt\"",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "FOO=1 sudo chmod +x script.sh",
+    "want_categories": [
+      "permission.changed"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "script.sh"
+      }
+    ],
+    "want_mutations": [],
+    "source": "contract:PLAN.md"
+  },
+  {
+    "command": "git reset file.go",
+    "want_categories": [
+      "vcs.mutate"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "ruling:LOOP-LEDGER.md"
+  },
+  {
+    "command": "npm run check",
+    "want_categories": [
+      "verify.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "ruling:LOOP-LEDGER.md"
+  },
+  {
+    "command": "ssh user:password@example.com true",
+    "want_categories": [
+      "network.egress"
+    ],
+    "want_targets": [
+      {
+        "kind": "host",
+        "value": "example.com"
+      }
+    ],
+    "want_mutations": [],
+    "source": "ruling:LOOP-LEDGER.md",
+    "note": "The standing ruling keeps only the host after the final at-sign."
+  }
+]

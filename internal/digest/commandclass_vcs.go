@@ -107,7 +107,7 @@ var gitFlagModels = map[string]commandFlagModel{
 		"-i": flagBoolean, "--interactive": flagBoolean,
 	},
 	"commit": {
-		"-m": flagValue, "--message": flagValue, "-F": flagValue, "--file": flagValue,
+		"-a": flagBoolean, "-m": flagValue, "--message": flagValue, "-F": flagValue, "--file": flagValue,
 		"--author": flagValue, "--date": flagValue,
 		"--amend": flagBoolean, "--dry-run": flagBoolean, "--no-edit": flagBoolean,
 	},

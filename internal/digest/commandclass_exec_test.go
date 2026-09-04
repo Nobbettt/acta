@@ -225,10 +225,14 @@ func TestClassifyExecNetworkEgress(t *testing.T) {
 			targets: host("build.example.com"),
 		},
 		{
-			name:    "rsync treats https spelling as remote shell syntax",
-			command: "rsync https://example.com/a ./a",
-			failed:  true,
+			name:    "rsync daemon URL",
+			command: "rsync rsync://mirror.example.com/module/a ./a",
 			want:    []string{"network.egress"},
+			targets: urlTarget("rsync://mirror.example.com"),
+		},
+		{
+			name:    "rsync rejects https spelling as a remote operand",
+			command: "rsync https://example.com/a ./a",
 		},
 		{
 			name:    "nc host and port",

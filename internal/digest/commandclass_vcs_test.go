@@ -70,6 +70,7 @@ func TestClassifyVCSCategories(t *testing.T) {
 		// vcs.mutate
 		{"add", "git add -A", true, []string{"vcs.mutate"}},
 		{"commit", "git commit -m 'feat: thing'", true, []string{"vcs.mutate"}},
+		{"commit all with clustered message flag", `git commit -am "wip; rm tracked.txt; done"`, true, []string{"vcs.mutate"}},
 		{"attached exec path permits mutation", "git --exec-path=/usr/libexec/git-core commit -m x", true, []string{"vcs.mutate"}},
 		{"checkout", "git checkout -b feature", true, []string{"vcs.mutate"}},
 		{"switch", "git switch main", true, []string{"vcs.mutate"}},

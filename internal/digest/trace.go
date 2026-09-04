@@ -34,7 +34,7 @@ var (
 
 var knownRootFilenames = map[string]bool{
 	"BUILD": true, "BUILD.bazel": true, "Brewfile": true, "CMakeLists.txt": true,
-	"Dockerfile": true, "Gemfile": true, "Jenkinsfile": true, "LICENSE": true,
+	"CONTRIBUTING": true, "Dockerfile": true, "Gemfile": true, "Jenkinsfile": true, "LICENSE": true,
 	"Makefile": true, "NOTICE": true, "Procfile": true, "README": true,
 	"Rakefile": true, "Vagrantfile": true, "WORKSPACE": true, "WORKSPACE.bazel": true,
 }

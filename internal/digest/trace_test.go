@@ -181,6 +181,20 @@ func TestRetrievalFromCommand(t *testing.T) {
 			nil,
 		},
 		{
+			"named extensionless instruction file",
+			`cat CONTRIBUTING`,
+			output,
+			[]string{"CONTRIBUTING"},
+			nil,
+		},
+		{
+			"arbitrary extensionless file",
+			`cat NOTES`,
+			output,
+			nil,
+			nil,
+		},
+		{
 			"echoed read command is only text",
 			`echo cat README.md`,
 			"cat README.md\n",
