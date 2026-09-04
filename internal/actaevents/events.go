@@ -86,7 +86,6 @@ const (
 	TypeFileWriteIncomplete    = "file.write.incomplete"
 	TypeFileDeleted            = "file.deleted"
 	TypeFileMoved              = "file.moved"
-	TypeFilePatched            = "file.patched"
 	TypeDiffGenerated          = "diff.generated"
 	TypeTokensReported         = "tokens.reported"
 )
@@ -189,7 +188,7 @@ func IsReasoningFreeType(typ string) bool {
 		TypeToolCallCompleted, TypeToolCallIncomplete, TypeToolResultOrphaned,
 		TypeShellCommandComplete, TypeShellCommandIncomplete, TypeWebSearchCompleted,
 		TypeWebSearchIncomplete, TypeFileRead, TypeFileWritten, TypeFileWriteIncomplete,
-		TypeFileDeleted, TypeFileMoved, TypeFilePatched,
+		TypeFileDeleted, TypeFileMoved,
 		TypeDiffGenerated, TypeTokensReported:
 		return true
 	default:
@@ -1176,9 +1175,8 @@ func (b *builder) appendFileReadEvents(sourceSeq int, eventTime time.Time, item 
 // appendShellMutationEvents fans a classified shell command out into the file
 // timeline, the same way appendFileReadEvents does for reads: one event per
 // workspace change the command proved, carrying the sequence of the command
-// event it was derived from. A patch whose rewritten paths the command text
-// never named records no mutation, so it emits no event here — the fs.patch
-// category on the command alone carries that fact.
+// event it was derived from. Patches are category-only because command text
+// does not prove which paths their bodies rewrote.
 func (b *builder) appendShellMutationEvents(sourceSeq int, eventTime time.Time, item digest.Event) error {
 	if len(item.ShellMutations) == 0 {
 		return nil
@@ -1202,9 +1200,6 @@ func (b *builder) appendShellMutationEvents(sourceSeq int, eventTime time.Time, 
 			}
 			typ = TypeFileMoved
 			payload = fileMovedPayload{From: mutation.From, To: mutation.To, SourceEventSequence: sourceSeq, Command: item.Command}
-		case "patch":
-			typ = TypeFilePatched
-			payload = filePathPayload{Path: mutation.Path, SourceEventSequence: sourceSeq, Command: item.Command}
 		default:
 			continue
 		}
@@ -1489,8 +1484,8 @@ type fileReadPayload struct {
 	Command             string             `json:"command,omitempty"`
 }
 
-// filePathPayload backs file.deleted and file.patched: one proven path plus the
-// command event it was derived from.
+// filePathPayload backs file.deleted: one proven path plus the command event it
+// was derived from.
 type filePathPayload struct {
 	Path                string `json:"path"`
 	SourceEventSequence int    `json:"source_event_sequence"`

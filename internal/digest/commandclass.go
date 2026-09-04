@@ -19,9 +19,9 @@ type CommandTarget struct {
 	Value string `json:"value"`
 }
 
-// ShellMutation is a workspace change proven by a shell command, so deletes,
-// moves and patches the agent made without an edit tool still reach the file
-// timeline. Kind is delete, move or patch.
+// ShellMutation is a workspace change proven by a shell command, so deletes
+// and moves the agent made without an edit tool still reach the file timeline.
+// Kind is delete or move.
 type ShellMutation struct {
 	Kind string `json:"kind"`
 	Path string `json:"path,omitempty"`
@@ -41,7 +41,7 @@ type commandSegment struct {
 	exitOK  bool     // the command exited zero
 	ws      *workspace
 	// cwdUncertain is set on every segment when `cd`, `pushd` or `popd` appears
-	// as a standalone token anywhere in the command. Path operands anywhere in
+	// as a standalone token anywhere in the command. Relative path operands in
 	// that command then cannot be trusted to identify workspace files.
 	cwdUncertain bool
 }
@@ -505,10 +505,11 @@ type chainSegment struct {
 // chainSegment, so classifyCommand never has to track shell semantics
 // itself. A single simple command, an unbroken `&&` chain, or the final branch
 // proven to run from literal outcomes can prove a state change. A pipeline,
-// background operator or subshell never can. Cwd changes taint paths
-// separately, while pruneUnexecuted removes commands after an executed
-// exit/exec. Returns nil when a heredoc's shape could not be resolved — see
-// stripHeredocBodies — so the caller credits nothing for the whole command.
+// background operator or subshell never can. Untracked cwd or parent-shell
+// environment changes make relative paths uncertain, while pruneUnexecuted
+// removes commands after an executed exit/exec. Returns nil when a heredoc's
+// shape could not be resolved — see stripHeredocBodies — so the caller credits
+// nothing for the whole command.
 func splitCommandChain(command string) []chainSegment {
 	if len(command) > maxCommandTokenizationChars {
 		return []chainSegment{{raw: command}}
@@ -525,7 +526,7 @@ func splitCommandChain(command string) []chainSegment {
 	cwdUncertain := false
 	for i, r := range raw {
 		tokens := tokensForSegment(r.raw)
-		if changesWorkingDirectory(tokens) {
+		if changesWorkingDirectory(tokens) || len(raw) > 1 && parentShellEnvironmentMutation(tokens) {
 			cwdUncertain = true
 		}
 		if (i > 0 && r.sep != "&&") || r.piped || r.async || r.subshell ||
@@ -568,13 +569,31 @@ func commandSyntaxModelled(raw []commandChainRaw) bool {
 		tokens := tokensForSegment(r.raw)
 		leading := execLeadingTokens(tokens)
 		if len(tokens) == 0 || len(tokens) > 1 && slices.Contains(tokens, "set") ||
-			containsShellControlCommand(tokens, "trap", "shopt") ||
+			containsShellControlCommand(tokens, "trap", "shopt", "logout") ||
 			len(leading) > 0 && (slices.Contains(unmodelledShellWords, leading[0]) ||
 				strings.HasSuffix(leading[0], "()")) || !redirectionsComplete(tokens) {
 			return false
 		}
 	}
 	return true
+}
+
+func parentShellEnvironmentMutation(tokens []string) bool {
+	if containsShellControlCommand(tokens, "export", "unset", "readonly", "declare", "typeset", "local") {
+		return true
+	}
+	foundAssignment := false
+	for i := 0; i < len(tokens); i++ {
+		switch {
+		case execIsAssignment(tokens[i]):
+			foundAssignment = true
+		case isRedirection(tokens[i]) && i+1 < len(tokens):
+			i++
+		default:
+			return false
+		}
+	}
+	return foundAssignment
 }
 
 func redirectionsComplete(tokens []string) bool {
@@ -709,12 +728,12 @@ func (f *commandFacts) merge(other *commandFacts) {
 }
 
 // appendShellMutation is the only route from a classifier result into the
-// aggregate file mutations. It accepts only the three complete wire shapes and
+// aggregate file mutations. It accepts only the two complete wire shapes and
 // refuses unexpanded shell expressions, matching appendCommandTarget's
 // fail-closed boundary.
 func appendShellMutation(facts *commandFacts, mutation ShellMutation) {
 	switch mutation.Kind {
-	case "delete", "patch":
+	case "delete":
 		if mutation.Path == "" || mutation.From != "" || mutation.To != "" {
 			return
 		}
@@ -742,19 +761,6 @@ func (f *commandFacts) empty() bool {
 // ever has to sort or dedupe again.
 func (f *commandFacts) sortCategories() {
 	sort.Strings(f.categories)
-}
-
-// taintPaths removes every fact whose identity depends on a cwd that the
-// command itself made uncertain. Categories survive when command grammar
-// proves them; path targets and file mutations never do.
-func (f *commandFacts) taintPaths() {
-	f.targets = slices.DeleteFunc(f.targets, func(target CommandTarget) bool {
-		return target.Kind == "path"
-	})
-	if len(f.targets) == 0 {
-		f.targets = nil
-	}
-	f.mutations = nil
 }
 
 // segmentClassifiers are applied to every segment of every command, in this
@@ -811,9 +817,6 @@ func classifyCommand(command, outputText string, exitOK bool, ws *workspace) *co
 		facts.merge(segmentFacts)
 		facts.mutations = append(facts.mutations, mutations...)
 	}
-	if len(chain) > 0 && chain[0].cwdUncertain {
-		facts.taintPaths()
-	}
 	if facts.empty() {
 		return nil
 	}
@@ -821,10 +824,10 @@ func classifyCommand(command, outputText string, exitOK bool, ws *workspace) *co
 	return facts
 }
 
-// changesWorkingDirectory taints the whole command whenever cd, pushd or popd
-// appears as a standalone token anywhere, or a parent-shell code loader could
-// run one invisibly. Losing a path target is safer than resolving a real
-// cwd-changing command against the wrong root.
+// changesWorkingDirectory marks the whole command uncertain whenever cd,
+// pushd or popd appears as a standalone token anywhere, or a parent-shell code
+// loader could run one invisibly. Classifiers then reject relative paths while
+// retaining absolute paths whose workspace identity is independent of cwd.
 func changesWorkingDirectory(tokens []string) bool {
 	if containsShellControlCommand(tokens, "eval", "source", ".") {
 		return true

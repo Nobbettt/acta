@@ -10,7 +10,7 @@ and Semantic Versioning. Dates use ISO 8601.
 - Digest timeline entries and shell-command event payloads carry `categories`
   and `targets` derived from the command text, and from its output only when
   the command is a single segment.
-- `file.deleted`, `file.moved`, and `file.patched` events record workspace
+- `file.deleted` and `file.moved` events record workspace
   changes proven by a shell command rather than by an edit tool.
 - `digest.FromRunDirWithOptions` re-digests a bundle under the control-plane
   directory the run declared, so `control.access` reproduces offline.

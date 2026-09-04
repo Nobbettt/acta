@@ -123,7 +123,18 @@ func TestClassifyFS(t *testing.T) {
 		// "dist" in this segment's own token list; it must not be credited as
 		// part of the path either.
 		{"rm inside a subshell fragment credits nothing", "rm -rf dist)", true, nil},
-		{"git rm behind a global flag", "git -C other/repo rm x.txt", true, nil},
+		{"git rm behind a global flag keeps only its category", "git -C other/repo rm x.txt", true, &commandFacts{
+			categories: []string{"fs.delete"},
+		}},
+		{"git rm behind a relative work tree keeps only its category", "GIT_WORK_TREE=other git rm x.txt", true, &commandFacts{
+			categories: []string{"fs.delete"},
+		}},
+		{"git rm behind an outside environment work tree escapes", "GIT_WORK_TREE=/tmp/other git rm x.txt", true, &commandFacts{
+			categories: []string{"workspace.escape"},
+		}},
+		{"git rm behind an outside inline work tree escapes", "git --work-tree=/tmp/other rm x.txt", true, &commandFacts{
+			categories: []string{"workspace.escape"},
+		}},
 		// `--cached`/`--staged` only untracks the path; the file is still on
 		// disk, so nothing here proves a deletion.
 		{"git rm --cached leaves the file on disk", "git rm --cached secrets.env", true, nil},
@@ -546,110 +557,23 @@ func TestClassifyFS(t *testing.T) {
 			targets:    fsPathTargets("backup/a.txt", "backup/b.txt"),
 		}},
 
-		// fs.patch
-		{"patch with the file named and the diff on stdin", "patch src/foo.go < fix.diff", true, &commandFacts{
+		// fs.patch is category-only: patch inputs and flags cannot prove which
+		// workspace files changed.
+		{"patch with the file named and the diff on stdin emits no path or mutation", "patch src/foo.go < fix.diff", true, &commandFacts{
 			categories: []string{"fs.patch"},
-			targets:    fsPathTargets("src/foo.go"),
-			mutations:  []ShellMutation{{Kind: "patch", Path: "src/foo.go"}},
 		}},
 		{"patch with the paths in the diff body", "patch -p1 < fix.diff", true, &commandFacts{
 			categories: []string{"fs.patch"},
 		}},
-		{"patch separate strip count is not a patched path", "patch -p 1 < fix.diff", true, &commandFacts{
-			categories: []string{"fs.patch"},
-		}},
 		{"patch check mode applies nothing", "patch -C orig.txt < fix.diff", true, nil},
-		{"patch ifdef symbol is not a patched path", "patch -D SYMBOL < fix.diff", true, &commandFacts{
-			categories: []string{"fs.patch"},
-		}},
-		{"patch long ifdef symbol is not a patched path", "patch --ifdef SYMBOL < fix.diff", true, &commandFacts{
-			categories: []string{"fs.patch"},
-		}},
 		{"patch unmodeled option withholds its path", "patch --merge=diff3 orig.txt < fix.diff", true, &commandFacts{
 			categories: []string{"fs.patch"},
 		}},
-		{"patch version-control value does not become a version probe", "patch -V never orig.txt < fix.diff", true, &commandFacts{
-			categories: []string{"fs.patch"},
-			targets:    fsPathTargets("orig.txt"),
-			mutations:  []ShellMutation{{Kind: "patch", Path: "orig.txt"}},
-		}},
-		{"patch long strip count is not a patched path", "patch --strip 1 < fix.diff", true, &commandFacts{
+		{"patch repeated destinations remain category-only", "patch -d frontend -d /tmp -o inside.txt -o /tmp/out.txt orig.txt < fix.diff", true, &commandFacts{
 			categories: []string{"fs.patch"},
 		}},
-		// --output/-o (in any spelling) sends the rewrite to a different file,
-		// so the sole remaining operand is the UNTOUCHED original, not the file
-		// patch actually wrote — crediting it as a target/mutation would report
-		// a file.patched event for a file that was never modified.
-		{"patch --output= credits the effective output file", "patch --output=new.txt orig.txt < fix.diff", true, &commandFacts{
+		{"patch empty stdin remains category-only", "patch victim.txt < /dev/null", true, &commandFacts{
 			categories: []string{"fs.patch"},
-			targets:    fsPathTargets("new.txt"),
-			mutations:  []ShellMutation{{Kind: "patch", Path: "new.txt"}},
-		}},
-		{"patch -o attached credits the effective output file", "patch -onew.txt orig.txt < fix.diff", true, &commandFacts{
-			categories: []string{"fs.patch"},
-			targets:    fsPathTargets("new.txt"),
-			mutations:  []ShellMutation{{Kind: "patch", Path: "new.txt"}},
-		}},
-		{"patch -o clustered credits the effective output file", "patch -Nfo new.txt orig.txt < fix.diff", true, &commandFacts{
-			categories: []string{"fs.patch"},
-			targets:    fsPathTargets("new.txt"),
-			mutations:  []ShellMutation{{Kind: "patch", Path: "new.txt"}},
-		}},
-		// The separate-token spelling must follow the same output rule after its
-		// value is consumed by the flag scanner.
-		{"patch -o separate token credits the effective output file", "patch -o new.txt orig.txt < fix.diff", true, &commandFacts{
-			categories: []string{"fs.patch"},
-			targets:    fsPathTargets("new.txt"),
-			mutations:  []ShellMutation{{Kind: "patch", Path: "new.txt"}},
-		}},
-		{"patch stdout output changes no file", "patch -o - orig.txt < fix.diff", true, nil},
-		{"patch dev-null output changes no file", "patch --output=/dev/null orig.txt < fix.diff", true, nil},
-		{"patch dev-zero output changes no workspace file", "patch --output=/dev/zero orig.txt < fix.diff", true, nil},
-		{"patch cleaned device alias changes no workspace file", "patch --output=/dev/../dev/null orig.txt < fix.diff", true, nil},
-		{"patch outside output escapes the workspace", "patch --output=/tmp/new.txt orig.txt < fix.diff", true, &commandFacts{
-			categories: []string{"workspace.escape"},
-		}},
-		{"patch dev-stdout output changes no file", "patch -o /dev/stdout orig.txt < fix.diff", true, nil},
-		{"patch dev-stderr output changes no file", "patch --output=/dev/stderr orig.txt < fix.diff", true, nil},
-		{"patch fd output changes no workspace file", "patch -o /dev/fd/3 orig.txt < fix.diff", true, nil},
-		// -d/--directory (in any spelling) chdirs before applying, so the real
-		// rewritten path is dir/orig.txt, never the workspace-root orig.txt this
-		// classifier would otherwise credit.
-		{"patch --directory= credits the effective path", "patch --directory=frontend orig.txt < fix.diff", true, &commandFacts{
-			categories: []string{"fs.patch"},
-			targets:    fsPathTargets("frontend/orig.txt"),
-			mutations:  []ShellMutation{{Kind: "patch", Path: "frontend/orig.txt"}},
-		}},
-		{"patch -d attached credits the effective path", "patch -dfrontend orig.txt < fix.diff", true, &commandFacts{
-			categories: []string{"fs.patch"},
-			targets:    fsPathTargets("frontend/orig.txt"),
-			mutations:  []ShellMutation{{Kind: "patch", Path: "frontend/orig.txt"}},
-		}},
-		{"patch -d separate token credits the effective path", "patch -d frontend orig.txt < fix.diff", true, &commandFacts{
-			categories: []string{"fs.patch"},
-			targets:    fsPathTargets("frontend/orig.txt"),
-			mutations:  []ShellMutation{{Kind: "patch", Path: "frontend/orig.txt"}},
-		}},
-		{"patch directory relocates a relative output", "patch -d frontend -o new.txt orig.txt < fix.diff", true, &commandFacts{
-			categories: []string{"fs.patch"},
-			targets:    fsPathTargets("frontend/new.txt"),
-			mutations:  []ShellMutation{{Kind: "patch", Path: "frontend/new.txt"}},
-		}},
-		{"patch directory leaves an absolute output unchanged", "patch -d frontend -o /repo/new.txt orig.txt < fix.diff", true, &commandFacts{
-			categories: []string{"fs.patch"},
-			targets:    fsPathTargets("new.txt"),
-			mutations:  []ShellMutation{{Kind: "patch", Path: "new.txt"}},
-		}},
-		{"patch outside directory relocates a relative output outside", "patch -d /tmp -o new.txt orig.txt < fix.diff", true, &commandFacts{
-			categories: []string{"workspace.escape"},
-		}},
-		{"patch --directory separate token credits the effective path", "patch --directory frontend orig.txt < fix.diff", true, &commandFacts{
-			categories: []string{"fs.patch"},
-			targets:    fsPathTargets("frontend/orig.txt"),
-			mutations:  []ShellMutation{{Kind: "patch", Path: "frontend/orig.txt"}},
-		}},
-		{"patch outside directory escapes the workspace", "patch -d /tmp orig.txt < fix.diff", true, &commandFacts{
-			categories: []string{"workspace.escape"},
 		}},
 		{"patch from a heredoc", "patch -p1 <<'EOF'", true, &commandFacts{
 			categories: []string{"fs.patch"},
@@ -669,17 +593,14 @@ func TestClassifyFS(t *testing.T) {
 		{"patch lowercase version probe changes nothing", "patch -v", true, nil},
 		{"git apply help changes nothing", "git apply --help fix.diff", true, nil},
 		{"git revert --abort applies nothing", "git revert --abort", true, nil},
-		{"patch out of the workspace escapes", "patch /tmp/foo.go < fix.diff", true, &commandFacts{
-			categories: []string{"workspace.escape"},
+		{"patch outside operand remains category-only", "patch /tmp/foo.go < fix.diff", true, &commandFacts{
+			categories: []string{"fs.patch"},
 		}},
 		{"patch inside a quoted argument", `echo "git apply fix.diff"`, true, nil},
 		// A pipeline tail's own flag must not be mistaken for one of
-		// fsInspectFlags: `grep --stat` here belongs to the downstream stage, so
-		// this patch still applied, and the file it named is still credited.
+		// fsInspectFlags: `grep --stat` here belongs to the downstream stage.
 		{"patch piped does not inherit the pipeline tail's --stat", "patch foo.go < fix.diff | grep --stat", true, &commandFacts{
 			categories: []string{"fs.patch"},
-			targets:    fsPathTargets("foo.go"),
-			mutations:  []ShellMutation{{Kind: "patch", Path: "foo.go"}},
 		}},
 
 		// not a filesystem verb at all
@@ -816,23 +737,6 @@ func TestAttachedSearchPatternPreservesLeadingEquals(t *testing.T) {
 	}
 }
 
-func TestOutputTargetsWorkspaceFile(t *testing.T) {
-	ws := testWorkspace()
-	for _, destination := range []string{"", "-", "/dev/null", "/dev/zero", "/dev/../dev/null", "/dev/stdout", "/dev/stderr", "/dev/fd/0", "/dev/fd/12", "/tmp/report.txt", "../report.txt", "$OUTPUT"} {
-		if outputTargetsWorkspaceFile(destination, ws, false) {
-			t.Errorf("outputTargetsWorkspaceFile(%q) = true, want false", destination)
-		}
-	}
-	for _, destination := range []string{"report.txt", "/repo/report.txt", "dev/fd/name"} {
-		if !outputTargetsWorkspaceFile(destination, ws, false) {
-			t.Errorf("outputTargetsWorkspaceFile(%q) = false, want true", destination)
-		}
-	}
-	if outputTargetsWorkspaceFile("report.txt", ws, true) {
-		t.Error("relative destination with uncertain cwd = true, want false")
-	}
-}
-
 func TestDisabledBooleanFlagsDoNotEnableModes(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -843,10 +747,14 @@ func TestDisabledBooleanFlagsDoNotEnableModes(t *testing.T) {
 		{"npm global false stays local", "npm install --global=false left-pad", "package.install", "workspace.escape"},
 		{"compose detach false stays foreground", "docker compose up --detach=false", "container.run", "process.background"},
 		{"compose short detach false stays foreground", "docker compose up -d=false", "container.run", "process.background"},
+		{"unsupported curl version value remains informational", "curl --version=false https://example.com", "", "network.egress"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			facts := classifyCommand(c.command, "", true, testWorkspace())
+			if c.want == "" && facts == nil {
+				return
+			}
 			if facts == nil || !slices.Contains(facts.categories, c.want) || slices.Contains(facts.categories, c.forbidden) {
 				t.Fatalf("classifyCommand(%q) = %+v, want %s without %s", c.command, facts, c.want, c.forbidden)
 			}
@@ -855,7 +763,7 @@ func TestDisabledBooleanFlagsDoNotEnableModes(t *testing.T) {
 }
 
 // TestFSOwnArgs covers fsOwnArgs directly: a flag scanner that reads its
-// verb's own arguments (fsCopyTargetFlag, fsPatch's inspect-flag scan, the
+// verb's own arguments (fsCopyTargetFlag, classifyFS's patch inspect-flag scan, the
 // git-rm --cached/--staged check) must stop at the same points fsOperands
 // already stops collecting operands at, or a downstream pipeline stage's own
 // flag is mistaken for this verb's.
@@ -942,6 +850,12 @@ func TestClassifyFSCwdUncertain(t *testing.T) {
 		{"an absolute escape is still credited", "rm /etc/hosts", &commandFacts{
 			categories: []string{"workspace.escape"},
 		}},
+		{"a portable drive-letter escape is still credited", `rm 'C:\outside\victim.txt'`, &commandFacts{
+			categories: []string{"workspace.escape"},
+		}},
+		{"a portable UNC escape is still credited", `rm '\\server\share\victim.txt'`, &commandFacts{
+			categories: []string{"workspace.escape"},
+		}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -999,7 +913,11 @@ func TestClassifyCommandCwdChain(t *testing.T) {
 			"cd internal && rm old.go",
 			&commandFacts{categories: []string{"fs.delete"}},
 		},
-		{"an absolute delete after cd is tainted too", "cd internal && rm /repo/old.go", &commandFacts{categories: []string{"fs.delete"}}},
+		{"an absolute delete after cd remains provable", "cd internal && rm /repo/old.go", &commandFacts{
+			categories: []string{"fs.delete"},
+			targets:    fsPathTargets("old.go"),
+			mutations:  []ShellMutation{{Kind: "delete", Path: "old.go"}},
+		}},
 		{
 			"a delete before a later cd is tainted too",
 			"rm old.go && cd internal",

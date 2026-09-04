@@ -181,6 +181,13 @@ func TestRetrievalFromCommand(t *testing.T) {
 			nil,
 		},
 		{
+			"echoed read command is only text",
+			`echo cat README.md`,
+			"cat README.md\n",
+			nil,
+			nil,
+		},
+		{
 			"single-file grep",
 			`grep -n "pattern" pkg/mod.py`,
 			output,

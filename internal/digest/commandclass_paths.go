@@ -54,8 +54,12 @@ func classifyPaths(facts *commandFacts, paths []string, ws *workspace) {
 	credit := func(category string) { added.categories = append(added.categories, category) }
 
 	for _, read := range paths {
-		if slices.Contains(instructionFiles, path.Base(read)) {
+		base := path.Base(read)
+		if slices.Contains(instructionFiles, base) {
 			credit("instructions.read")
+		}
+		if strings.HasPrefix(base, ".env") {
+			credit("env.inspect")
 		}
 	}
 	for _, credited := range creditedPaths(facts, paths, ws) {

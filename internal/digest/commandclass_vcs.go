@@ -197,6 +197,8 @@ func gitVerbMutates(verb string, args []string) bool {
 		return len(scan.operands) != 0
 	case "stash":
 		return !slices.Contains(gitStashReadOnlyVerbs, gitFirstArg(verb, args))
+	case "add":
+		return !scanCommandArgs(args, gitFlagModels[verb]).hasFlag("-i", "--interactive")
 	default:
 		return slices.Contains(gitMutateVerbs, verb)
 	}

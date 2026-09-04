@@ -115,3 +115,24 @@ func TestClassifyExecSearchRequiresFlagValue(t *testing.T) {
 		{name: "grep missing pattern file", command: "grep -f", failed: true},
 	})
 }
+
+func TestClassifyExecOutcomeDependentWrites(t *testing.T) {
+	runExecCases(t, []execCase{
+		{name: "recursive gunzip may find no files", command: "gunzip -r empty/"},
+		{name: "pip dry run still writes outside report", command: "pip install --dry-run --report /tmp/report.json requests", want: []string{"workspace.escape"}},
+		{name: "pr create web mode defers mutation", command: "gh pr create --web"},
+		{name: "issue create short web mode defers mutation", command: "gh issue create -w"},
+		{name: "rsync rejects two remote endpoints before connecting", command: "rsync build1.example.com:/src build2.example.com:/dst", failed: true},
+		{
+			name:    "relative device output after absolute cd is not an extract",
+			command: "cd /dev && curl -o null https://example.com/health",
+			want:    []string{"network.egress"},
+			targets: urlTarget("https://example.com"),
+		},
+		{
+			name:    "uncertain relative permission path survives separate escape",
+			command: "cd sub && chmod 600 local.txt /tmp/outside.txt",
+			want:    []string{"permission.changed", "workspace.escape"},
+		},
+	})
+}

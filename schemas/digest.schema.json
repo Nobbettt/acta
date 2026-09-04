@@ -60,7 +60,7 @@
     },
     "shellMutation": {
       "type": "object", "additionalProperties": false, "required": ["kind"],
-      "properties": {"kind": {"enum": ["delete", "move", "patch"]}, "path": {"type": "string", "minLength": 1}, "from": {"type": "string", "minLength": 1}, "to": {"type": "string", "minLength": 1}}
+      "properties": {"kind": {"enum": ["delete", "move"]}, "path": {"type": "string", "minLength": 1}, "from": {"type": "string", "minLength": 1}, "to": {"type": "string", "minLength": 1}}
     },
     "timelineEvent": {
       "type": "object",

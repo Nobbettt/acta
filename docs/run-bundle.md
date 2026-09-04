@@ -227,7 +227,7 @@ The event stream currently includes:
 - `web.search.completed` / `web.search.incomplete`
 - `file.read`
 - `file.written` / `file.write.incomplete`
-- `file.deleted` / `file.moved` / `file.patched`, derived from a classified
+- `file.deleted` / `file.moved`, derived from a classified
   shell command the same way `file.read` is
 - `diff.generated`
 - `tokens.reported`

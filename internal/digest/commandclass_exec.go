@@ -39,7 +39,7 @@ func classifyExec(seg commandSegment) *commandFacts {
 		return nil
 	}
 	if execCommandAssertsNoChange(cmd) {
-		return nil
+		return execNoChangeWrites(cmd)
 	}
 	facts := &commandFacts{}
 	for _, rule := range execRules {
@@ -258,6 +258,17 @@ func execNetwork(cmd execCommand) *commandFacts {
 		return nil
 	}
 	operands := scan.operands
+	if cmd.word == "rsync" {
+		remoteOperands := 0
+		for _, operand := range operands {
+			if execHostFromSpec(operand) != "" {
+				remoteOperands++
+			}
+		}
+		if remoteOperands > 1 {
+			return nil
+		}
+	}
 	if cmd.word != "ssh" {
 		if url := execFirstURL(cmd.word, operands); url != "" {
 			return execFacts("network.egress", CommandTarget{Kind: "url", Value: url})
@@ -503,6 +514,10 @@ func execForge(cmd execCommand) *commandFacts {
 		return nil
 	}
 	if len(cmd.args) > 1 && slices.Contains(verbs, cmd.args[1]) {
+		if cmd.args[1] == "create" && (cmd.args[0] == "pr" || cmd.args[0] == "issue") &&
+			(slices.Contains(cmd.args[2:], "-w") || slices.Contains(cmd.args[2:], "--web")) {
+			return nil
+		}
 		return execFacts("forge.mutate")
 	}
 	return nil
@@ -1024,7 +1039,7 @@ func execArchiveWritesToDisk(cmd execCommand) bool {
 		)
 	case "gunzip":
 		scan := scanCommandArgs(cmd.args, execGunzipFlagModel)
-		if !scan.unknownFlag && !scan.hasFlag("--list", "--test", "--stdout", "--to-stdout", "-l", "-t", "-c") {
+		if !scan.unknownFlag && !scan.hasFlag("--list", "--test", "--stdout", "--to-stdout", "-l", "-t", "-c", "-r") {
 			return len(scan.operands) != 0
 		}
 		return false
@@ -1064,7 +1079,7 @@ func execArchive(cmd execCommand) *commandFacts {
 		inside, escaped = execAnyPathWorkspace(cmd, destinations)
 	}
 	facts := &commandFacts{}
-	if inside || !escaped && execCWDUncertainRelativeDestination(cmd, destinations) {
+	if inside || !escaped && execCWDUncertainRelativeDestination(cmd, destinations) && !execRunsFromDeviceDirectory(cmd) {
 		facts.categories = append(facts.categories, "archive.extract")
 	}
 	if escaped {
@@ -1222,6 +1237,46 @@ func execCWDUncertainRelativeDestination(cmd execCommand, values []string) bool 
 	})
 }
 
+// execRunsFromDeviceDirectory recognizes only literal directory changes the
+// command text settles. Dynamic cd/pushd/popd forms remain unknown.
+func execRunsFromDeviceDirectory(cmd execCommand) bool {
+	chain := splitCommandChain(cmd.seg.command)
+	matches := 0
+	for _, segment := range chain {
+		if segment.raw == cmd.seg.raw {
+			matches++
+		}
+	}
+	if matches != 1 {
+		return false
+	}
+	cwd, known := canonicalWorkspacePath(cmd.seg.ws.root), true
+	for _, segment := range chain {
+		if segment.raw == cmd.seg.raw {
+			break
+		}
+		tokens := execLeadingTokens(tokensForSegment(segment.raw))
+		if len(tokens) == 0 {
+			continue
+		}
+		switch tokens[0] {
+		case "cd":
+			if len(tokens) != 2 || tokens[1] == "-" || strings.ContainsAny(tokens[1], fsShellMetacharacters) {
+				known = false
+				continue
+			}
+			if fsOperandAbsolute(tokens[1]) {
+				cwd, known = canonicalWorkspacePath(tokens[1]), true
+			} else if known {
+				cwd = path.Join(cwd, canonicalWorkspacePath(tokens[1]))
+			}
+		case "pushd", "popd":
+			known = false
+		}
+	}
+	return known && (cwd == "/dev" || strings.HasPrefix(cwd, "/dev/"))
+}
+
 // permission.changed ---------------------------------------------------------
 
 var execPermissionCommands = map[string]bool{"chmod": true, "chown": true, "chgrp": true}
@@ -1274,7 +1329,7 @@ func execPermission(cmd execCommand) *commandFacts {
 	}
 	inside, escaped := execPathsWorkspace(cmd, paths)
 	facts := &commandFacts{}
-	if inside || !escaped && execCWDUncertainRelativeDestination(cmd, paths) {
+	if inside || execCWDUncertainRelativeDestination(cmd, paths) {
 		facts.categories = append(facts.categories, "permission.changed")
 	}
 	if inside {
@@ -1451,6 +1506,30 @@ func execEscapeFlags(cmd execCommand) *commandFacts {
 		return nil
 	}
 	return execFacts("workspace.escape")
+}
+
+// execNoChangeWrites preserves explicit side effects of otherwise non-mutating
+// modes. pip's dry-run report is currently the only such supported spelling.
+func execNoChangeWrites(cmd execCommand) *commandFacts {
+	if cmd.word != "pip" && cmd.word != "pip3" {
+		return nil
+	}
+	args, isInstall := execInstallArgs(cmd)
+	if !isInstall || !cmd.seg.exitOK {
+		return nil
+	}
+	scan := scanCommandArgs(args, execPipFlagModel)
+	if scan.unknownFlag {
+		return nil
+	}
+	for _, report := range execFlagValues(scan, "--report") {
+		if execOutputPath(report) {
+			if _, escaped := execPathsWorkspace(cmd, []string{report}); escaped {
+				return execFacts("workspace.escape")
+			}
+		}
+	}
+	return nil
 }
 
 // execFlagModelFor supplies classifyExec's shared informational gate with the

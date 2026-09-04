@@ -727,6 +727,29 @@ func TestClassifyCommandRequiresUnambiguousWholeChainStatus(t *testing.T) {
 	}
 }
 
+func TestClassifyCommandWithholdsPathsAfterUntrackedParentShellEnvironment(t *testing.T) {
+	commands := []string{
+		`/bin/bash -lc "export GIT_DIR=/tmp/other/.git GIT_WORK_TREE=/tmp/other && git rm victim.txt"`,
+		`/bin/bash -lc "GIT_WORK_TREE=/tmp/other; git rm victim.txt"`,
+		`/bin/bash -lc "GIT_WORK_TREE=/tmp/other >/dev/null; git rm victim.txt"`,
+		`/bin/bash -lc "declare -x GIT_WORK_TREE=/tmp/other; git rm victim.txt"`,
+	}
+	for _, command := range commands {
+		facts := classifyCommand(command, "", true, testWorkspace())
+		if facts == nil || !reflect.DeepEqual(facts.categories, []string{"fs.delete"}) ||
+			len(facts.targets) != 0 || len(facts.mutations) != 0 {
+			t.Errorf("classifyCommand(%q) = %+v, want category-only fs.delete", command, facts)
+		}
+	}
+}
+
+func TestClassifyCommandCreditsNothingAfterLogout(t *testing.T) {
+	command := `/bin/bash -lc "logout; rm victim.txt"`
+	if facts := classifyCommand(command, "", true, testWorkspace()); facts != nil {
+		t.Errorf("classifyCommand(%q) = %+v, want nil because rm never ran", command, facts)
+	}
+}
+
 func TestClassifyCommandTaintsEveryRelativePathOnAnyPossibleCwdChange(t *testing.T) {
 	commands := []string{
 		"command -p cd /tmp && rm victim.txt",

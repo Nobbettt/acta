@@ -497,7 +497,7 @@ func untokenizedReadStep(segment, outputText string, ws *workspace) *step {
 }
 
 func sedReadStep(tokens []string, ws *workspace) *step {
-	if !slices.Contains(tokens, "sed") {
+	if !shellStageStartsWith(tokens, "sed") {
 		return nil
 	}
 	sedRange, haveRange := sedRangeFromTokens(tokens)
@@ -526,7 +526,7 @@ func sedReadStep(tokens []string, ws *workspace) *step {
 }
 
 func headReadStep(tokens []string, ws *workspace) *step {
-	if len(tokens) == 0 || tokens[0] != "head" {
+	if !shellStageStartsWith(tokens, "head") {
 		return nil
 	}
 	count := headCountFromTokens(tokens)
@@ -539,7 +539,7 @@ func headReadStep(tokens []string, ws *workspace) *step {
 
 func catLikeReadStep(tokens []string, outputText string, ws *workspace) *step {
 	for _, commandWord := range []string{"nl", "cat", "tail"} {
-		if !slices.Contains(tokens, commandWord) || hasRedirectionToken(tokens) {
+		if !shellStageStartsWith(tokens, commandWord) || hasRedirectionToken(tokens) {
 			continue
 		}
 		filePath := fileAfterCommand(tokens, commandWord, ws)

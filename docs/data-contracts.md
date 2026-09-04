@@ -40,19 +40,16 @@ a re-digest must be given the same directory — `digest.FromRunDirWithOptions` 
 to reproduce it.
 
 Digest timeline entries additionally carry `shell_mutations`, a list of
-`{kind, path}` or `{kind, from, to}` records (`kind` is `delete`, `move` or
-`patch`) proving the workspace changes a shell command made outside an edit
-tool. It is the digest-side source the `file.deleted` / `file.moved` /
-`file.patched` events below are projected from; it is v3-only and does not
-appear in the event stream payloads.
+`{kind, path}` or `{kind, from, to}` records (`kind` is `delete` or `move`)
+proving the workspace changes a shell command made outside an edit tool. It is
+the digest-side source the `file.deleted` / `file.moved` events below are
+projected from; it is v3-only and does not appear in event stream payloads.
 
-Three event types carry workspace changes a shell command proved, alongside the
-command event the same way `file.read` does. Each names one proven path, and a
-change whose paths live only in a patch body emits nothing:
+Two event types carry workspace changes a shell command proved, alongside the
+command event the same way `file.read` does:
 
 - `file.deleted` — `{path, source_event_sequence, command}`
 - `file.moved` — `{from, to, source_event_sequence, command}`
-- `file.patched` — `{path, source_event_sequence, command}`
 
 ## Compatibility rules
 

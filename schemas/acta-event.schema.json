@@ -23,7 +23,7 @@
         "tool.call.incomplete", "tool.result.orphaned", "shell.command.completed",
         "shell.command.incomplete", "web.search.completed", "web.search.incomplete",
         "file.read", "file.written", "file.write.incomplete", "file.deleted",
-        "file.moved", "file.patched", "diff.generated",
+        "file.moved", "diff.generated",
         "tokens.reported", "run.completed", "run.failed"
       ]
     },
@@ -70,10 +70,6 @@
     {
       "if": {"properties": {"type": {"const": "file.moved"}}, "required": ["type"]},
       "then": {"properties": {"payload": {"$ref": "#/$defs/fileMoved"}}}
-    },
-    {
-      "if": {"properties": {"type": {"const": "file.patched"}}, "required": ["type"]},
-      "then": {"properties": {"payload": {"$ref": "#/$defs/filePatched"}}}
     },
     {
       "if": {"properties": {"type": {"const": "diff.generated"}}, "required": ["type"]},
@@ -168,10 +164,6 @@
     "fileMoved": {
       "type": "object", "additionalProperties": false, "required": ["from", "to", "source_event_sequence"],
       "properties": {"from": {"type": "string", "minLength": 1}, "to": {"type": "string", "minLength": 1}, "source_event_sequence": {"type": "integer", "minimum": 1}, "command": {"type": "string"}}
-    },
-    "filePatched": {
-      "type": "object", "additionalProperties": false, "required": ["path", "source_event_sequence"],
-      "properties": {"path": {"type": "string", "minLength": 1}, "source_event_sequence": {"type": "integer", "minimum": 1}, "command": {"type": "string"}}
     },
     "diff": {"type": "object", "additionalProperties": false, "required": ["path"], "properties": {"path": {"type": "string"}}},
     "tokenUsage": {

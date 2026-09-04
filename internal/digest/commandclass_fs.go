@@ -13,7 +13,7 @@ var fsInspectFlags = []string{"--check", "--dry-run", "--stat", "--numstat", "--
 
 // classifyFS owns the filesystem slice of the category table: fs.delete,
 // fs.move, fs.create and fs.patch, plus the ShellMutations that back the
-// file.deleted / file.moved / file.patched events. Every category here asserts
+// file.deleted / file.moved events. Every category here asserts
 // a state change, so a failed command is credited with nothing — an `rm` that
 // exited non-zero deleted no file — and so is a segment that would not
 // tokenize.
@@ -22,6 +22,19 @@ func classifyFS(segment commandSegment) *commandFacts {
 		return nil
 	}
 	verb, args := fsVerb(segment.tokens)
+	repoRedirected := strings.HasPrefix(verb, "git ") && gitEnvironmentRedirectsRepository(segment.tokens)
+	if verb == "" {
+		gitVerb, gitArgs, redirected, informational, ok := gitInvocation(segment.tokens)
+		if !ok || informational {
+			return nil
+		}
+		switch gitVerb {
+		case "rm", "apply", "cherry-pick", "revert":
+		default:
+			return nil
+		}
+		verb, args, repoRedirected = "git "+gitVerb, gitArgs, redirected
+	}
 	ownArgs := fsOwnArgs(args)
 	scan := scanCommandArgs(ownArgs, fsFlagModels[verb])
 	if commandAssertsNoChange(ownArgs, fsFlagModels[verb]) {
@@ -44,6 +57,15 @@ func classifyFS(segment commandSegment) *commandFacts {
 	if fsRuntimeOutcomeUnproven(verb, scan) {
 		return nil
 	}
+	if verb == "patch" || verb == "git apply" || verb == "git cherry-pick" || verb == "git revert" {
+		return &commandFacts{categories: []string{"fs.patch"}}
+	}
+	if verb == "git rm" && repoRedirected {
+		if workTree, ok := gitWorkTree(segment.tokens); ok && fsEscapes([]string{workTree}, segment.ws, segment.cwdUncertain) {
+			return &commandFacts{categories: []string{"workspace.escape"}}
+		}
+		return &commandFacts{categories: []string{"fs.delete"}}
+	}
 	if scan.unknownFlag {
 		var category string
 		switch verb {
@@ -60,7 +82,7 @@ func classifyFS(segment commandSegment) *commandFacts {
 		}
 		return &commandFacts{categories: []string{category}}
 	}
-	operands, redirected := fsOperands(verb, args)
+	operands, _ := fsOperands(verb, args)
 	var facts *commandFacts
 	switch verb {
 	case "rm":
@@ -80,11 +102,6 @@ func classifyFS(segment commandSegment) *commandFacts {
 		facts = fsCreate(operands, segment.ws, segment.cwdUncertain)
 	case "mkdir":
 		facts = fsCreate(operands, segment.ws, segment.cwdUncertain)
-	case "patch":
-		facts = fsPatch(ownArgs, operands, redirected, segment.ws, segment.cwdUncertain)
-	case "git apply", "git cherry-pick", "git revert":
-		// The operands name a patch file or a commit, never the files rewritten.
-		facts = fsPatch(ownArgs, nil, false, segment.ws, segment.cwdUncertain)
 	}
 	return facts
 }
@@ -144,10 +161,44 @@ func fsVerb(tokens []string) (string, []string) {
 	return "git " + tokens[1], tokens[2:]
 }
 
+// gitWorkTree returns the effective explicit work-tree selection. Command-line
+// flags override environment assignments, matching Git's precedence.
+func gitWorkTree(tokens []string) (value string, ok bool) {
+	for _, token := range tokens {
+		name, assignmentValue, assignment := strings.Cut(token, "=")
+		if assignment {
+			if name == "GIT_WORK_TREE" {
+				value, ok = assignmentValue, true
+			}
+			continue
+		}
+		if token == "sudo" || token == "env" {
+			continue
+		}
+		break
+	}
+	tokens = execLeadingTokens(tokens)
+	if len(tokens) == 0 || path.Base(tokens[0]) != "git" {
+		return value, ok
+	}
+	scan := scanCommandArgs(tokens[1:], gitGlobalFlagModel)
+	if len(scan.operandIndexes) == 0 {
+		return value, ok
+	}
+	verbIndex := scan.operandIndexes[0]
+	for _, flag := range scan.flags {
+		if flag.index < verbIndex && flag.name == "--work-tree" {
+			value, ok = flag.value, true
+		}
+	}
+	return value, ok
+}
+
 type commandFlagArity uint8
 
 const (
 	flagBoolean commandFlagArity = iota + 1
+	flagBooleanValue
 	flagValue
 	flagAttachedValue
 )
@@ -235,7 +286,7 @@ func fsOperands(verb string, args []string) ([]string, bool) {
 // the rest of the line to a different command. A flag scan that skipped this
 // truncation would read a downstream stage's own flag as this verb's own —
 // `cp a.txt b.txt | xargs -t rm` names xargs's -t, not cp's, so
-// fsCopyTargetFlag, fsPatch's inspect-flag scan and the git-rm
+// fsCopyTargetFlag, classifyFS's patch inspect-flag scan and the git-rm
 // `--cached`/`--staged` check must all see this slice, never the raw one.
 func fsOwnArgs(args []string) []string {
 	for i, arg := range args {
@@ -284,6 +335,9 @@ func scanCommandArgs(args []string, model commandFlagModel) commandArgScan {
 		case strings.HasPrefix(arg, "--"):
 			name, value, attached := strings.Cut(arg, "=")
 			arity := model[name]
+			if arity == flagBoolean && attached && commandBooleanValue(model, name) {
+				arity = flagBooleanValue
+			}
 			if arity == 0 {
 				scan.unknownFlag = true
 			}
@@ -293,7 +347,11 @@ func scanCommandArgs(args []string, model commandFlagModel) commandArgScan {
 			}
 			scan.flags = append(scan.flags, commandFlag{name: name, value: value, arity: arity, index: argIndex})
 		case len(arg) >= 3 && arg[2] == '=' && model[arg[:2]] == flagBoolean:
-			scan.flags = append(scan.flags, commandFlag{name: arg[:2], value: arg[3:], arity: flagBoolean, index: argIndex})
+			arity := flagBoolean
+			if commandBooleanValue(model, arg[:2]) {
+				arity = flagBooleanValue
+			}
+			scan.flags = append(scan.flags, commandFlag{name: arg[:2], value: arg[3:], arity: arity, index: argIndex})
 		case model[arg] != 0:
 			arity := model[arg]
 			value := ""
@@ -340,6 +398,11 @@ func scanCommandArgs(args []string, model commandFlagModel) commandArgScan {
 	return scan
 }
 
+func commandBooleanValue(model commandFlagModel, name string) bool {
+	return (name == "-g" || name == "--global") && model["--package-lock-only"] != 0 ||
+		(name == "-d" || name == "--detach") && model["--project-name"] != 0
+}
+
 func (scan commandArgScan) hasFlag(names ...string) bool {
 	for _, flag := range scan.flags {
 		for _, name := range names {
@@ -365,11 +428,11 @@ func (scan commandArgScan) hasModeFlag(names ...string) bool {
 	return false
 }
 
-// enabled reports whether a flag activates its boolean mode. Some CLIs accept
-// --flag=false; the scanner preserves that attached value so mode classifiers
-// do not mistake an explicitly disabled option for an enabled one.
+// enabled reports whether a flag activates its boolean mode. Only flags marked
+// flagBooleanValue accept =false; other tools reject that spelling, so it
+// cannot disable an informational or no-op flag in the classifier.
 func (flag commandFlag) enabled() bool {
-	return flag.arity != flagBoolean || !strings.EqualFold(flag.value, "false")
+	return flag.arity != flagBooleanValue || !strings.EqualFold(flag.value, "false")
 }
 
 func (scan commandArgScan) flagValue(names ...string) (string, bool) {
@@ -414,7 +477,7 @@ const fsShellMetacharacters = "*?[{$~()`"
 // normalizeWorkspacePath resolves it against the workspace root no matter what
 // an earlier `cd` changed the shell's cwd to.
 func fsOperandAbsolute(operand string) bool {
-	return strings.HasPrefix(operand, "/") || filepath.IsAbs(operand)
+	return strings.HasPrefix(operand, "/") || filepath.IsAbs(operand) || isPortableAbsolute(canonicalWorkspacePath(operand))
 }
 
 // fsSourceBasenameIsDotOrDotDot reports whether the raw source operand's last
@@ -770,96 +833,4 @@ func fsCopyIntoDir(src, dest string, ws *workspace, cwdUncertain bool) *commandF
 // fsCreate credits the paths a command brought into existence.
 func fsCreate(operands []string, ws *workspace, cwdUncertain bool) *commandFacts {
 	return fsPathFacts("fs.create", operands, ws, cwdUncertain)
-}
-
-// fsPatchOutput returns patch's -o/--output value in any accepted spelling.
-// A named output leaves the input operand untouched; stdout and /dev/null also
-// prove that the command changed no filesystem path.
-func fsPatchOutput(args []string) (string, bool) {
-	return commandFlagValue(args, fsFlagModels["patch"], "-o", "--output")
-}
-
-// outputTargetsWorkspaceFile reports whether an explicit output destination
-// resolves to a file inside the recorded workspace. Device paths, stdout,
-// outside absolute paths, shell expressions, and relative paths after an
-// uncertain cwd all fail closed through the workspace resolver.
-func outputTargetsWorkspaceFile(destination string, ws *workspace, cwdUncertain bool) bool {
-	destination = strings.TrimSpace(destination)
-	if destination == "-" || strings.ContainsAny(destination, fsShellMetacharacters) ||
-		cwdUncertain && !fsOperandAbsolute(destination) {
-		return false
-	}
-	_, ok := normalizeWorkspacePath(destination, ws)
-	return ok
-}
-
-// fsPatchDirectory returns patch's -d/--directory value in any accepted
-// spelling. patch chdirs there before applying a relative file operand.
-func fsPatchDirectory(args []string) (string, bool) {
-	return commandFlagValue(args, fsFlagModels["patch"], "-d", "--directory")
-}
-
-// fsPatch credits the patch itself, and a path only where the command proves
-// one. `git apply f.diff`, `git cherry-pick <sha>` and `patch -p1 < f.diff` all
-// name the patch or the commit, never the files rewritten: those live in the
-// patch body, which the digest never sees. The one provable shape is
-// `patch <file> < f.diff` — with the diff arriving on stdin, the single
-// remaining operand is the file that was rewritten. -o/--output names the
-// effective output directly, while -d/--directory relocates a relative
-// operand beneath its resolved directory.
-func fsPatch(args, operands []string, redirected bool, ws *workspace, cwdUncertain bool) *commandFacts {
-	scan := scanCommandArgs(args, fsFlagModels["patch"])
-	output, redirectsOutput := fsPatchOutput(args)
-	if scan.hasFlag(fsInspectFlags...) {
-		return nil
-	}
-	facts := &commandFacts{categories: []string{"fs.patch"}}
-	if scan.unknownFlag {
-		return facts
-	}
-	if !redirected {
-		return facts
-	}
-	var destination string
-	if redirectsOutput {
-		cleanOutput := canonicalWorkspacePath(output)
-		if output == "" || output == "-" || cleanOutput == "/dev/null" || cleanOutput == "/dev/zero" ||
-			cleanOutput == "/dev/stdout" || cleanOutput == "/dev/stderr" || strings.HasPrefix(cleanOutput, "/dev/fd/") {
-			return nil
-		}
-		destination = output
-	} else {
-		if len(operands) != 1 {
-			return facts
-		}
-		destination = operands[0]
-	}
-	destinationCwdUncertain := cwdUncertain
-	if directory, hasDirectory := fsPatchDirectory(args); hasDirectory && !fsOperandAbsolute(destination) {
-		dir, ok := fsDirectoryPath(directory, ws, cwdUncertain)
-		if !ok {
-			if fsEscapes([]string{directory}, ws, cwdUncertain) {
-				return &commandFacts{categories: []string{"workspace.escape"}}
-			}
-			return facts
-		}
-		destination = path.Join(dir, filepath.ToSlash(destination))
-		destinationCwdUncertain = false
-	}
-	if redirectsOutput && !outputTargetsWorkspaceFile(destination, ws, destinationCwdUncertain) {
-		if fsEscapes([]string{destination}, ws, destinationCwdUncertain) {
-			return &commandFacts{categories: []string{"workspace.escape"}}
-		}
-		return nil
-	}
-	paths := fsPaths([]string{destination}, ws, destinationCwdUncertain)
-	if len(paths) != 1 {
-		if fsEscapes([]string{destination}, ws, destinationCwdUncertain) {
-			return &commandFacts{categories: []string{"workspace.escape"}}
-		}
-		return facts
-	}
-	appendCommandTarget(facts, CommandTarget{Kind: "path", Value: paths[0]})
-	facts.mutations = append(facts.mutations, ShellMutation{Kind: "patch", Path: paths[0]})
-	return facts
 }

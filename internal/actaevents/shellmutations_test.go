@@ -10,7 +10,7 @@ import (
 	"github.com/nobbettt/acta/internal/runrecord"
 )
 
-// derivedFilePayload covers all three derived file payloads at once, so one
+// derivedFilePayload covers both derived file payloads at once, so one
 // helper can read whichever of them an event carries.
 type derivedFilePayload struct {
 	Path                string `json:"path"`
@@ -94,7 +94,7 @@ func TestBuildDerivesFileEventsFromShellMutations(t *testing.T) {
 				switch event.Type {
 				case TypeShellCommandComplete:
 					commandSeq = event.Sequence
-				case TypeFileDeleted, TypeFileMoved, TypeFilePatched:
+				case TypeFileDeleted, TypeFileMoved:
 					var payload derivedFilePayload
 					if err := json.Unmarshal(event.Payload, &payload); err != nil {
 						t.Fatal(err)
@@ -117,6 +117,12 @@ func TestBuildDerivesFileEventsFromShellMutations(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestFilePatchedIsNotAPublishedType(t *testing.T) {
+	if IsKnownType("file.patched") {
+		t.Fatal("patches are category-only, so file.patched must not remain in the event vocabulary")
 	}
 }
 

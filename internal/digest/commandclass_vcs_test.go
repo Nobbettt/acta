@@ -93,6 +93,8 @@ func TestClassifyVCSCategories(t *testing.T) {
 		{"commit message equal to amend still mutates", "git commit -m --amend", true, []string{"vcs.mutate"}},
 		{"add -n credits nothing", "git add -n .", true, nil},
 		{"add --dry-run credits nothing", "git add --dry-run .", true, nil},
+		{"interactive add cannot prove an index mutation", "git add -i", true, nil},
+		{"long interactive add cannot prove an index mutation", "git add --interactive", true, nil},
 		// -n clustered with another boolean short flag is still a dry run.
 		{"add -fn clustered still credits nothing", "git add -fn .", true, nil},
 		{"add -nv clustered still credits nothing", "git add -nv .", true, nil},
