@@ -85,6 +85,31 @@ func TestExecuteDigest(t *testing.T) {
 	}
 }
 
+func TestExecuteDigestOutsideWorkspacePathIsWarning(t *testing.T) {
+	dir := t.TempDir()
+	writeBundle(t, dir)
+	raw := strings.Join([]string{
+		`{"type":"thread.started","thread_id":"thread-test"}`,
+		`{"type":"turn.started"}`,
+		`{"type":"item.completed","item":{"id":"i1","type":"file_change","status":"completed","changes":[{"path":"/etc/hosts","kind":"update"}]}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "codex-events.jsonl"), []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := Execute(context.Background(), []string{"digest", dir}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "capture warning: file_change dropped 1 path(s)") ||
+		!strings.Contains(got, "raw_event_lines=[3]") || strings.Contains(got, "--allow-partial") {
+		t.Fatalf("stderr = %q", got)
+	}
+	assertContainsFile(t, filepath.Join(dir, "digest.json"), `"status": "ok"`)
+	assertContainsFile(t, filepath.Join(dir, "digest.json"), `capture warning: file_change dropped 1 path(s)`)
+}
+
 func TestExecuteDigestRequiresExplicitPartialReplacement(t *testing.T) {
 	dir := t.TempDir()
 	writeBundle(t, dir)

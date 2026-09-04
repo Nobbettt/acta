@@ -5,6 +5,7 @@ package digest
 // nothing.
 
 import (
+	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -93,6 +94,19 @@ func newWorkspace(dir string) *workspace {
 	add(logical)
 	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
 		add(resolved)
+	}
+	// Stage launchers start Acta in the agent workspace as well as passing it
+	// via --cwd. On aliased mounts, getcwd can expose another valid prefix that
+	// symlink resolution cannot discover.
+	if cwd, err := os.Getwd(); err == nil {
+		if dirInfo, dirErr := os.Stat(abs); dirErr == nil {
+			if cwdInfo, cwdErr := os.Stat(cwd); cwdErr == nil && os.SameFile(dirInfo, cwdInfo) {
+				add(cwd)
+				if resolved, resolveErr := filepath.EvalSymlinks(cwd); resolveErr == nil {
+					add(resolved)
+				}
+			}
+		}
 	}
 	for _, v := range append([]string(nil), w.variants...) {
 		add(togglePrivatePrefix(v))

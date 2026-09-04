@@ -1106,7 +1106,7 @@ func (b *builder) appendTimelineEvent(record *runrecord.Record, item digest.Even
 		Query: item.Query, Action: item.Action,
 		Files: item.Files, Categories: item.Categories, Targets: item.Targets,
 		Changes: item.Changes, Spans: item.Spans,
-		Patches: item.FilePatches,
+		Patches: item.FilePatches, FilePatchErrors: item.FilePatchErrors,
 		Details: item.Details, RawEventLines: item.RawEventLines, Redacted: item.Redacted,
 	}, rawTimelineArtifactRefs(b.bundleDir, record, item)...)
 	if err != nil {
@@ -1470,6 +1470,7 @@ type timelinePayload struct {
 	Changes         []digest.FileMutation    `json:"changes,omitempty"`
 	Spans           map[string][]digest.Span `json:"spans,omitempty"`
 	Patches         []digest.FilePatch       `json:"patches,omitempty"`
+	FilePatchErrors []string                 `json:"file_patch_errors,omitempty"`
 	Details         json.RawMessage          `json:"details,omitempty"`
 	RawEventLines   []int                    `json:"raw_event_lines,omitempty"`
 	Redacted        bool                     `json:"redacted,omitempty"`

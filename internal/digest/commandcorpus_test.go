@@ -87,7 +87,7 @@ func validateCorpusWant(t *testing.T, index int, want commandCorpusWant) {
 }
 
 func classifyCorpusCommand(tc commandCorpusCase, exitOK bool) commandCorpusWant {
-	ws := testWorkspace().withControlPrefix(".kiwi-stage-control")
+	ws := testWorkspace().withControlPrefix(".orchestrator-stage-control")
 	facts := classifyCommand(tc.Command, tc.Output, exitOK, ws)
 	if facts == nil {
 		facts = &commandFacts{}

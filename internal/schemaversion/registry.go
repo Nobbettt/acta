@@ -41,6 +41,7 @@ var v3OnlyFields = []Field{
 	{Document: Event, Path: "/artifact_refs/*/redaction_state"},
 	{Document: Event, Path: "/artifact_refs/*/status"},
 	{Document: Event, Path: "/payload/categories"},
+	{Document: Event, Path: "/payload/file_patch_errors"},
 	{Document: Event, Path: "/payload/reasoning_redaction_state"},
 	{Document: Event, Path: "/payload/redacted"},
 	{Document: Event, Path: "/payload/targets"},

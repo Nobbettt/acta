@@ -148,7 +148,8 @@
         "targets": {"type": "array", "items": {"$ref": "#/$defs/target"}},
         "changes": {"type": "array", "items": {"$ref": "#/$defs/mutation"}},
         "spans": {"type": "object", "additionalProperties": {"type": "array", "items": {"$ref": "#/$defs/span"}}},
-        "patches": {"type": "array", "items": {"$ref": "#/$defs/patch"}}, "details": {},
+        "patches": {"type": "array", "items": {"$ref": "#/$defs/patch"}},
+        "file_patch_errors": {"type": "array", "items": {"type": "string"}}, "details": {},
         "raw_event_lines": {"type": "array", "items": {"type": "integer", "minimum": 1}},
         "redacted": {"type": "boolean"}
       }

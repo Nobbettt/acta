@@ -311,7 +311,7 @@ func markUnavailableFilePatches(d *Digest) {
 		event := &d.Timeline[index]
 		if event.Kind == KindFileEdit && len(event.FilePatches) == 0 && event.FilePatchStatus == "" {
 			event.FilePatchStatus = "unavailable"
-			event.FilePatchErrors = []string{"write snapshot was unavailable or no content change was observed"}
+			event.FilePatchErrors = append(event.FilePatchErrors, "write snapshot was unavailable or no content change was observed")
 		}
 	}
 }

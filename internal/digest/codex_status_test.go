@@ -1,6 +1,9 @@
 package digest
 
 import (
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -73,7 +76,76 @@ func TestCodexFileChangeRejectsTraversal(t *testing.T) {
 	if d.Metrics.Edits != 1 {
 		t.Fatalf("edits = %d, want 1", d.Metrics.Edits)
 	}
+	if d.Termination.Outcome != OutcomeCompleted ||
+		!strings.Contains(strings.Join(d.Timeline[2].FilePatchErrors, "; "), "capture warning: file_change dropped 1 path(s)") {
+		t.Fatalf("non-fatal warning = termination %+v event %+v", d.Termination, d.Timeline[2])
+	}
 	if files := assembleFiles(d.Timeline); len(files) != 0 {
 		t.Fatalf("traversal path leaked into files summary: %+v", files)
 	}
+}
+
+func TestCodexFileChangeUsesProcessWorkspaceAlias(t *testing.T) {
+	root := t.TempDir()
+	workspaceDir := filepath.Join(root, "workspace")
+	if err := os.Mkdir(workspaceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "agent-cwd")
+	if err := os.Symlink(workspaceDir, alias); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(alias)
+
+	raw := strings.Join([]string{
+		`{"type":"thread.started","thread_id":"t-1"}`,
+		`{"type":"turn.started"}`,
+		`{"type":"item.completed","item":{"id":"i1","type":"file_change","status":"completed","changes":[{"path":"` + filepath.ToSlash(filepath.Join(alias, "sample.txt")) + `","kind":"update"}]}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`,
+	}, "\n") + "\n"
+	d, err := parseCodex(strings.NewReader(raw), newWorkspace(workspaceDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range d.Timeline {
+		if event.ProviderEvent == "file_change" {
+			if !reflect.DeepEqual(event.Files, []string{"sample.txt"}) ||
+				!reflect.DeepEqual(event.Changes, []FileMutation{{Path: "sample.txt", Kind: "update"}}) {
+				t.Fatalf("file_change = files %v changes %+v", event.Files, event.Changes)
+			}
+			return
+		}
+	}
+	t.Fatal("file_change event missing")
+}
+
+func TestCodexFileChangeWarnsWhenAbsolutePathIsOutsideWorkspace(t *testing.T) {
+	raw := strings.Join([]string{
+		`{"type":"thread.started","thread_id":"t-1"}`,
+		`{"type":"turn.started"}`,
+		`{"type":"item.started","item":{"id":"i1","type":"file_change","status":"in_progress","changes":[{"path":"/elsewhere/sample.txt","kind":"update"}]}}`,
+		`{"type":"item.completed","item":{"id":"i1","type":"file_change","status":"completed","changes":[{"path":"/elsewhere/sample.txt","kind":"update"}]}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`,
+	}, "\n") + "\n"
+	d, err := parseCodex(strings.NewReader(raw), newWorkspace("/work/repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Termination.Outcome != OutcomeCompleted || d.Termination.ProviderReason != "turn_completed" || d.Termination.ErrorMessage != "" {
+		t.Fatalf("termination = %+v", d.Termination)
+	}
+	for _, event := range d.Timeline {
+		if event.ProviderEvent == "file_change" {
+			warning := strings.Join(event.FilePatchErrors, "; ")
+			if !strings.Contains(warning, "capture warning: file_change dropped 1 path(s)") ||
+				!strings.Contains(warning, "raw_event_lines=[3 4]") {
+				t.Fatalf("capture warning = %q", warning)
+			}
+			if len(event.Files) != 0 || len(event.Changes) != 0 {
+				t.Fatalf("outside path leaked into file_change: %+v", event)
+			}
+			return
+		}
+	}
+	t.Fatal("file_change event missing")
 }

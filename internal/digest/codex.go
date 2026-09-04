@@ -450,6 +450,7 @@ func codexItemEvent(d *Digest, item *CodexItem, srcLine int, completedLine int, 
 		srcLine: srcLine, completedLine: completedLine,
 		RawEventLines: rawEventLines(srcLine, completedLine),
 	}
+	droppedPaths := 0
 	switch item.Type {
 	case "command_execution":
 		e.Kind = KindCommand
@@ -473,11 +474,22 @@ func codexItemEvent(d *Digest, item *CodexItem, srcLine int, completedLine int, 
 		applyRunState(d, &e, item.AggregatedOutput)
 	case "file_change":
 		e.Kind = KindFileEdit
-		e.Files = codexChangePaths(item, ws)
+		e.Files = make([]string, 0, len(item.Changes))
 		for _, change := range item.Changes {
 			if rel, ok := normalizeWorkspacePath(change.Path, ws); ok {
+				if !slices.Contains(e.Files, rel) {
+					e.Files = append(e.Files, rel)
+				}
 				e.Changes = append(e.Changes, FileMutation{Path: rel, Kind: change.Kind})
+			} else {
+				droppedPaths++
 			}
+		}
+		if droppedPaths > 0 {
+			e.FilePatchErrors = append(e.FilePatchErrors, fmt.Sprintf(
+				"capture warning: file_change dropped %d path(s) that could not be made workspace-relative; raw_event_lines=%v",
+				droppedPaths, e.RawEventLines,
+			))
 		}
 		e.IsError = item.Failed()
 		d.Metrics.Edits++

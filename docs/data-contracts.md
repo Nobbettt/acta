@@ -51,6 +51,11 @@ command event the same way `file.read` does:
 - `file.deleted` — `{path, source_event_sequence, command}`
 - `file.moved` — `{from, to, source_event_sequence, command}`
 
+Timeline-derived event payloads carry optional `file_patch_errors`. A
+`capture warning:` means a provider-reported path could not be made
+workspace-relative; it is non-fatal, and the dropped paths remain recoverable
+from the raw provider artifact using `raw_event_lines`.
+
 ## Compatibility rules
 
 - Version 2 is the first published run-record, digest, and Acta-event contract;
