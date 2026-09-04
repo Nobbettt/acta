@@ -95,6 +95,45 @@ func TestClassifyCommandRejectsMissingControlListOperands(t *testing.T) {
 	}
 }
 
+func TestClassifyCommandRejectsMalformedAmpersandLists(t *testing.T) {
+	for _, command := range []string{
+		"curl https://example.com;&",
+		"curl https://example.com&;",
+	} {
+		if facts := classifyCommand(command, "", false, testWorkspace()); facts != nil {
+			t.Errorf("classifyCommand(%q) = %+v, want nil for an invalid ampersand list", command, facts)
+		}
+	}
+}
+
+func TestClassifyCommandTracksLiteralOutsideWorkingDirectory(t *testing.T) {
+	commands := []string{
+		"cd /tmp && rm victim.txt",
+		"cd /tmp && mv old.txt new.txt",
+		"cd /tmp && cp source.txt copy.txt",
+		"cd /tmp && touch created.txt",
+		"cd /tmp && mkdir created",
+		"cd /tmp && chmod 600 victim.txt",
+		"cd /tmp && tar -xf archive.tar",
+	}
+	for _, command := range commands {
+		facts := classifyCommand(command, "", true, testWorkspace())
+		if facts == nil || !reflect.DeepEqual(facts.categories, []string{"workspace.escape"}) ||
+			len(facts.targets) != 0 || len(facts.mutations) != 0 {
+			t.Errorf("classifyCommand(%q) = %+v, want workspace.escape only", command, facts)
+		}
+	}
+}
+
+func TestClassifyCommandTracksExportedGitWorkTree(t *testing.T) {
+	command := `/bin/bash -lc "export GIT_WORK_TREE=/tmp/other && git rm victim.txt"`
+	facts := classifyCommand(command, "", true, testWorkspace())
+	if facts == nil || !reflect.DeepEqual(facts.categories, []string{"workspace.escape"}) ||
+		len(facts.targets) != 0 || len(facts.mutations) != 0 {
+		t.Fatalf("classifyCommand(%q) = %+v, want workspace.escape only", command, facts)
+	}
+}
+
 func TestReadFacetsStopAfterWorkingDirectoryChanges(t *testing.T) {
 	ws := testWorkspace()
 	ws.controlPrefix = "stage-control"

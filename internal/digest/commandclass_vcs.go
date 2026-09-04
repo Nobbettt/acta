@@ -126,6 +126,8 @@ var gitFlagModels = map[string]commandFlagModel{
 		"-v": flagBoolean, "-d": flagBoolean, "-D": flagBoolean,
 		"-m": flagBoolean, "-M": flagBoolean, "-c": flagBoolean,
 		"-C": flagBoolean, "-f": flagBoolean,
+		"--list": flagBoolean, "--verbose": flagBoolean, "--show-current": flagBoolean,
+		"--delete": flagBoolean, "--move": flagBoolean, "--copy": flagBoolean, "--force": flagBoolean,
 		"--contains": flagValue, "--no-contains": flagValue,
 		"--merged": flagValue, "--no-merged": flagValue,
 		"--points-at": flagValue, "--format": flagValue, "--sort": flagValue,
@@ -134,6 +136,8 @@ var gitFlagModels = map[string]commandFlagModel{
 		"-a": flagBoolean, "-l": flagBoolean, "-v": flagBoolean,
 		"-d": flagBoolean, "-f": flagBoolean, "-n": flagAttachedValue,
 		"-m": flagValue, "-F": flagValue,
+		"--list": flagBoolean, "--verify": flagBoolean,
+		"--delete": flagBoolean, "--force": flagBoolean,
 		"--contains": flagValue, "--no-contains": flagValue,
 		"--merged": flagValue, "--no-merged": flagValue,
 		"--points-at": flagValue, "--format": flagValue, "--sort": flagValue,
@@ -335,6 +339,9 @@ func gitInvocation(tokens []string) (verb string, args []string, redirected, inf
 			key, _, _ := strings.Cut(flag.value, "=")
 			if strings.TrimSpace(key) == "" {
 				return "", nil, false, false, false
+			}
+			if strings.EqualFold(strings.TrimSpace(key), "core.worktree") {
+				redirected = true
 			}
 		}
 		if slices.Contains(gitRepoRedirectFlags, flag.name) {

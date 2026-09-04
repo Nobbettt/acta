@@ -605,6 +605,12 @@ func TestClassifyExecPackageInstall(t *testing.T) {
 		// Negatives.
 		{name: "npm dry run installs nothing", command: "npm install --dry-run left-pad"},
 		{name: "npm package-lock-only installs nothing", command: "npm install --package-lock-only left-pad"},
+		{
+			name:    "npm disabled package lock only installs",
+			command: "npm install --package-lock-only=false left-pad",
+			want:    []string{"package.install"},
+			targets: []CommandTarget{{Kind: "package", Value: "left-pad"}},
+		},
 		{name: "pnpm lockfile-only installs nothing", command: "pnpm install --lockfile-only left-pad"},
 		{name: "yarn update-lockfile mode installs nothing", command: "yarn install --mode=update-lockfile left-pad"},
 		{name: "pip attached dry run installs nothing", command: "pip install --dry-run=true requests"},

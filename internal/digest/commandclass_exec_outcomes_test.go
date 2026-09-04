@@ -121,7 +121,12 @@ func TestClassifyExecOutcomeDependentWrites(t *testing.T) {
 		{name: "recursive gunzip may find no files", command: "gunzip -r empty/"},
 		{name: "pip dry run still writes outside report", command: "pip install --dry-run --report /tmp/report.json requests", want: []string{"workspace.escape"}},
 		{name: "pr create web mode defers mutation", command: "gh pr create --web"},
+		{name: "pr create attached web mode defers mutation", command: "gh pr create --web=true"},
+		{name: "pr create numeric web mode defers mutation", command: "gh pr create --web=1"},
 		{name: "issue create short web mode defers mutation", command: "gh issue create -w"},
+		{name: "issue create attached short web mode defers mutation", command: "gh issue create -w=true"},
+		{name: "pr create disabled web mode mutates", command: "gh pr create --web=false", want: []string{"forge.mutate"}},
+		{name: "pr create uppercase disabled web mode mutates", command: "gh pr create --web=FALSE", want: []string{"forge.mutate"}},
 		{name: "rsync rejects two remote endpoints before connecting", command: "rsync build1.example.com:/src build2.example.com:/dst", failed: true},
 		{
 			name:    "relative device output after absolute cd is not an extract",
@@ -135,4 +140,20 @@ func TestClassifyExecOutcomeDependentWrites(t *testing.T) {
 			want:    []string{"permission.changed", "workspace.escape"},
 		},
 	})
+}
+
+func TestClassifyExecCreditsDotEnvFileFlags(t *testing.T) {
+	runExecCases(t, []execCase{
+		{name: "sed program file", command: "sed -f .env input.txt", want: []string{"env.inspect"}},
+		{name: "sed long program file", command: "sed --file=.env.local input.txt", want: []string{"env.inspect"}},
+	})
+}
+
+func TestClassifyExecCreditsMixedPermissionDestinations(t *testing.T) {
+	runExecCases(t, []execCase{{
+		name:    "chmod inside and outside",
+		command: "chmod 600 file.txt /tmp/outside.txt",
+		want:    []string{"permission.changed", "workspace.escape"},
+		targets: []CommandTarget{{Kind: "path", Value: "file.txt"}},
+	}})
 }

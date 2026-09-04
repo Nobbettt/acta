@@ -135,6 +135,12 @@ func TestClassifyFS(t *testing.T) {
 		{"git rm behind an outside inline work tree escapes", "git --work-tree=/tmp/other rm x.txt", true, &commandFacts{
 			categories: []string{"workspace.escape"},
 		}},
+		{"git rm behind an outside configured work tree escapes", "git -c core.worktree=/tmp rm victim.txt", true, &commandFacts{
+			categories: []string{"workspace.escape"},
+		}},
+		{"git rm behind an attached configured work tree escapes", "git -ccore.worktree=/tmp rm victim.txt", true, &commandFacts{
+			categories: []string{"workspace.escape"},
+		}},
 		// `--cached`/`--staged` only untracks the path; the file is still on
 		// disk, so nothing here proves a deletion.
 		{"git rm --cached leaves the file on disk", "git rm --cached secrets.env", true, nil},
@@ -287,6 +293,11 @@ func TestClassifyFS(t *testing.T) {
 			categories: []string{"fs.move"},
 			targets:    fsPathTargets("notes.md", "archive/notes.md"),
 			mutations:  []ShellMutation{{Kind: "move", From: "notes.md", To: "archive/notes.md"}},
+		}},
+		{"mv repeated target directory uses the final value", "mv -t backup -t other a.txt", true, &commandFacts{
+			categories: []string{"fs.move"},
+			targets:    fsPathTargets("a.txt", "other/a.txt"),
+			mutations:  []ShellMutation{{Kind: "move", From: "a.txt", To: "other/a.txt"}},
 		}},
 		// -t's value can also be glued directly to the flag (GNU getopt accepts
 		// a short option's argument attached, no separate token or "=" needed).
@@ -581,6 +592,10 @@ func TestClassifyFS(t *testing.T) {
 		{"git apply names the patch not the files", "git apply fix.diff", true, &commandFacts{
 			categories: []string{"fs.patch"},
 		}},
+		{"git apply behind an outside work tree escapes", "git --work-tree=/tmp apply fix.diff", true, &commandFacts{
+			categories: []string{"workspace.escape"},
+		}},
+		{"git apply behind an unproven work tree credits nothing", "git --work-tree=other apply fix.diff", true, nil},
 		{"git cherry-pick names a commit", "git cherry-pick 1a2b3c4", true, &commandFacts{
 			categories: []string{"fs.patch"},
 		}},
@@ -745,6 +760,8 @@ func TestDisabledBooleanFlagsDoNotEnableModes(t *testing.T) {
 		forbidden string
 	}{
 		{"npm global false stays local", "npm install --global=false left-pad", "package.install", "workspace.escape"},
+		{"npm package lock only false installs", "npm install --package-lock-only=false left-pad", "package.install", ""},
+		{"npm dry run false installs", "npm install --dry-run=false left-pad", "package.install", ""},
 		{"compose detach false stays foreground", "docker compose up --detach=false", "container.run", "process.background"},
 		{"compose short detach false stays foreground", "docker compose up -d=false", "container.run", "process.background"},
 		{"unsupported curl version value remains informational", "curl --version=false https://example.com", "", "network.egress"},

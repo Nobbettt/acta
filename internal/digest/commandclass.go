@@ -44,6 +44,10 @@ type commandSegment struct {
 	// as a standalone token anywhere in the command. Relative path operands in
 	// that command then cannot be trusted to identify workspace files.
 	cwdUncertain bool
+	// cwd is the literal directory established before this segment when the
+	// shell chain proves it. cwdKnown distinguishes that from a dynamic cd.
+	cwd      string
+	cwdKnown bool
 }
 
 // trustedOutput is the output a classifier may draw a fact from. Output belongs
@@ -340,6 +344,16 @@ func splitRawChain(command string) ([]commandChainRaw, bool) {
 			}
 			beforeRedirect := i+1 < len(command) && command[i+1] == '>'
 			if !afterRedirect && !beforeRedirect {
+				if emptyStage(start, i) {
+					valid = false
+				}
+				j := i + 1
+				for j < len(command) && (command[j] == ' ' || command[j] == '\t') {
+					j++
+				}
+				if j < len(command) && (command[j] == ';' || command[j] == '&' || command[j] == '|') {
+					valid = false
+				}
 				async = true
 			}
 			wordStart = true
@@ -780,9 +794,17 @@ func classifyCommand(command, outputText string, exitOK bool, ws *workspace) *co
 	chain := splitCommandChain(rawCommand)
 	output := trustedOutput(chainSegmentTexts(chain), outputText)
 	facts := &commandFacts{}
+	cwd, cwdKnown := canonicalWorkspacePath(ws.root), ws.root != ""
+	gitWorkTree, gitWorkTreeKnown := "", false
 	for _, c := range chain {
 		segmentFacts := &commandFacts{}
 		tokens := tokensForSegment(c.raw)
+		if gitWorkTreeKnown {
+			leading := execLeadingTokens(tokens)
+			if len(leading) > 0 && path.Base(leading[0]) == "git" {
+				tokens = append([]string{"GIT_WORK_TREE=" + gitWorkTree}, tokens...)
+			}
+		}
 		executionCommand := rawCommand
 		if c.executed {
 			executionCommand = c.raw
@@ -795,6 +817,8 @@ func classifyCommand(command, outputText string, exitOK bool, ws *workspace) *co
 			exitOK:       exitOK && c.statusProven,
 			ws:           ws,
 			cwdUncertain: c.cwdUncertain,
+			cwd:          cwd,
+			cwdKnown:     cwdKnown,
 		}
 		for _, classify := range segmentClassifiers {
 			segmentFacts.merge(classify(segment))
@@ -803,9 +827,18 @@ func classifyCommand(command, outputText string, exitOK bool, ws *workspace) *co
 			probe := segment
 			probe.cwdUncertain = false
 			if fsFacts := classifyFS(probe); fsFacts != nil {
-				for _, category := range fsFacts.categories {
-					if strings.HasPrefix(category, "fs.") {
-						segmentFacts.merge(&commandFacts{categories: []string{category}})
+				if cwdKnown && !directoryInsideWorkspace(cwd, ws) {
+					outsideProbe := probe
+					outsideProbe.ws = newWorkspace(cwd)
+					if outsideFacts := classifyFS(outsideProbe); outsideFacts != nil &&
+						(len(outsideFacts.targets) != 0 || len(outsideFacts.mutations) != 0) {
+						segmentFacts.merge(&commandFacts{categories: []string{"workspace.escape"}})
+					}
+				} else {
+					for _, category := range fsFacts.categories {
+						if strings.HasPrefix(category, "fs.") {
+							segmentFacts.merge(&commandFacts{categories: []string{category}})
+						}
 					}
 				}
 			}
@@ -816,12 +849,76 @@ func classifyCommand(command, outputText string, exitOK bool, ws *workspace) *co
 		segmentFacts.mutations = nil
 		facts.merge(segmentFacts)
 		facts.mutations = append(facts.mutations, mutations...)
+		cwd, cwdKnown = nextLiteralWorkingDirectory(tokensForSegment(c.raw), c.statusProven, cwd, cwdKnown)
+		gitWorkTree, gitWorkTreeKnown = nextLiteralGitWorkTree(tokensForSegment(c.raw), c.statusProven, gitWorkTree, gitWorkTreeKnown)
 	}
 	if facts.empty() {
 		return nil
 	}
 	facts.sortCategories()
 	return facts
+}
+
+func directoryInsideWorkspace(dir string, ws *workspace) bool {
+	if fsIsWorkspaceRoot(dir, ws) {
+		return true
+	}
+	_, ok := normalizeWorkspacePath(dir, ws)
+	return ok
+}
+
+func nextLiteralWorkingDirectory(tokens []string, statusProven bool, cwd string, known bool) (string, bool) {
+	for len(tokens) > 0 && execIsAssignment(tokens[0]) {
+		tokens = tokens[1:]
+	}
+	if len(tokens) == 0 || tokens[0] != "cd" {
+		return cwd, known
+	}
+	if !statusProven {
+		return "", false
+	}
+	args := fsOwnArgs(tokens[1:])
+	if len(args) == 2 && args[0] == "--" {
+		args = args[1:]
+	}
+	if len(args) != 1 || args[0] == "-" || strings.ContainsAny(args[0], fsShellMetacharacters) {
+		return "", false
+	}
+	dir := canonicalWorkspacePath(args[0])
+	if fsOperandAbsolute(args[0]) {
+		return dir, true
+	}
+	if !known {
+		return "", false
+	}
+	return path.Join(cwd, dir), true
+}
+
+func nextLiteralGitWorkTree(tokens []string, statusProven bool, value string, known bool) (string, bool) {
+	touches := slices.ContainsFunc(tokens, func(token string) bool {
+		name, _, _ := strings.Cut(token, "=")
+		return name == "GIT_WORK_TREE"
+	})
+	if !touches {
+		return value, known
+	}
+	if !statusProven {
+		return "", false
+	}
+	var assignment string
+	switch {
+	case len(tokens) == 1:
+		assignment = tokens[0]
+	case len(tokens) == 2 && tokens[0] == "export":
+		assignment = tokens[1]
+	default:
+		return "", false
+	}
+	name, assigned, ok := strings.Cut(assignment, "=")
+	if !ok || name != "GIT_WORK_TREE" || assigned == "" || strings.ContainsAny(assigned, fsShellMetacharacters) {
+		return "", false
+	}
+	return assigned, true
 }
 
 // changesWorkingDirectory marks the whole command uncertain whenever cd,

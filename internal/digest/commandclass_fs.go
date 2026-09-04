@@ -58,6 +58,12 @@ func classifyFS(segment commandSegment) *commandFacts {
 		return nil
 	}
 	if verb == "patch" || verb == "git apply" || verb == "git cherry-pick" || verb == "git revert" {
+		if strings.HasPrefix(verb, "git ") && repoRedirected {
+			if workTree, ok := gitWorkTree(segment.tokens); ok && fsEscapes([]string{workTree}, segment.ws, segment.cwdUncertain) {
+				return &commandFacts{categories: []string{"workspace.escape"}}
+			}
+			return nil
+		}
 		return &commandFacts{categories: []string{"fs.patch"}}
 	}
 	if verb == "git rm" && repoRedirected {
@@ -186,12 +192,29 @@ func gitWorkTree(tokens []string) (value string, ok bool) {
 		return value, ok
 	}
 	verbIndex := scan.operandIndexes[0]
+	configuredValue, configured := "", false
+	explicitValue, explicit := "", false
 	for _, flag := range scan.flags {
-		if flag.index < verbIndex && flag.name == "--work-tree" {
-			value, ok = flag.value, true
+		if flag.index >= verbIndex {
+			continue
+		}
+		if flag.name == "-c" {
+			key, configValue, hasValue := strings.Cut(flag.value, "=")
+			if hasValue && strings.EqualFold(strings.TrimSpace(key), "core.worktree") {
+				configuredValue, configured = configValue, true
+			}
+		}
+		if flag.name == "--work-tree" {
+			explicitValue, explicit = flag.value, true
 		}
 	}
-	return value, ok
+	if explicit {
+		return explicitValue, true
+	}
+	if ok {
+		return value, true
+	}
+	return configuredValue, configured
 }
 
 type commandFlagArity uint8
@@ -400,6 +423,7 @@ func scanCommandArgs(args []string, model commandFlagModel) commandArgScan {
 
 func commandBooleanValue(model commandFlagModel, name string) bool {
 	return (name == "-g" || name == "--global") && model["--package-lock-only"] != 0 ||
+		(name == "--package-lock-only" || name == "--dry-run") && model["--package-lock-only"] != 0 ||
 		(name == "-d" || name == "--detach") && model["--project-name"] != 0
 }
 
@@ -695,25 +719,18 @@ func fsMoveIntoDir(src, dest string, ws *workspace, cwdUncertain bool) *commandF
 	return facts
 }
 
-// commandFlagValue returns the value of flag short/long in whichever spelling args
-// uses, and whether the flag was present at all: a separate token (`-t
-// backup`), an attached short value (`-tbackup`), a `--long=value` form, or
-// the flag packed after boolean short flags (`-rt backup`, `-Nfo new.txt`).
-// `-T` (cp's "treat DEST as a normal file", a different, uppercase letter)
-// never matches a lowercase short flag here.
-//
-// value is "" when the flag was present but no value could be read — a bare
-// `-t` at the end of the line, or a cluster's last letter with nothing after
-// it — and the caller must not treat that the same as "flag absent": e.g.
-// fsCopy relies on telling "no destination named" apart from "-t not given".
-func commandFlagValue(args []string, model commandFlagModel, short, long string) (value string, ok bool) {
-	return scanCommandArgs(args, model).flagValue(short, long)
-}
-
 // fsCopyTargetFlag returns the destination named by GNU cp/mv's
-// -t/--target-directory form, and whether that form was used at all.
+// -t/--target-directory form, and whether that form was used at all. The final
+// occurrence wins, matching GNU option parsing while preserving alias order.
 func fsCopyTargetFlag(verb string, args []string) (string, bool) {
-	return commandFlagValue(args, fsFlagModels[verb], "-t", "--target-directory")
+	var value string
+	found := false
+	for _, flag := range scanCommandArgs(args, fsFlagModels[verb]).flags {
+		if flag.name == "-t" || flag.name == "--target-directory" {
+			value, found = flag.value, true
+		}
+	}
+	return value, found
 }
 
 // fsCopy derives the candidate destination of a copy. A plain two-operand form

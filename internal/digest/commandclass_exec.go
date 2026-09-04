@@ -14,6 +14,7 @@ import (
 	neturl "net/url"
 	"path"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -518,7 +519,14 @@ func execForge(cmd execCommand) *commandFacts {
 	}
 	if len(cmd.args) > 1 && slices.Contains(verbs, cmd.args[1]) {
 		if cmd.args[1] == "create" && (cmd.args[0] == "pr" || cmd.args[0] == "issue") &&
-			(slices.Contains(cmd.args[2:], "-w") || slices.Contains(cmd.args[2:], "--web")) {
+			slices.ContainsFunc(cmd.args[2:], func(arg string) bool {
+				name, value, attached := strings.Cut(arg, "=")
+				enabled := !attached
+				if attached {
+					enabled, _ = strconv.ParseBool(value)
+				}
+				return (name == "-w" || name == "--web") && enabled
+			}) {
 			return nil
 		}
 		return execFacts("forge.mutate")
@@ -1162,10 +1170,13 @@ func execFlagValues(scan commandArgScan, names ...string) []string {
 func execArchiveDestinationsWorkspace(cmd execCommand, scan commandArgScan, names ...string) (inside, escaped bool) {
 	if cmd.word == "tar" {
 		base := canonicalWorkspacePath(cmd.seg.ws.root)
+		if cmd.seg.cwdKnown {
+			base = cmd.seg.cwd
+		}
 		if base == "." {
 			base = ""
 		}
-		known, seen := !cmd.seg.cwdUncertain, false
+		known, seen := !cmd.seg.cwdUncertain || cmd.seg.cwdKnown, false
 		for _, flag := range scan.flags {
 			if !slices.Contains(names, flag.name) {
 				continue
@@ -1183,7 +1194,7 @@ func execArchiveDestinationsWorkspace(cmd execCommand, scan commandArgScan, name
 			}
 		}
 		if !seen {
-			return true, false
+			return execPathsWorkspace(cmd, []string{"."})
 		}
 		if !known {
 			return false, false
@@ -1199,7 +1210,7 @@ func execArchiveDestinationsWorkspace(cmd execCommand, scan commandArgScan, name
 		values = append(values, flag.value)
 	}
 	if len(values) == 0 {
-		return true, false
+		return execPathsWorkspace(cmd, []string{"."})
 	}
 	return execPathsWorkspace(cmd, values)
 }
@@ -1209,17 +1220,48 @@ func execArchiveDestinationsWorkspace(cmd execCommand, scan commandArgScan, name
 // destination from a proven escape while leaving expressions and relative
 // paths under an uncertain cwd unclassified.
 func execPathsWorkspace(cmd execCommand, values []string) (inside, escaped bool) {
-	inside = len(values) != 0
 	for _, value := range values {
-		if value == "" {
-			inside = false
+		value, known := execResolvedPath(cmd, value)
+		if !known {
 			continue
 		}
-		if _, ok := fsDirectoryPath(value, cmd.seg.ws, cmd.seg.cwdUncertain); !ok {
-			inside = false
+		if _, ok := fsDirectoryPath(value, cmd.seg.ws, false); ok {
+			inside = true
+		} else if !fsIsWorkspaceRoot(value, cmd.seg.ws) {
+			escaped = true
 		}
 	}
-	return inside, fsEscapes(values, cmd.seg.ws, cmd.seg.cwdUncertain)
+	return inside, escaped
+}
+
+func execResolvedPath(cmd execCommand, value string) (string, bool) {
+	if value == "" || strings.ContainsAny(value, fsShellMetacharacters) {
+		return "", false
+	}
+	if fsOperandAbsolute(value) {
+		return value, true
+	}
+	if cmd.seg.cwdKnown {
+		return path.Join(cmd.seg.cwd, canonicalWorkspacePath(value)), true
+	}
+	if cmd.seg.cwdUncertain {
+		return "", false
+	}
+	return value, true
+}
+
+func execWorkspacePaths(cmd execCommand, values []string) []string {
+	var paths []string
+	for _, value := range values {
+		value, known := execResolvedPath(cmd, value)
+		if !known {
+			continue
+		}
+		if value, ok := normalizeWorkspacePath(value, cmd.seg.ws); ok {
+			paths = append(paths, value)
+		}
+	}
+	return paths
 }
 
 func execAnyPathWorkspace(cmd execCommand, values []string) (inside, escaped bool) {
@@ -1232,7 +1274,7 @@ func execAnyPathWorkspace(cmd execCommand, values []string) (inside, escaped boo
 }
 
 func execCWDUncertainRelativeDestination(cmd execCommand, values []string) bool {
-	if !cmd.seg.cwdUncertain {
+	if !cmd.seg.cwdUncertain || cmd.seg.cwdKnown {
 		return false
 	}
 	return slices.ContainsFunc(values, func(value string) bool {
@@ -1336,7 +1378,7 @@ func execPermission(cmd execCommand) *commandFacts {
 		facts.categories = append(facts.categories, "permission.changed")
 	}
 	if inside {
-		for _, p := range fsPaths(paths, cmd.seg.ws, cmd.seg.cwdUncertain) {
+		for _, p := range execWorkspacePaths(cmd, paths) {
 			appendCommandTarget(facts, CommandTarget{Kind: "path", Value: p})
 		}
 	}
@@ -1385,7 +1427,15 @@ func execEnvInspect(cmd execCommand) *commandFacts {
 }
 
 func execReadsDotEnv(word string, args []string) bool {
-	for _, arg := range execOperands(args, execEnvReaderFlagModels[word]) {
+	scan := scanCommandArgs(args, execEnvReaderFlagModels[word])
+	if scan.unknownFlag {
+		return false
+	}
+	values := scan.operands
+	if word == "sed" {
+		values = append(values, execFlagValues(scan, "-f", "--file")...)
+	}
+	for _, arg := range values {
 		if strings.HasPrefix(path.Base(arg), ".env") {
 			return true
 		}
