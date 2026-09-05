@@ -78,6 +78,33 @@ var gitBranchTagMutateFlags = []string{"-d", "-D", "-m", "-M", "-c", "-C", "-f",
 // stash. Every other sub-verb, including the bare form, changes it.
 var gitStashReadOnlyVerbs = []string{"list", "show"}
 
+// gitAddWholeTreeFlags are the spellings that give `git add` a pathspec of its
+// own, so an invocation carrying one stages something without naming a path.
+var gitAddWholeTreeFlags = []string{"-A", "--all", "-u", "--update"}
+
+// gitOutputProvesNoChange reports whether git itself said this invocation
+// changed nothing. Only a few verbs print such a line, and only trusted output
+// (a single, untransformed segment — see trustedOutput) may be read for it;
+// with no output the syntax rules above stand unchanged.
+func gitOutputProvesNoChange(verb, output string) bool {
+	markers, ok := gitNoChangeOutputMarkers[verb]
+	if !ok || output == "" {
+		return false
+	}
+	first := output
+	if i := strings.IndexByte(first, '\n'); i >= 0 {
+		first = first[:i]
+	}
+	first = strings.ToLower(strings.TrimSpace(first))
+	return slices.ContainsFunc(markers, func(marker string) bool {
+		return strings.HasPrefix(first, marker)
+	})
+}
+
+var gitNoChangeOutputMarkers = map[string][]string{
+	"stash": {"no local changes to save"},
+}
+
 // gitNoOpFlags maps a git verb to the flags that prove THIS invocation made
 // none of the changes its name would otherwise imply: `--dry-run`/`-n`
 // simulate the mutation, and rm/add's own `--cached`/`--staged` only change
@@ -106,6 +133,7 @@ var gitFlagModels = map[string]commandFlagModel{
 	"add": {
 		"-f": flagBoolean, "-n": flagBoolean, "-v": flagBoolean, "-A": flagBoolean,
 		"-i": flagBoolean, "--interactive": flagBoolean,
+		"--all": flagBoolean, "-u": flagBoolean, "--update": flagBoolean,
 	},
 	"commit": {
 		"-a": flagBoolean, "-m": flagValue, "--message": flagValue, "-F": flagValue, "--file": flagValue,
@@ -203,7 +231,19 @@ func gitVerbMutates(verb string, args []string) bool {
 	case "stash":
 		return !slices.Contains(gitStashReadOnlyVerbs, gitFirstArg(verb, args))
 	case "add":
-		return !scanCommandArgs(args, gitFlagModels[verb]).hasFlag("-i", "--interactive")
+		scan := scanCommandArgs(args, gitFlagModels[verb])
+		if scan.hasFlag("-i", "--interactive") {
+			return false
+		}
+		// `git add` with neither a pathspec nor a whole-tree option stages
+		// nothing and says so ("Nothing specified, nothing added."). That is
+		// proven by the syntax alone, so it holds whatever the repository
+		// contained. An unparsed flag may BE the missing option, so it keeps
+		// the mutate and leaves the outer flagsCertain gate to withhold it.
+		if scan.unknownFlag {
+			return true
+		}
+		return len(scan.operands) != 0 || scan.hasFlag(gitAddWholeTreeFlags...)
 	default:
 		return slices.Contains(gitMutateVerbs, verb)
 	}
@@ -255,7 +295,7 @@ func classifyVCS(segment commandSegment) *commandFacts {
 		flagsCertain = !scanCommandArgs(args, gitFlagModels[verb]).unknownFlag
 	}
 	if segment.exitOK && !redirected && !segment.cwdUncertain && flagsCertain {
-		noOp := gitAssertsNoChange(verb, args)
+		noOp := gitAssertsNoChange(verb, args) || gitOutputProvesNoChange(verb, segment.output)
 		rewrite := gitRewrites(verb, args) && !noOp
 		if rewrite {
 			facts.categories = append(facts.categories, "vcs.rewrite")

@@ -681,7 +681,16 @@ func explicitSingleSearchFile(tokens []string, ws *workspace) string {
 	}
 	var candidates []string
 	for _, token := range operands {
-		if normalized := normalizeCommandPathToken(token, ws); normalized != "" && !slices.Contains(candidates, normalized) {
+		// A directory operand is a repository search, not a file read, and it
+		// must not be published as a file that was read. Nothing here may touch
+		// the filesystem to tell the two apart, so the same shape rule the
+		// claude Grep path already applies decides it: `.github` and
+		// `jquery-3.6` look like filenames but are rejected as directories.
+		normalized := normalizeCommandPathToken(token, ws)
+		if normalized == "" || !looksLikeSingleSearchFile(path.Base(normalized)) {
+			continue
+		}
+		if !slices.Contains(candidates, normalized) {
 			candidates = append(candidates, normalized)
 		}
 	}

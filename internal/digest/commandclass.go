@@ -38,8 +38,12 @@ type commandSegment struct {
 	tokens  []string // tokensForSegment(raw), may be empty
 	command string   // command text used to prove this segment executed
 	output  string   // see trustedOutput: empty unless the command is one segment
-	exitOK  bool     // the command exited zero
-	ws      *workspace
+	// outputTrusted separates "this command's output is readable and was
+	// empty" from "this command has no readable output at all". Only the first
+	// lets a classifier read silence as proof that nothing happened.
+	outputTrusted bool
+	exitOK        bool // the command exited zero
+	ws            *workspace
 	// cwdUncertain is set on every segment when `cd`, `pushd` or `popd` appears
 	// as a standalone token anywhere in the command. Relative path operands in
 	// that command then cannot be trusted to identify workspace files.
@@ -854,15 +858,16 @@ func classifyCommand(command, outputText string, exitOK bool, ws *workspace) *co
 			executionCommand = c.raw
 		}
 		segment := commandSegment{
-			raw:          c.raw,
-			tokens:       tokens,
-			command:      executionCommand,
-			output:       output,
-			exitOK:       exitOK && c.statusProven,
-			ws:           ws,
-			cwdUncertain: c.cwdUncertain,
-			cwd:          cwd,
-			cwdKnown:     cwdKnown,
+			raw:           c.raw,
+			tokens:        tokens,
+			command:       executionCommand,
+			output:        output,
+			outputTrusted: len(chain) == 1,
+			exitOK:        exitOK && c.statusProven,
+			ws:            ws,
+			cwdUncertain:  c.cwdUncertain,
+			cwd:           cwd,
+			cwdKnown:      cwdKnown,
 		}
 		for _, classify := range segmentClassifiers {
 			segmentFacts.merge(classify(segment))

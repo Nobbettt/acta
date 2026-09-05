@@ -1423,6 +1423,18 @@ func execPermissionPaths(cmd execCommand) ([]string, bool) {
 	return paths, len(paths) != 0
 }
 
+// execPermissionReportsEveryChange reports whether the invocation asked the
+// tool to name every change it made, which turns absent output into evidence.
+// Only chmod's -c/--changes is listed: chown/chmod's -v prints a line for
+// unchanged files too, so its silence would prove nothing.
+func execPermissionReportsEveryChange(cmd execCommand) bool {
+	if cmd.word != "chmod" {
+		return false
+	}
+	scan := scanCommandArgs(cmd.args, execPermissionFlagModelFor(cmd.word))
+	return !scan.unknownFlag && scan.hasFlag("-c", "--changes")
+}
+
 func execChmodSymbolicMode(value string) bool {
 	if !strings.HasPrefix(value, "-") {
 		return false
@@ -1443,6 +1455,13 @@ func execPermission(cmd execCommand) *commandFacts {
 	}
 	paths, ok := execPermissionPaths(cmd)
 	if !ok {
+		return nil
+	}
+	if execPermissionReportsEveryChange(cmd) && cmd.seg.outputTrusted && cmd.seg.output == "" {
+		// `chmod -c` prints one line per file it actually changed, so output
+		// that is readable and empty proves it changed none. A command whose
+		// output cannot be attributed to this segment is not silence — it is
+		// no evidence — and still credits, as does an empty run without -c.
 		return nil
 	}
 	inside, escaped := execPathsWorkspace(cmd, paths)
