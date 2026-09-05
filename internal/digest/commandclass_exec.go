@@ -19,8 +19,8 @@ import (
 )
 
 // execCommand is one segment reduced to its leading command word and that
-// word's own arguments — the arguments stop at the first pipe or redirection so
-// a downstream command's operands are never mistaken for this one's.
+// word's own arguments. The shell parser removes redirections before this
+// point, so their targets cannot be mistaken for operands.
 type execCommand struct {
 	word string
 	args []string
@@ -28,6 +28,11 @@ type execCommand struct {
 }
 
 func classifyExec(seg commandSegment) *commandFacts {
+	var ok bool
+	seg, ok = parsedCommandSegment(seg)
+	if !ok {
+		return nil
+	}
 	tokens := execLeadingTokens(seg.tokens)
 	if len(tokens) == 0 {
 		return nil
@@ -124,7 +129,7 @@ func execLeadingTokens(tokens []string) []string {
 		switch {
 		case execIsAssignment(token):
 		case token == "sudo":
-		case token == "env" && i+1 < len(tokens) && !isRedirection(tokens[i+1]) &&
+		case token == "env" && i+1 < len(tokens) &&
 			!slices.Contains([]string{"|", "|&", "&&", "||", ";", "&"}, tokens[i+1]):
 		default:
 			return tokens[i:]
@@ -890,7 +895,7 @@ func execSearch(cmd execCommand) *commandFacts {
 		return nil
 	}
 	if cmd.seg.exitOK && explicitSingleSearchFile(cmd.seg.tokens, cmd.seg.output, cmd.seg.ws) != "" &&
-		searchCommandCanExposeFileContent(cmd.seg.tokens, cmd.seg.output) {
+		searchCommandCanExposeFileContent(cmd.seg.raw, cmd.seg.tokens, cmd.seg.output) {
 		return nil
 	}
 	return execFacts("search.query")
@@ -1474,7 +1479,7 @@ func execPermission(cmd execCommand) *commandFacts {
 	if !ok {
 		return nil
 	}
-	if execPermissionReportsEveryChange(cmd) && cmd.seg.outputTrusted && !commandRawStdoutRedirected(cmd.seg.raw) && cmd.seg.output == "" {
+	if execPermissionReportsEveryChange(cmd) && cmd.seg.outputTrusted && cmd.seg.shell.stdoutCaptured() && cmd.seg.output == "" {
 		// `chmod -c` prints one line per file it actually changed, so output
 		// that is readable and empty proves it changed none. A command whose
 		// output cannot be attributed to this segment is not silence — it is

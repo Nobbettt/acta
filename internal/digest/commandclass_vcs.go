@@ -250,6 +250,11 @@ func gitVerbMutates(verb string, args []string) bool {
 }
 
 func classifyVCS(segment commandSegment) *commandFacts {
+	var ok bool
+	segment, ok = parsedCommandSegment(segment)
+	if !ok {
+		return nil
+	}
 	if !vcsExecutionProven(segment) {
 		return nil
 	}

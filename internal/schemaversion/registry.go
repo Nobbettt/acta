@@ -33,6 +33,7 @@ var v3OnlyFields = []Field{
 	{Document: RunRecord, Path: "/reasoning_redaction_state"},
 	{Document: Digest, Path: "/timeline/*/categories"},
 	{Document: Digest, Path: "/timeline/*/redacted"},
+	{Document: Digest, Path: "/timeline/*/observed_effects"},
 	{Document: Digest, Path: "/timeline/*/shell_mutations"},
 	{Document: Digest, Path: "/timeline/*/targets"},
 	{Document: Digest, Path: "/timeline/*/text_chars"},

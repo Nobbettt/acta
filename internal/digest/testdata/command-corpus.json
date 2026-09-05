@@ -1690,10 +1690,13 @@
   },
   {
     "command": "rm $(cat list.txt)",
-    "want_categories": [],
+    "want_categories": [
+      "fs.delete"
+    ],
     "want_targets": [],
     "want_mutations": [],
-    "source": "review-r2-correctness"
+    "source": "review-r2-correctness",
+    "note": "The outer rm succeeded, but its substitution identifies neither a path nor a file mutation."
   },
   {
     "command": "mv -t archive notes.md",
@@ -4930,5 +4933,53 @@
     "want_mutations": [],
     "source": "fix-r33-copy",
     "note": "Copying a directory's contents into the workspace root proves a create without one target."
+  },
+  {
+    "command": "rm plain.txt",
+    "want_categories": [
+      "fs.delete"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "plain.txt"
+      }
+    ],
+    "want_mutations": [
+      {
+        "kind": "delete",
+        "path": "plain.txt"
+      }
+    ],
+    "source": "parser-migration",
+    "note": "A literal removal names the path it deleted."
+  },
+  {
+    "command": "rm ${TARGET}/x.txt",
+    "want_categories": [
+      "fs.delete"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "parser-migration",
+    "note": "An expanded operand proves a deletion but not its path."
+  },
+  {
+    "command": "rm $(date).txt",
+    "want_categories": [
+      "fs.delete"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "parser-migration",
+    "note": "A command substitution does not identify the removed path."
+  },
+  {
+    "command": "echo $(rm victim.txt)",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "parser-migration",
+    "note": "A command substitution has its own status and cannot lend a delete to its outer command."
   }
 ]

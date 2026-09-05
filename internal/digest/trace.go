@@ -365,19 +365,6 @@ func normalizeCommandPathToken(token string, ws *workspace) string {
 	return normalizeInferredFilePath(token, ws)
 }
 
-func pathTokenFromTokens(tokens []string, ws *workspace, reverse bool) string {
-	for i := range tokens {
-		idx := i
-		if reverse {
-			idx = len(tokens) - 1 - i
-		}
-		if normalized := normalizeCommandPathToken(tokens[idx], ws); normalized != "" {
-			return normalized
-		}
-	}
-	return ""
-}
-
 func sedRangeFromTokens(tokens []string) (Span, bool) {
 	for _, token := range tokens {
 		m := sedRangeRe.FindStringSubmatch(strings.Trim(token, "'\""))
@@ -424,31 +411,22 @@ func firstPipeIndexAfter(tokens []string, start int) int {
 	return len(tokens)
 }
 
-func hasRedirectionToken(tokens []string) bool {
-	return len(commandRedirections(tokens)) != 0
-}
-
-func fileBeforePipe(tokens []string, ws *workspace) string {
-	beforePipe := tokens
-	if idx := firstPipeIndexAfter(tokens, 0); idx < len(tokens) {
-		beforePipe = tokens[:idx]
-	}
-	return pathTokenFromTokens(beforePipe, ws, true)
-}
-
-func fileAfterCommand(tokens []string, commandWord string, ws *workspace) string {
-	start := -1
-	for i, token := range tokens {
-		if token == commandWord {
-			start = i + 1
-			break
-		}
-	}
+func fileAfterCommand(command shellSimpleCommand, commandWord string, ws *workspace) string {
+	start := slices.IndexFunc(command.words, func(word shellWord) bool {
+		return word.text == commandWord
+	})
 	if start < 0 {
 		return ""
 	}
-	stop := firstPipeIndexAfter(tokens, start)
-	return pathTokenFromTokens(commandWords(tokens[start:stop]), ws, true)
+	for i := len(command.words) - 1; i > start; i-- {
+		word := command.words[i]
+		if word.literal {
+			if normalized := normalizeCommandPathToken(word.text, ws); normalized != "" {
+				return normalized
+			}
+		}
+	}
+	return ""
 }
 
 var readLikeWords = []string{"sed", "cat", "head", "tail", "nl"}
@@ -471,13 +449,13 @@ func readSegmentStep(segment, outputText string, ws *workspace) *step {
 	if readSegmentIsInformational(tokens) {
 		return nil
 	}
-	if s := sedReadStep(tokens, ws); s != nil {
+	if s := sedReadStep(segment, tokens, ws); s != nil {
 		return s
 	}
-	if s := headReadStep(tokens, ws); s != nil {
+	if s := headReadStep(segment, tokens, ws); s != nil {
 		return s
 	}
-	return catLikeReadStep(tokens, outputText, ws)
+	return catLikeReadStep(segment, tokens, outputText, ws)
 }
 
 func readSegmentIsInformational(tokens []string) bool {
@@ -522,28 +500,27 @@ func untokenizedReadStep(segment, outputText string, ws *workspace) *step {
 	return fileSpanStep(filePath, outputText)
 }
 
-func sedReadStep(tokens []string, ws *workspace) *step {
+func sedReadStep(raw string, tokens []string, ws *workspace) *step {
 	if !shellStageStartsWith(tokens, "sed") {
+		return nil
+	}
+	command, ok := firstShellCommand(raw)
+	if !ok {
 		return nil
 	}
 	sedRange, haveRange := sedRangeFromTokens(tokens)
 	var filePath string
-	if pipeIdx := firstPipeIndexAfter(tokens, 0); pipeIdx < len(tokens) {
-		// Only credit the file left of the pipe when a read-like command
-		// produced the piped text; `python x.py | sed -n '1,50p'` filters
-		// program output, not file content.
-		readLike := false
-		for _, token := range tokens[:pipeIdx] {
-			if slices.Contains(readLikeWords, token) {
-				readLike = true
-				break
+	if firstPipeIndexAfter(tokens, 0) < len(tokens) {
+		// A later pipeline stage observes sed's output, not its input. The
+		// parser keeps its operand separate from every redirect target.
+		filePath = fileAfterCommand(command, "sed", ws)
+		if filePath == "" {
+			if input, ok := command.inputFile(); ok {
+				filePath = normalizeCommandPathToken(input, ws)
 			}
 		}
-		if readLike {
-			filePath = fileBeforePipe(tokens, ws)
-		}
 	} else {
-		filePath = fileAfterCommand(tokens, "sed", ws)
+		filePath = fileAfterCommand(command, "sed", ws)
 	}
 	if haveRange && filePath != "" {
 		return &step{files: []string{filePath}, spans: map[string][]Span{filePath: {sedRange}}}
@@ -551,15 +528,16 @@ func sedReadStep(tokens []string, ws *workspace) *step {
 	return nil
 }
 
-func headReadStep(tokens []string, ws *workspace) *step {
-	if !shellStageStartsWith(tokens, "head") || commandStdoutRedirected(tokens) {
+func headReadStep(raw string, tokens []string, ws *workspace) *step {
+	command, ok := firstShellCommand(raw)
+	if !ok || !shellStageStartsWith(tokens, "head") || !command.stdoutCaptured() {
 		return nil
 	}
 	count := headCountFromTokens(tokens)
-	filePath, explicit := headFileOperand(tokens, ws)
+	filePath, explicit := headFileOperand(command, ws)
 	if !explicit {
-		if redirect, ok := commandStdinRedirection(tokens); ok && !redirect.data && !redirect.descriptor {
-			filePath = normalizeCommandPathToken(redirect.target, ws)
+		if input, ok := command.inputFile(); ok {
+			filePath = normalizeCommandPathToken(input, ws)
 		}
 	}
 	if count > 0 && filePath != "" {
@@ -571,16 +549,23 @@ func headReadStep(tokens []string, ws *workspace) *step {
 // headFileOperand distinguishes a real but unpublishable operand from no
 // operand. Falling through from `/etc/hosts` to redirected stdin would credit
 // a file head did not read merely because the real file lies outside the repo.
-func headFileOperand(tokens []string, ws *workspace) (string, bool) {
-	start := slices.Index(tokens, "head")
+func headFileOperand(command shellSimpleCommand, ws *workspace) (string, bool) {
+	start := slices.IndexFunc(command.words, func(word shellWord) bool {
+		return word.text == "head"
+	})
 	if start < 0 {
 		return "", false
 	}
-	args := commandWords(tokens[start+1:])
-	for i := len(args) - 1; i >= 0; i-- {
-		token := args[i]
-		if normalized := normalizeCommandPathToken(token, ws); normalized != "" {
-			return normalized, true
+	for i := len(command.words) - 1; i > start; i-- {
+		word := command.words[i]
+		token := word.text
+		if word.literal {
+			if normalized := normalizeCommandPathToken(token, ws); normalized != "" {
+				return normalized, true
+			}
+		}
+		if !word.literal {
+			return "", true
 		}
 		candidate, _ := stripPathDecoration(token)
 		if !strings.HasPrefix(token, "-") && (looksLikePlainPath(candidate) || looksLikePathHead(candidate)) {
@@ -590,12 +575,19 @@ func headFileOperand(tokens []string, ws *workspace) (string, bool) {
 	return "", false
 }
 
-func catLikeReadStep(tokens []string, outputText string, ws *workspace) *step {
+func catLikeReadStep(raw string, tokens []string, outputText string, ws *workspace) *step {
+	commands, ok := parseShellCommand(raw)
+	if !ok || len(commands) == 0 || slices.ContainsFunc(commands, func(command shellSimpleCommand) bool {
+		return len(command.redirects) != 0
+	}) {
+		return nil
+	}
+	command := commands[0]
 	for _, commandWord := range []string{"nl", "cat", "tail"} {
-		if !shellStageStartsWith(tokens, commandWord) || hasRedirectionToken(tokens) {
+		if !shellStageStartsWith(tokens, commandWord) {
 			continue
 		}
-		filePath := fileAfterCommand(tokens, commandWord, ws)
+		filePath := fileAfterCommand(command, commandWord, ws)
 		if filePath == "" {
 			continue
 		}
@@ -664,8 +656,11 @@ var contentSuppressingFlags = map[string]bool{
 	"--files": true,
 }
 
-func searchCommandCanExposeFileContent(tokens []string, outputText string) bool {
-	if strings.TrimSpace(outputText) == "" || hasRedirectionToken(tokens) {
+func searchCommandCanExposeFileContent(raw string, tokens []string, outputText string) bool {
+	commands, ok := parseShellCommand(raw)
+	if strings.TrimSpace(outputText) == "" || !ok || slices.ContainsFunc(commands, func(command shellSimpleCommand) bool {
+		return len(command.redirects) != 0
+	}) {
 		return false
 	}
 	if searchOutputIsDiagnostic(tokens, outputText) {
@@ -779,7 +774,7 @@ func searchFileStepFromCommand(chain []chainSegment, outputText string, ws *work
 		if segment.cwdUncertain || segment.orGated || len(tokens) == 0 || !hasGrepLikeCommand(segment.raw, tokens) {
 			continue
 		}
-		if !searchCommandCanExposeFileContent(tokens, outputText) {
+		if !searchCommandCanExposeFileContent(segment.raw, tokens, outputText) {
 			continue
 		}
 		if filePath := explicitSingleSearchFile(tokens, outputText, ws); filePath != "" && !slices.Contains(files, filePath) {

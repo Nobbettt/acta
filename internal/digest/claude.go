@@ -140,10 +140,15 @@ type claudeParseState struct {
 	// Usage summed across distinct assistant messages, for the no-result
 	// fallback. Deduped by message id because a message's content blocks can
 	// arrive on separate stream lines that repeat the same usage.
-	usageSeen   map[string]bool
-	haveUsage   bool
-	summedUsage TokenUsage
-	finalized   bool
+	// commandObservations holds the filesystem fingerprint taken when a shell
+	// command STARTED, keyed by tool_use id. The before-state exists only while
+	// the run is live, so it has to be captured here and compared when the
+	// result arrives.
+	commandObservations map[string]map[string]pathState
+	usageSeen           map[string]bool
+	haveUsage           bool
+	summedUsage         TokenUsage
+	finalized           bool
 }
 
 func (s *claudeParseState) addUsage(msgID string, u *ClaudeUsage) {
@@ -403,6 +408,7 @@ func (s *claudeParseState) consumeToolUse(e *Event, content *ClaudeContent) {
 		if inputDecoded {
 			e.Command = strings.Trim(input.Command, " \t\n")
 		}
+		s.observeCommandStart(content.ID, e.Command)
 		s.d.Metrics.Commands++
 	case claudeEditTools[content.Name]:
 		e.Kind = KindFileEdit
@@ -436,6 +442,39 @@ func (s *claudeParseState) consumeToolUse(e *Event, content *ClaudeContent) {
 	}
 	if content.ID != "" {
 		s.pending[content.ID] = len(s.d.Timeline)
+	}
+}
+
+// observeCommandStart fingerprints the paths a command names, before it runs.
+func (s *claudeParseState) observeCommandStart(id, command string) {
+	if s == nil || id == "" || command == "" {
+		return
+	}
+	before := observePathStates(s.ws, commandObservationCandidates(command))
+	if len(before) == 0 {
+		return
+	}
+	if s.commandObservations == nil {
+		s.commandObservations = map[string]map[string]pathState{}
+	}
+	s.commandObservations[id] = before
+}
+
+// observeCommandEnd re-fingerprints those paths and records what actually
+// changed. The result is evidence rather than prediction, so an event carrying
+// it can say what the command did instead of what its text suggested.
+func (s *claudeParseState) observeCommandEnd(id string, e *Event) {
+	if s == nil || id == "" || e == nil {
+		return
+	}
+	before, ok := s.commandObservations[id]
+	if !ok {
+		return
+	}
+	delete(s.commandObservations, id)
+	after := observePathStates(s.ws, sortedObservedPaths(before))
+	for _, effect := range diffPathStates(before, after) {
+		e.ObservedEffects = append(e.ObservedEffects, ObservedEffect{Path: effect.path, Kind: effect.kind})
 	}
 }
 
@@ -488,6 +527,9 @@ func (s *claudeParseState) consumeToolResult(content *ClaudeContent, toolUseResu
 		if code, ok := ExitCodeFromToolUseResult(toolUseResult); ok {
 			e.ExitCode = &code
 		}
+		// Look before classifying: what the filesystem shows outranks what the
+		// command text suggests.
+		s.observeCommandEnd(content.ToolUseID, e)
 	}
 	if e.Kind == KindFileEdit {
 		e.fileSnapshots = s.writeTracker.finish(e.ID, e.Files)

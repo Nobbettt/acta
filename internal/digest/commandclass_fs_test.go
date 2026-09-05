@@ -184,13 +184,11 @@ func TestClassifyFS(t *testing.T) {
 		{"rm as an echo argument", "echo rm -rf /", true, nil},
 		{"rm with unbalanced quotes", `rm "src/old.go`, true, nil},
 		{"rm of an unexpanded glob", "rm build/*.o", true, nil},
-		// shellTokens has no $()/backtick awareness, so a command substitution
-		// tokenizes into plain words. Without `(`/`)`/backtick in the reject set,
-		// the non-`$` half of each of these reads as an ordinary path and gets
-		// credited as one that was deleted, when nothing was.
-		{"rm of a command substitution credits nothing", "rm $(cat list.txt)", true, nil},
-		{"rm of a substitution glued to a path credits nothing", "rm dist/$(date +%F).log", true, nil},
-		{"rm of a backtick substitution credits nothing", "rm `cat list.txt`", true, nil},
+		// The parser can recognise the outer rm while withholding the dynamic
+		// value. It may credit the action, but not a target or file mutation.
+		{"rm of a command substitution withholds its path", "rm $(cat list.txt)", true, &commandFacts{categories: []string{"fs.delete"}}},
+		{"rm of a substitution glued to a path withholds its path", "rm dist/$(date +%F).log", true, &commandFacts{categories: []string{"fs.delete"}}},
+		{"rm of a backtick substitution withholds its path", "rm `cat list.txt`", true, &commandFacts{categories: []string{"fs.delete"}}},
 		// The trailing paren of `(cd frontend && rm -rf dist)` arrives glued to
 		// "dist" in this segment's own token list; it must not be credited as
 		// part of the path either.
@@ -644,7 +642,7 @@ func TestClassifyFS(t *testing.T) {
 			categories: []string{"fs.patch"},
 		}},
 		{"patch empty stdin applies nothing", "patch victim.txt < /dev/null", true, nil},
-		{"patch from a heredoc", "patch -p1 <<'EOF'", true, &commandFacts{
+		{"patch from a heredoc", "patch -p1 <<'EOF'\npatch\nEOF", true, &commandFacts{
 			categories: []string{"fs.patch"},
 		}},
 		{"git apply names the patch not the files", "git apply fix.diff", true, &commandFacts{
@@ -717,10 +715,6 @@ func TestFSOperands(t *testing.T) {
 	}{
 		{"flags dropped", "rm", []string{"-rf", "build"}, []string{"build"}, false},
 		{"end of flags", "rm", []string{"--", "-weird.txt"}, []string{"-weird.txt"}, false},
-		{"stdin redirect ends the operands", "patch", []string{"foo.go", "<", "fix.diff"}, []string{"foo.go"}, true},
-		{"attached redirect", "patch", []string{"foo.go", "<fix.diff"}, []string{"foo.go"}, true},
-		{"heredoc", "patch", []string{"-p1", "<<EOF"}, nil, true},
-		{"stderr redirect", "rm", []string{"a.txt", "2>", "/dev/null"}, []string{"a.txt"}, true},
 		{"no arguments", "rm", nil, nil, false},
 		{"trailing ampersand backgrounds the command", "rm", []string{"-rf", "node_modules", "&"}, []string{"node_modules"}, false},
 		{"pipe hands off to the next command", "rm", []string{"old.log", "|", "tee", "cleanup.log"}, []string{"old.log"}, false},
@@ -749,6 +743,29 @@ func TestFSOperands(t *testing.T) {
 				t.Errorf("fsOperands(%q, %q) = %q,%v want %q,%v", c.verb, c.args, got, redirected, c.want, c.redirected)
 			}
 		})
+	}
+}
+
+func TestShellParserRemovesRedirectionsBeforeFSOperands(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		verb    string
+		want    []string
+	}{
+		{"patch foo.go < fix.diff", "patch", []string{"foo.go"}},
+		{"patch foo.go <fix.diff", "patch", []string{"foo.go"}},
+		{"patch -p1 <<EOF\npatch\nEOF", "patch", nil},
+		{"rm a.txt 2>/dev/null", "rm", []string{"a.txt"}},
+	} {
+		command, ok := firstShellCommand(tc.command)
+		if !ok || len(command.redirects) == 0 {
+			t.Fatalf("parseShellCommand(%q) found no redirect", tc.command)
+		}
+		words := command.wordTexts()
+		args := words[len(strings.Fields(tc.verb)):]
+		if got, _ := fsOperands(tc.verb, args); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("fsOperands(%q) = %q, want %q", tc.command, got, tc.want)
+		}
 	}
 }
 
@@ -854,7 +871,6 @@ func TestFSOwnArgs(t *testing.T) {
 		{"pipe truncates the tail", []string{"a.txt", "b.txt", "|", "xargs", "-t", "rm"}, []string{"a.txt", "b.txt"}},
 		{"pipe-with-stderr truncates the tail", []string{"a.txt", "|&", "tee", "-t"}, []string{"a.txt"}},
 		{"background truncates the tail", []string{"a.txt", "&", "-t", "later"}, []string{"a.txt"}},
-		{"redirect truncates the tail", []string{"foo.go", "<", "fix.diff", "|", "grep", "--stat"}, []string{"foo.go"}},
 		{"no arguments", nil, nil},
 	}
 	for _, c := range cases {

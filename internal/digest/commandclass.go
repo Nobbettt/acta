@@ -36,9 +36,10 @@ type ShellMutation struct {
 // either way a classifier must treat that as "cannot parse", never as a guess.
 type commandSegment struct {
 	raw     string   // this segment of the command
-	tokens  []string // tokensForSegment(raw), may be empty
-	command string   // command text used to prove this segment executed
-	output  string   // see trustedOutput: empty unless the command is one segment
+	tokens  []string // parser words for the outer command, may be empty
+	shell   shellSimpleCommand
+	command string // command text used to prove this segment executed
+	output  string // see trustedOutput: empty unless the command is one segment
 	// outputTrusted separates "this command's output is readable and was
 	// empty" from "this command has no readable output at all". Only the first
 	// lets a classifier read silence as proof that nothing happened.
@@ -53,6 +54,21 @@ type commandSegment struct {
 	// shell chain proves it. cwdKnown distinguishes that from a dynamic cd.
 	cwd      string
 	cwdKnown bool
+}
+
+// parsedCommandSegment keeps direct classifier callers on the same parsed
+// representation as classifyCommand. The zero shell value is only used by
+// focused tests and older internal helpers that supplied raw tokenizer words.
+func parsedCommandSegment(segment commandSegment) (commandSegment, bool) {
+	if len(segment.shell.words) != 0 || len(segment.shell.assigns) != 0 || len(segment.shell.redirects) != 0 {
+		return segment, true
+	}
+	tokens, shell, ok := shellCommandTokens(segment.raw)
+	if !ok {
+		return commandSegment{}, false
+	}
+	segment.tokens, segment.shell = tokens, shell
+	return segment, true
 }
 
 // trustedOutput is the output a classifier may draw a fact from. Output belongs
@@ -205,6 +221,86 @@ type commandChainRaw struct {
 	executed     bool
 }
 
+// shellBacktickEnd and shellCommandSubstitutionEnd keep substitutions opaque
+// while the chain splitter finds outer control operators. Their commands have
+// their own status, so splitting through them would let an inner apparent
+// command borrow the status reported for the outer command.
+func shellBacktickEnd(command string, start int) (int, bool) {
+	for i := start + 1; i < len(command); i++ {
+		if command[i] == '\\' && i+1 < len(command) {
+			i++
+			continue
+		}
+		if command[i] == '`' {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+func shellCommandSubstitutionEnd(command string, start int) (int, bool) {
+	depth := 0
+	inSingle, inDouble := false, false
+	for i := start + 1; i < len(command); i++ {
+		switch c := command[i]; {
+		case c == '\\' && !inSingle && i+1 < len(command):
+			i++
+		case c == '\'' && !inDouble:
+			inSingle = !inSingle
+		case c == '"' && !inSingle:
+			inDouble = !inDouble
+		case c == '`' && !inSingle:
+			end, ok := shellBacktickEnd(command, i)
+			if !ok {
+				return 0, false
+			}
+			i = end
+		case !inSingle && c == '(':
+			depth++
+		case !inSingle && c == ')':
+			depth--
+			if depth == 0 {
+				return i, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func shellParameterExpansionEnd(command string, start int) (int, bool) {
+	depth := 0
+	for i := start + 1; i < len(command); i++ {
+		switch command[i] {
+		case '\\':
+			if i+1 < len(command) {
+				i++
+			}
+		case '`':
+			end, ok := shellBacktickEnd(command, i)
+			if !ok {
+				return 0, false
+			}
+			i = end
+		case '$':
+			if i+1 < len(command) && command[i+1] == '(' {
+				end, ok := shellCommandSubstitutionEnd(command, i)
+				if !ok {
+					return 0, false
+				}
+				i = end
+			}
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i, true
+			}
+		}
+	}
+	return 0, false
+}
+
 // splitRawChain is splitCommandSegments plus the separator it finds but
 // discards — needed to tell a `||`-adjacent segment from any other. Unlike a
 // plain regex split, it tracks single/double-quote and backslash state the
@@ -262,14 +358,28 @@ func splitRawChain(command string) ([]commandChainRaw, bool) {
 			inDouble = !inDouble
 			wordStart = false
 		case c == '`' && !inSingle:
-			// A command substitution has its own control flow and exit statuses.
-			// None of its apparent commands may borrow the outer command's status.
-			return nil, false
+			end, ok := shellBacktickEnd(command, i)
+			if !ok {
+				return nil, false
+			}
+			wordStart, i = false, end
+		case c == '$' && !inSingle && i+1 < len(command) && command[i+1] == '(':
+			end, ok := shellCommandSubstitutionEnd(command, i)
+			if !ok {
+				return nil, false
+			}
+			wordStart, i = false, end
 		case c == '$' && !inSingle && i+1 < len(command) && command[i+1] == '{':
-			// Parameter expansions have their own quoting and separator grammar.
-			// Double quotes retain that grammar, so apparent commands inside one
-			// prove nothing until it is modelled.
-			return nil, false
+			end, ok := shellParameterExpansionEnd(command, i)
+			if !ok {
+				return nil, false
+			}
+			if strings.Contains(command[i:end+1], ":?") {
+				// `${name:?message}` can terminate the shell before any later
+				// command runs. Its outer status cannot prove that later work.
+				return nil, false
+			}
+			wordStart, i = false, end
 		case inSingle || inDouble:
 			// inside a quote: none of the separators below count
 		case c == '#' && wordStart:
@@ -542,6 +652,9 @@ func splitCommandChainForShell(command string, returnTerminates bool) []chainSeg
 	if len(command) > maxCommandTokenizationChars {
 		return []chainSegment{{raw: command}}
 	}
+	if _, ok := parseShellCommand(command); !ok {
+		return nil
+	}
 	raw, valid := splitRawChain(command)
 	if !valid {
 		return nil
@@ -553,7 +666,7 @@ func splitCommandChainForShell(command string, returnTerminates bool) []chainSeg
 	proven := true
 	cwdUncertain := false
 	for i, r := range raw {
-		tokens := tokensForSegment(r.raw)
+		tokens, _, _ := shellCommandTokens(r.raw)
 		if changesWorkingDirectory(tokens) || len(raw) > 1 && parentShellEnvironmentMutation(tokens) {
 			cwdUncertain = true
 		}
@@ -594,12 +707,21 @@ func commandSyntaxModelled(raw []commandChainRaw) bool {
 		if r.subshell {
 			return false
 		}
-		tokens := tokensForSegment(r.raw)
+		tokens, _, ok := shellCommandTokens(r.raw)
+		if !ok {
+			// The full command was parsed before heredoc bodies were stripped.
+			// A header alone is intentionally incomplete, so use its words only
+			// for the shell-control gate; redirection meaning remains parser-only.
+			tokens = tokensForSegment(r.raw)
+			if len(tokens) == 0 {
+				return false
+			}
+		}
 		leading := execLeadingTokens(tokens)
 		if len(tokens) == 0 || len(tokens) > 1 && slices.Contains(tokens, "set") ||
 			containsShellControlCommand(tokens, "trap", "shopt", "logout") ||
 			len(leading) > 0 && (slices.Contains(unmodelledShellWords, leading[0]) ||
-				strings.HasSuffix(leading[0], "()")) || !redirectionsComplete(tokens) {
+				strings.HasSuffix(leading[0], "()")) {
 			return false
 		}
 	}
@@ -615,247 +737,11 @@ func parentShellEnvironmentMutation(tokens []string) bool {
 		switch {
 		case execIsAssignment(tokens[i]):
 			foundAssignment = true
-		case isRedirection(tokens[i]) && i+1 < len(tokens):
-			i++
 		default:
 			return false
 		}
 	}
 	return foundAssignment
-}
-
-func redirectionsComplete(tokens []string) bool {
-	for i := 0; i < len(tokens); i++ {
-		if !isRedirection(tokens[i]) {
-			continue
-		}
-		if i+1 == len(tokens) || isRedirection(tokens[i+1]) || slices.Contains(
-			[]string{"|", "|&", "&&", "||", ";", "&"}, tokens[i+1],
-		) {
-			return false
-		}
-		if tokens[i+1] == "" && !strings.Contains(tokens[i], "<<<") {
-			return false
-		}
-		i++ // the redirection word is not another operator
-	}
-	return true
-}
-
-// commandRedirection records the file descriptor a shell redirection changes.
-// Here-documents and here-strings carry data rather than open target as a file,
-// while descriptor redirects name another descriptor rather than a path.
-type commandRedirection struct {
-	fd         int
-	reads      bool
-	writes     bool
-	target     string
-	data       bool
-	descriptor bool
-}
-
-// commandRedirections is the single shell-redirection model used by retrieval
-// and command classification. Treating every '<' or '>' alike would turn a
-// heredoc delimiter into a filename or mistake stderr for captured stdout.
-func commandRedirections(tokens []string) []commandRedirection {
-	var redirects []commandRedirection
-	for i, token := range tokens {
-		fds, reads, writes, data, descriptor, ok := commandRedirectionOperator(token)
-		if !ok || i+1 == len(tokens) {
-			continue
-		}
-		for _, fd := range fds {
-			redirects = append(redirects, commandRedirection{
-				fd:         fd,
-				reads:      reads,
-				writes:     writes,
-				target:     tokens[i+1],
-				data:       data,
-				descriptor: descriptor,
-			})
-		}
-	}
-	return redirects
-}
-
-// commandWords omits redirection operators and their targets, which are never
-// command operands, and stops before a downstream command-control operator.
-func commandWords(tokens []string) []string {
-	words := make([]string, 0, len(tokens))
-	for i := 0; i < len(tokens); i++ {
-		if slices.Contains([]string{"|", "|&", "&&", "||", ";", "&"}, tokens[i]) {
-			return words
-		}
-		if isRedirection(tokens[i]) {
-			if i+1 < len(tokens) {
-				i++
-			}
-			continue
-		}
-		words = append(words, tokens[i])
-	}
-	return words
-}
-
-func commandStdoutRedirected(tokens []string) bool {
-	return slices.ContainsFunc(commandRedirections(tokens), func(redirect commandRedirection) bool {
-		return redirect.fd == 1 && redirect.writes
-	})
-}
-
-// commandRawRedirections preserves quote context that shellTokens deliberately
-// discards. A quoted '>' is an argument, not a redirect; inventing a stdout
-// redirect from it would make readable silence look unknowable.
-func commandRawRedirections(raw string) []commandRedirection {
-	var redirects []commandRedirection
-	quote, substitutions := byte(0), 0
-	backtick := false
-	for i := 0; i < len(raw); i++ {
-		switch raw[i] {
-		case '\\':
-			if quote != '\'' && i+1 < len(raw) {
-				i++
-			}
-		case '\'', '"':
-			switch quote {
-			case 0:
-				quote = raw[i]
-			case raw[i]:
-				quote = 0
-			}
-		case '`':
-			if quote != '\'' {
-				backtick = !backtick
-			}
-		case '$':
-			if !backtick && quote != '\'' && i+1 < len(raw) && raw[i+1] == '(' {
-				substitutions++
-				i++
-			}
-		case '(':
-			if !backtick && substitutions != 0 {
-				substitutions++
-			}
-		case ')':
-			if !backtick && substitutions != 0 {
-				substitutions--
-			}
-		case '>':
-			if backtick || quote != 0 || substitutions != 0 {
-				continue
-			}
-			if i > 0 && raw[i-1] == '&' {
-				fd, start := 1, i-1
-				for start > 0 && raw[start-1] >= '0' && raw[start-1] <= '9' {
-					start--
-				}
-				if start < i-1 && (start == 0 || strings.ContainsRune(" \t\n;&|()<>", rune(raw[start-1]))) {
-					fd, _ = strconv.Atoi(raw[start : i-1])
-					redirects = append(redirects, commandRedirection{fd: fd, writes: true, descriptor: true})
-					continue
-				}
-				redirects = append(redirects, commandRedirection{fd: 1, writes: true}, commandRedirection{fd: 2, writes: true})
-				continue
-			}
-			if i > 0 && raw[i-1] == '<' {
-				fd, start := 0, i-1
-				for start > 0 && raw[start-1] >= '0' && raw[start-1] <= '9' {
-					start--
-				}
-				if start < i-1 && (start == 0 || strings.ContainsRune(" \t\n;&|()<>", rune(raw[start-1]))) {
-					fd, _ = strconv.Atoi(raw[start : i-1])
-				}
-				redirects = append(redirects, commandRedirection{fd: fd, reads: true, writes: true})
-				continue
-			}
-			fd, start := 1, i
-			for start > 0 && raw[start-1] >= '0' && raw[start-1] <= '9' {
-				start--
-			}
-			if start < i && (start == 0 || strings.ContainsRune(" \t\n;&|()<>", rune(raw[start-1]))) {
-				fd, _ = strconv.Atoi(raw[start:i])
-			}
-			redirects = append(redirects, commandRedirection{fd: fd, writes: true})
-		}
-	}
-	return redirects
-}
-
-func commandRawStdoutRedirected(raw string) bool {
-	return slices.ContainsFunc(commandRawRedirections(raw), func(redirect commandRedirection) bool {
-		return redirect.fd == 1 && redirect.writes
-	})
-}
-
-func commandStdinRedirection(tokens []string) (commandRedirection, bool) {
-	var stdin commandRedirection
-	found := false
-	for _, redirect := range commandRedirections(tokens) {
-		if redirect.fd == 0 && redirect.reads {
-			stdin, found = redirect, true
-		}
-	}
-	return stdin, found
-}
-
-func commandRedirectionOperator(token string) (fds []int, reads, writes, data, descriptor, ok bool) {
-	operator := token
-	fd := -1
-	for i, r := range operator {
-		if r < '0' || r > '9' {
-			if i != 0 {
-				parsed, err := strconv.Atoi(operator[:i])
-				if err != nil {
-					return nil, false, false, false, false, false
-				}
-				fd = parsed
-			}
-			operator = operator[i:]
-			break
-		}
-	}
-	if operator == token && strings.Trim(token, "0123456789") == "" {
-		return nil, false, false, false, false, false
-	}
-	if strings.HasPrefix(operator, "&>") {
-		return []int{1, 2}, false, true, false, false, true
-	}
-	if strings.HasPrefix(operator, "<<<") {
-		return []int{defaultRedirectionFD(fd, 0)}, true, false, true, false, true
-	}
-	if strings.HasPrefix(operator, "<<") {
-		return []int{defaultRedirectionFD(fd, 0)}, true, false, true, false, true
-	}
-	if strings.HasPrefix(operator, "<&") {
-		return []int{defaultRedirectionFD(fd, 0)}, true, false, false, true, true
-	}
-	if strings.HasPrefix(operator, "<>") {
-		return []int{defaultRedirectionFD(fd, 0)}, true, true, false, false, true
-	}
-	if strings.HasPrefix(operator, "<") {
-		return []int{defaultRedirectionFD(fd, 0)}, true, false, false, false, true
-	}
-	if strings.HasPrefix(operator, ">&") {
-		return []int{defaultRedirectionFD(fd, 1)}, false, true, false, true, true
-	}
-	if strings.HasPrefix(operator, ">") {
-		return []int{defaultRedirectionFD(fd, 1)}, false, true, false, false, true
-	}
-	return nil, false, false, false, false, false
-}
-
-func defaultRedirectionFD(fd, defaultFD int) int {
-	if fd >= 0 {
-		return fd
-	}
-	return defaultFD
-}
-
-// isRedirection keeps the existing command-boundary callers on the same
-// grammar as commandRedirections instead of duplicating operator detection.
-func isRedirection(token string) bool {
-	_, _, _, _, _, ok := commandRedirectionOperator(token)
-	return ok
 }
 
 type shellOutcome uint8
@@ -902,7 +788,7 @@ func pruneUnexecutedForShell(raw []commandChainRaw, returnTerminates bool) []com
 		}
 		r.executed = certain
 		out = append(out, r)
-		tokens := tokensForSegment(r.raw)
+		tokens, _, _ := shellCommandTokens(r.raw)
 		loadsParentShell := containsShellControlCommand(tokens, "eval", "source", ".")
 		if !certain {
 			mayHaveTerminated = mayHaveTerminated || loadsParentShell ||
@@ -937,9 +823,6 @@ func terminatesShellList(tokens []string, returnTerminates bool) bool {
 }
 
 func killSelfSIGKILL(tokens []string) bool {
-	tokens = commandWords(tokens)
-	// Redirection targets never reach kill as arguments. Treating one as a PID
-	// would either invent a self-kill or miss the one that really ran.
 	signal, pids, options := "", []string{}, true
 	for i := 0; i < len(tokens); i++ {
 		if !options {
@@ -1128,7 +1011,11 @@ func classifyCommand(command, outputText string, exitOK bool, ws *workspace) *co
 	gitWorkTree, gitWorkTreeKnown := "", false
 	for _, c := range chain {
 		segmentFacts := &commandFacts{}
-		tokens := tokensForSegment(c.raw)
+		tokens, shell, ok := shellCommandTokens(c.raw)
+		if !ok {
+			continue
+		}
+		baseTokens := append([]string(nil), tokens...)
 		if gitWorkTreeKnown {
 			leading := execLeadingTokens(tokens)
 			if len(leading) > 0 && path.Base(leading[0]) == "git" {
@@ -1142,6 +1029,7 @@ func classifyCommand(command, outputText string, exitOK bool, ws *workspace) *co
 		segment := commandSegment{
 			raw:           c.raw,
 			tokens:        tokens,
+			shell:         shell,
 			command:       executionCommand,
 			output:        output,
 			outputTrusted: len(chain) == 1,
@@ -1180,8 +1068,8 @@ func classifyCommand(command, outputText string, exitOK bool, ws *workspace) *co
 		segmentFacts.mutations = nil
 		facts.merge(segmentFacts)
 		facts.mutations = append(facts.mutations, mutations...)
-		cwd, cwdKnown = nextLiteralWorkingDirectory(tokensForSegment(c.raw), c.statusProven, cwd, cwdKnown)
-		gitWorkTree, gitWorkTreeKnown = nextLiteralGitWorkTree(tokensForSegment(c.raw), c.statusProven, gitWorkTree, gitWorkTreeKnown)
+		cwd, cwdKnown = nextLiteralWorkingDirectory(baseTokens, c.statusProven, cwd, cwdKnown)
+		gitWorkTree, gitWorkTreeKnown = nextLiteralGitWorkTree(baseTokens, c.statusProven, gitWorkTree, gitWorkTreeKnown)
 	}
 	if facts.empty() {
 		return nil
@@ -1312,9 +1200,6 @@ func containsShellControlCommand(tokens []string, words ...string) bool {
 func shellStageStartsWith(tokens []string, words ...string) bool {
 	for len(tokens) > 0 {
 		tokens = execLeadingTokens(tokens)
-		for len(tokens) >= 2 && isRedirection(tokens[0]) {
-			tokens = tokens[2:]
-		}
 		if len(tokens) == 0 {
 			return false
 		}

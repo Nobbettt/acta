@@ -589,7 +589,7 @@ func TestSearchOutputNamesChildOf(t *testing.T) {
 	}
 }
 
-func TestCommandRawStdoutRedirected(t *testing.T) {
+func TestShellCommandStdoutCaptured(t *testing.T) {
 	for _, tc := range []struct {
 		raw  string
 		want bool
@@ -599,8 +599,12 @@ func TestCommandRawStdoutRedirected(t *testing.T) {
 		{"chmod -c 0600 file.txt 2>&1", false},
 		{"chmod -c 0600 file.txt &> changes.log", true},
 	} {
-		if got := commandRawStdoutRedirected(tc.raw); got != tc.want {
-			t.Fatalf("commandRawStdoutRedirected(%q) = %v, want %v", tc.raw, got, tc.want)
+		command, ok := firstShellCommand(tc.raw)
+		if !ok {
+			t.Fatalf("firstShellCommand(%q) failed", tc.raw)
+		}
+		if got := !command.stdoutCaptured(); got != tc.want {
+			t.Fatalf("stdout captured for %q = %v, want redirected %v", tc.raw, !got, tc.want)
 		}
 	}
 }

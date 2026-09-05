@@ -18,6 +18,11 @@ var fsInspectFlags = []string{"--check", "--dry-run", "--stat", "--numstat", "--
 // exited non-zero deleted no file — and so is a segment that would not
 // tokenize.
 func classifyFS(segment commandSegment) *commandFacts {
+	var ok bool
+	segment, ok = parsedCommandSegment(segment)
+	if !ok {
+		return nil
+	}
 	if !segment.exitOK || len(segment.tokens) == 0 {
 		return nil
 	}
@@ -53,10 +58,10 @@ func classifyFS(segment commandSegment) *commandFacts {
 		if scan.hasFlag(fsInspectFlags...) || verb == "patch" && scan.hasFlag("-C", "-v") {
 			return nil
 		}
-		if verb == "patch" && fsPatchInputIsEmpty(args) {
+		if verb == "patch" && fsPatchInputIsEmpty(args, segment.shell) {
 			return nil
 		}
-		if verb == "git apply" && fsGitApplyInputIsEmpty(args) {
+		if verb == "git apply" && fsGitApplyInputIsEmpty(args, segment.shell) {
 			return nil
 		}
 	}
@@ -108,6 +113,9 @@ func classifyFS(segment commandSegment) *commandFacts {
 	switch verb {
 	case "rm":
 		facts = fsDelete(operands, segment.ws, segment.cwdUncertain)
+		if facts == nil && fsHasExpandedOperand(segment.shell, operands) {
+			facts = &commandFacts{categories: []string{"fs.delete"}}
+		}
 	case "git rm":
 		// A dry run, or `--cached`/`--staged` (which only untracks the path —
 		// the file is still on disk), all assert a deletion that did not happen.
@@ -115,6 +123,9 @@ func classifyFS(segment commandSegment) *commandFacts {
 			return &commandFacts{categories: []string{"fs.delete"}}
 		}
 		facts = fsDelete(operands, segment.ws, segment.cwdUncertain)
+		if facts == nil && fsHasExpandedOperand(segment.shell, operands) {
+			facts = &commandFacts{categories: []string{"fs.delete"}}
+		}
 	case "mv":
 		facts = fsMove(ownArgs, operands, segment.ws, segment.cwdUncertain)
 	case "cp":
@@ -336,66 +347,67 @@ var fsFlagModels = map[string]commandFlagModel{
 	},
 }
 
-// fsOperands returns the non-flag arguments of a filesystem command and reports
-// whether it redirected a stream. `--` ends the flags, so `rm -- -oddly-named`
-// still credits the file; from the first redirection operator or control
-// operator on, an argument names a stream, a downstream command or the
-// background rather than this command's own operand. verb's entry in
-// fsFlagModels, if any, is consulted to skip the value of a flag that takes
-// one, so that value is never credited as an operand either.
+// fsOperands returns the non-flag arguments of a filesystem command. `--` ends
+// the flags, so `rm -- -oddly-named` still credits the file. The shell parser
+// has already removed redirections; verb's entry in fsFlagModels skips values
+// belonging to flags so they never become operands.
 func fsOperands(verb string, args []string) ([]string, bool) {
 	ownArgs := fsOwnArgs(args)
-	redirected := len(ownArgs) < len(args) && isRedirection(args[len(ownArgs)])
-	return scanCommandArgs(ownArgs, fsFlagModels[verb]).operands, redirected
+	return scanCommandArgs(ownArgs, fsFlagModels[verb]).operands, false
 }
 
 // fsOwnArgs returns the prefix of args that belongs to this verb's own
-// invocation, up to the same stopping points fsOperands already applies when
-// collecting operands: a redirection, or a pipe/control operator that hands
-// the rest of the line to a different command. A flag scan that skipped this
-// truncation would read a downstream stage's own flag as this verb's own —
+// invocation, up to a pipe/control operator that hands the rest of the line to
+// a different command. A flag scan that skipped this truncation would read a
+// downstream stage's own flag as this verb's own —
 // `cp a.txt b.txt | xargs -t rm` names xargs's -t, not cp's, so
 // fsCopyTargetFlag, classifyFS's patch inspect-flag scan and the git-rm
 // `--cached`/`--staged` check must all see this slice, never the raw one.
 func fsOwnArgs(args []string) []string {
 	for i, arg := range args {
-		if isRedirection(arg) || arg == "|" || arg == "|&" || arg == "&" {
+		if arg == "|" || arg == "|&" || arg == "&" {
 			return args[:i]
 		}
 	}
 	return args
 }
 
-// patchInputIsEmpty reports whether the final stdin source is known empty.
-// A later redirection wins, so recording an earlier /dev/null as a sticky fact
-// would suppress a patch that a following file redirect actually supplies.
-func patchInputIsEmpty(args []string) bool {
-	redirect, ok := commandStdinRedirection(args)
-	return ok && (redirect.data && redirect.target == "" || !redirect.data && !redirect.descriptor && redirect.target == "/dev/null")
+// patchInputIsEmpty reports whether the final stdin source is known empty. A
+// later redirect wins, so its parser-provided position is the only source that
+// may suppress a patch.
+func patchInputIsEmpty(command shellSimpleCommand) bool {
+	redirect, ok := command.inputRedirect()
+	if !ok {
+		return false
+	}
+	if redirect.heredoc {
+		return redirect.word.text == ""
+	}
+	file, ok := command.inputFile()
+	return ok && file == "/dev/null"
 }
 
 // fsPatchInputIsEmpty reports whether patch's effective input is empty. Its
 // native input option overrides stdin, and '-' is an explicit stdin alias.
-func fsPatchInputIsEmpty(args []string) bool {
-	words := commandWords(args)
+func fsPatchInputIsEmpty(args []string, command shellSimpleCommand) bool {
 	input, explicit := "", false
-	for _, flag := range scanCommandArgs(words, fsFlagModels["patch"]).flags {
+	for _, flag := range scanCommandArgs(args, fsFlagModels["patch"]).flags {
 		if flag.name == "-i" || flag.name == "--input" {
 			input, explicit = flag.value, true
 		}
 	}
 	if !explicit {
-		return patchInputIsEmpty(args)
+		return patchInputIsEmpty(command)
 	}
-	return input == "/dev/null" || input == "-" && patchInputIsEmpty(args)
+	return input == "/dev/null" || input == "-" && patchInputIsEmpty(command)
 }
 
 // fsGitApplyInputIsEmpty reports git apply's --allow-empty forms that prove
 // no patch was supplied. A dash operand reads stdin, while named files override
 // it; classifying either the heredoc delimiter or dash itself as a patch file
 // would invent an application that did not happen.
-func fsGitApplyInputIsEmpty(args []string) bool {
-	scan := scanCommandArgs(commandWords(args), nil)
+func fsGitApplyInputIsEmpty(args []string, command shellSimpleCommand) bool {
+	scan := scanCommandArgs(args, nil)
 	if !scan.hasFlag("--allow-empty") {
 		return false
 	}
@@ -409,7 +421,21 @@ func fsGitApplyInputIsEmpty(args []string) bool {
 			return false
 		}
 	}
-	return !stdin && len(scan.operands) != 0 || (stdin || len(scan.operands) == 0) && patchInputIsEmpty(args)
+	return !stdin && len(scan.operands) != 0 || (stdin || len(scan.operands) == 0) && patchInputIsEmpty(command)
+}
+
+// fsHasExpandedOperand distinguishes an expanded operand from an ordinary
+// glob: both lack a publishable path, but a successful rm still proves the
+// former performed a deletion somewhere.
+func fsHasExpandedOperand(command shellSimpleCommand, operands []string) bool {
+	for _, operand := range operands {
+		for _, word := range command.words {
+			if word.text == operand && !word.literal {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 type commandFlag struct {

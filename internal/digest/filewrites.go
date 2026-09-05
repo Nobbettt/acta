@@ -354,32 +354,34 @@ func filePatchIdentity(event Event) string {
 // restoreCapturedFilePatches keeps live-only write evidence when `acta
 // digest` replays the immutable provider stream after the workspace has
 // already reached its final state.
-func restoreCapturedFilePatches(ctx context.Context, runDir string, d *Digest) error {
+// The parsed prior digest is returned so its other live-only evidence can be
+// replayed too, without reading and validating the file a second time.
+func restoreCapturedFilePatches(ctx context.Context, runDir string, d *Digest) (*Digest, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	path := filepath.Join(runDir, "digest.json")
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		d.PatchPreservation.Status = "not_available"
-		return nil
+		return nil, nil
 	} else if err != nil {
 		d.PatchPreservation = PatchPreservation{Status: "invalid", Error: err.Error()}
-		return fmt.Errorf("inspect prior digest for write evidence: %w", err)
+		return nil, fmt.Errorf("inspect prior digest for write evidence: %w", err)
 	}
 	payload, err := securefile.ReadRegularFile(runDir, path, 64<<20)
 	if err != nil {
 		d.PatchPreservation = PatchPreservation{Status: "invalid", Error: err.Error()}
-		return fmt.Errorf("read prior digest for write evidence: %w", err)
+		return nil, fmt.Errorf("read prior digest for write evidence: %w", err)
 	}
 	var prior Digest
 	if err := json.Unmarshal(payload, &prior); err != nil {
 		d.PatchPreservation = PatchPreservation{Status: "invalid", Error: err.Error()}
-		return fmt.Errorf("parse prior digest for write evidence: %w", err)
+		return nil, fmt.Errorf("parse prior digest for write evidence: %w", err)
 	}
 	if err := prior.Validate(); err != nil {
 		err = fmt.Errorf("validate prior digest: %w", err)
 		d.PatchPreservation = PatchPreservation{Status: "invalid", Error: err.Error()}
-		return err
+		return nil, err
 	}
 	patches := map[string][]FilePatch{}
 	priorPatchEvents := 0
@@ -387,24 +389,24 @@ func restoreCapturedFilePatches(ctx context.Context, runDir string, d *Digest) e
 	identities := map[string]bool{}
 	for _, event := range prior.Timeline {
 		if err := ctx.Err(); err != nil {
-			return err
+			return nil, err
 		}
 		if len(event.FilePatches) > 0 {
 			if event.Kind != KindFileEdit {
-				return invalidPatchPreservation(d, "prior write evidence is attached to a non-file-edit event")
+				return &prior, invalidPatchPreservation(d, "prior write evidence is attached to a non-file-edit event")
 			}
 			identity := filePatchIdentity(event)
 			if identities[identity] {
-				return invalidPatchPreservation(d, "prior write evidence contains duplicate event identity "+identity)
+				return &prior, invalidPatchPreservation(d, "prior write evidence contains duplicate event identity "+identity)
 			}
 			identities[identity] = true
 			for _, evidence := range event.FilePatches {
 				if err := validatePreservedPatch(evidence); err != nil {
-					return invalidPatchPreservation(d, err.Error())
+					return &prior, invalidPatchPreservation(d, err.Error())
 				}
 				priorPatchBytes += len(evidence.Patch)
 				if priorPatchBytes > maxCapturedWorkspaceBytes {
-					return invalidPatchPreservation(d, "prior write evidence exceeds aggregate size limit")
+					return &prior, invalidPatchPreservation(d, "prior write evidence exceeds aggregate size limit")
 				}
 			}
 			patches[identity] = event.FilePatches
@@ -413,12 +415,12 @@ func restoreCapturedFilePatches(ctx context.Context, runDir string, d *Digest) e
 	}
 	if priorPatchEvents == 0 {
 		d.PatchPreservation.Status = "not_available"
-		return nil
+		return &prior, nil
 	}
 	preserved := 0
 	for index := range d.Timeline {
 		if err := ctx.Err(); err != nil {
-			return err
+			return nil, err
 		}
 		if retained := patches[filePatchIdentity(d.Timeline[index])]; len(retained) > 0 {
 			d.Timeline[index].FilePatches = retained
@@ -430,11 +432,70 @@ func restoreCapturedFilePatches(ctx context.Context, runDir string, d *Digest) e
 	d.PatchPreservation.Missing = priorPatchEvents - preserved
 	if preserved == priorPatchEvents {
 		d.PatchPreservation.Status = "preserved"
-		return nil
+		return &prior, nil
 	}
 	d.PatchPreservation.Status = "partial"
 	d.PatchPreservation.Error = fmt.Sprintf("%d of %d write-evidence event(s) could not be matched", priorPatchEvents-preserved, priorPatchEvents)
-	return errors.New(d.PatchPreservation.Error)
+	return &prior, errors.New(d.PatchPreservation.Error)
+}
+
+// restoreObservedEffects replays what the filesystem showed each shell command
+// doing. The observation can only be made while the run is live — the
+// before-state is gone by the time `acta digest` replays the stream — so it is
+// read back from the digest written then, exactly as captured patches are.
+// Without this a re-digest would silently fall back to predicting effects from
+// the command text and disagree with the live run.
+//
+// It is deliberately best-effort: a bundle captured before this existed simply
+// has nothing to replay, and the caller has already reported any hard problem
+// with the prior digest through PatchPreservation.
+func restoreObservedEffects(prior, d *Digest) {
+	if prior == nil || d == nil {
+		return
+	}
+	observed := map[string][]ObservedEffect{}
+	for _, event := range prior.Timeline {
+		if event.Kind != KindCommand || len(event.ObservedEffects) == 0 {
+			continue
+		}
+		if safe := validObservedEffects(event.ObservedEffects); len(safe) > 0 {
+			observed[filePatchIdentity(event)] = safe
+		}
+	}
+	if len(observed) == 0 {
+		return
+	}
+	for index := range d.Timeline {
+		if d.Timeline[index].Kind != KindCommand {
+			continue
+		}
+		if effects := observed[filePatchIdentity(d.Timeline[index])]; len(effects) > 0 {
+			d.Timeline[index].ObservedEffects = effects
+		}
+	}
+}
+
+// validObservedEffects drops anything a prior digest carries that this package
+// would never have written, so a hand-edited bundle cannot introduce an
+// absolute path or an unknown effect kind into the timeline.
+func validObservedEffects(effects []ObservedEffect) []ObservedEffect {
+	safe := make([]ObservedEffect, 0, len(effects))
+	for _, effect := range effects {
+		switch effect.Kind {
+		case "create", "delete", "modify":
+		default:
+			continue
+		}
+		path := filepath.ToSlash(strings.TrimSpace(effect.Path))
+		clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(path)))
+		if path == "" || clean != path || path == "." || path == ".." ||
+			strings.HasPrefix(path, "../") || filepath.IsAbs(filepath.FromSlash(path)) ||
+			strings.Contains(path, `\`) {
+			continue
+		}
+		safe = append(safe, ObservedEffect{Path: path, Kind: effect.Kind})
+	}
+	return safe
 }
 
 func invalidPatchPreservation(d *Digest, message string) error {

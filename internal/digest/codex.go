@@ -149,14 +149,18 @@ type codexParseState struct {
 	// item.started line/time per item id, so a completed event's observed_at
 	// joins the call's start (matching claude and the span start), not its end
 	// startTimes is populated only on the live stream path.
-	startLines     map[string]int
-	startTimes     map[string]time.Time
-	startedItems   map[string]CodexItem
-	seenThread     bool
-	seenTurn       bool
-	seenTerminal   bool
-	semanticIssues []string
-	finalized      bool
+	startLines   map[string]int
+	startTimes   map[string]time.Time
+	startedItems map[string]CodexItem
+	// commandObservations holds the filesystem fingerprint taken when a shell
+	// command STARTED, keyed by item id. The before-state exists only while the
+	// run is live, so it is captured here and compared when the item completes.
+	commandObservations map[string]map[string]pathState
+	seenThread          bool
+	seenTurn            bool
+	seenTerminal        bool
+	semanticIssues      []string
+	finalized           bool
 }
 
 func newCodexState(ws *workspace) *codexParseState {
@@ -166,6 +170,38 @@ func newCodexState(ws *workspace) *codexParseState {
 		startLines:   map[string]int{},
 		startTimes:   map[string]time.Time{},
 		startedItems: map[string]CodexItem{},
+	}
+}
+
+// observeCommandStart fingerprints the paths a command names, before it runs.
+func (st *codexParseState) observeCommandStart(id, command string) {
+	if st == nil || id == "" || command == "" {
+		return
+	}
+	before := observePathStates(st.ws, commandObservationCandidates(command))
+	if len(before) == 0 {
+		return
+	}
+	if st.commandObservations == nil {
+		st.commandObservations = map[string]map[string]pathState{}
+	}
+	st.commandObservations[id] = before
+}
+
+// observeCommandEnd re-fingerprints those paths and records what actually
+// changed, so the event carries evidence rather than a prediction.
+func (st *codexParseState) observeCommandEnd(id string, e *Event) {
+	if st == nil || id == "" || e == nil {
+		return
+	}
+	before, ok := st.commandObservations[id]
+	if !ok {
+		return
+	}
+	delete(st.commandObservations, id)
+	after := observePathStates(st.ws, sortedObservedPaths(before))
+	for _, effect := range diffPathStates(before, after) {
+		e.ObservedEffects = append(e.ObservedEffects, ObservedEffect{Path: effect.path, Kind: effect.kind})
 	}
 }
 
@@ -185,6 +221,9 @@ func (st *codexParseState) consume(event *CodexEvent, lineNo int, at time.Time) 
 			}
 			if event.Item.Type == "file_change" {
 				st.writeTracker.start(event.Item.ID, codexChangePaths(event.Item, st.ws))
+			}
+			if event.Item.Type == "command_execution" {
+				st.observeCommandStart(event.Item.ID, event.Item.Command)
 			}
 		}
 		return
@@ -310,6 +349,11 @@ func (st *codexParseState) consume(event *CodexEvent, lineNo int, at time.Time) 
 		if e.Kind == KindFileEdit {
 			st.writeTracker.assumeMissing(item.ID, codexAddedPaths(item, st.ws))
 			e.fileSnapshots = st.writeTracker.finish(item.ID, e.Files)
+		}
+		if e.Kind == KindCommand {
+			// Look before classifying: what the filesystem shows outranks what
+			// the command text suggests.
+			st.observeCommandEnd(item.ID, &e)
 		}
 		st.d.appendEvent(e)
 	}

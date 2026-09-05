@@ -110,42 +110,47 @@ type FilePatch struct {
 }
 
 type Event struct {
-	Kind            string                 `json:"kind"`
-	ProviderEvent   string                 `json:"provider_event,omitempty"`
-	ID              string                 `json:"id,omitempty"`
-	ParentID        string                 `json:"parent_id,omitempty"`
-	ThreadID        string                 `json:"thread_id,omitempty"`
-	SessionID       string                 `json:"session_id,omitempty"`
-	TaskID          string                 `json:"task_id,omitempty"`
-	Phase           string                 `json:"phase,omitempty"`
-	Status          string                 `json:"status,omitempty"`
-	Visibility      string                 `json:"visibility,omitempty"`
-	ObservedAt      *time.Time             `json:"observed_at,omitempty"`
-	CompletedAt     *time.Time             `json:"completed_at,omitempty"`
-	Tool            string                 `json:"tool,omitempty"`
-	Server          string                 `json:"server,omitempty"`
-	Input           json.RawMessage        `json:"input,omitempty"`
-	InputChars      int                    `json:"input_chars,omitempty"`
-	InputTruncated  bool                   `json:"input_truncated,omitempty"`
-	Result          json.RawMessage        `json:"result,omitempty"`
-	ResultChars     int                    `json:"result_chars,omitempty"`
-	ResultTruncated bool                   `json:"result_truncated,omitempty"`
-	Command         string                 `json:"command,omitempty"`
-	ExitCode        *int                   `json:"exit_code,omitempty"`
-	IsError         bool                   `json:"is_error,omitempty"`
-	ErrorMessage    string                 `json:"error_message,omitempty"`
-	Output          string                 `json:"output,omitempty"`
-	OutputChars     int                    `json:"output_chars,omitempty"`
-	OutputTruncated bool                   `json:"output_truncated,omitempty"`
-	Text            string                 `json:"text,omitempty"`
-	TextChars       int                    `json:"text_chars,omitempty"`
-	TextTruncated   bool                   `json:"text_truncated,omitempty"`
-	Query           string                 `json:"query,omitempty"`
-	Action          json.RawMessage        `json:"action,omitempty"`
-	Files           []string               `json:"files,omitempty"`
-	Categories      []string               `json:"categories,omitempty"`
-	Targets         []CommandTarget        `json:"targets,omitempty"`
-	ShellMutations  []ShellMutation        `json:"shell_mutations,omitempty"`
+	Kind            string          `json:"kind"`
+	ProviderEvent   string          `json:"provider_event,omitempty"`
+	ID              string          `json:"id,omitempty"`
+	ParentID        string          `json:"parent_id,omitempty"`
+	ThreadID        string          `json:"thread_id,omitempty"`
+	SessionID       string          `json:"session_id,omitempty"`
+	TaskID          string          `json:"task_id,omitempty"`
+	Phase           string          `json:"phase,omitempty"`
+	Status          string          `json:"status,omitempty"`
+	Visibility      string          `json:"visibility,omitempty"`
+	ObservedAt      *time.Time      `json:"observed_at,omitempty"`
+	CompletedAt     *time.Time      `json:"completed_at,omitempty"`
+	Tool            string          `json:"tool,omitempty"`
+	Server          string          `json:"server,omitempty"`
+	Input           json.RawMessage `json:"input,omitempty"`
+	InputChars      int             `json:"input_chars,omitempty"`
+	InputTruncated  bool            `json:"input_truncated,omitempty"`
+	Result          json.RawMessage `json:"result,omitempty"`
+	ResultChars     int             `json:"result_chars,omitempty"`
+	ResultTruncated bool            `json:"result_truncated,omitempty"`
+	Command         string          `json:"command,omitempty"`
+	ExitCode        *int            `json:"exit_code,omitempty"`
+	IsError         bool            `json:"is_error,omitempty"`
+	ErrorMessage    string          `json:"error_message,omitempty"`
+	Output          string          `json:"output,omitempty"`
+	OutputChars     int             `json:"output_chars,omitempty"`
+	OutputTruncated bool            `json:"output_truncated,omitempty"`
+	Text            string          `json:"text,omitempty"`
+	TextChars       int             `json:"text_chars,omitempty"`
+	TextTruncated   bool            `json:"text_truncated,omitempty"`
+	Query           string          `json:"query,omitempty"`
+	Action          json.RawMessage `json:"action,omitempty"`
+	Files           []string        `json:"files,omitempty"`
+	Categories      []string        `json:"categories,omitempty"`
+	Targets         []CommandTarget `json:"targets,omitempty"`
+	ShellMutations  []ShellMutation `json:"shell_mutations,omitempty"`
+	// ObservedEffects is what the filesystem showed this command doing, taken
+	// while the run was live. It is recorded rather than recomputed so a
+	// re-digest of the same bundle reproduces it instead of describing whatever
+	// the workspace happens to look like afterwards.
+	ObservedEffects []ObservedEffect       `json:"observed_effects,omitempty"`
 	Changes         []FileMutation         `json:"changes,omitempty"`
 	Spans           map[string][]Span      `json:"spans,omitempty"`
 	ReadRanges      map[string][]ReadRange `json:"read_ranges,omitempty"`
@@ -164,6 +169,15 @@ type Event struct {
 	// localReasoningText is deliberately excluded from digest serialization.
 	// It exists only long enough to build the local normalized event stream.
 	localReasoningText string
+}
+
+// ObservedEffect is one workspace change the filesystem showed across a shell
+// command. Kind is create, delete or modify. Unlike a ShellMutation, which is
+// derived from the command text, this is evidence: it can miss an effect, but
+// it cannot describe one that did not happen.
+type ObservedEffect struct {
+	Path string `json:"path"`
+	Kind string `json:"kind"`
 }
 
 // LocalReasoningText returns provider-private reasoning for the local event
@@ -755,7 +769,8 @@ func FromRunDirWithOptions(ctx context.Context, runDir string, workspaceDir stri
 	// binary performing this projection, never to the historical producer.
 	d.Producer = runrecord.CurrentProducer()
 	markUnavailableFilePatches(d)
-	preserveErr := restoreCapturedFilePatches(ctx, runDir, d)
+	prior, preserveErr := restoreCapturedFilePatches(ctx, runDir, d)
+	restoreObservedEffects(prior, d)
 
 	// parse_errors (malformed lines) and a sidecar-read failure both leave a
 	// usable-but-incomplete digest. Surface either — so `acta digest` exits
