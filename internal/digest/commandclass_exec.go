@@ -1459,9 +1459,10 @@ func execStdoutRedirected(raw string) bool {
 				i++
 			}
 		case '\'', '"':
-			if quote == 0 {
+			switch quote {
+			case 0:
 				quote = raw[i]
-			} else if quote == raw[i] {
+			case raw[i]:
 				quote = 0
 			}
 		case '`':
