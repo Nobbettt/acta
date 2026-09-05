@@ -5,6 +5,8 @@ and Semantic Versioning. Dates use ISO 8601.
 
 ## Unreleased
 
+## v0.2.0 - 2026-09-05
+
 ### Added
 
 - Digest timeline entries and shell-command event payloads carry `categories`
@@ -14,6 +16,16 @@ and Semantic Versioning. Dates use ISO 8601.
   changes proven by a shell command rather than by an edit tool.
 - `digest.FromRunDirWithOptions` re-digests a bundle under the control-plane
   directory the run declared, so `control.access` reproduces offline.
+- Shell commands are parsed with a real shell grammar rather than scanned for
+  redirection characters, so a descriptor-qualified redirection, a here-document
+  delimiter and a here-string are each understood for what they are, and a word
+  containing an expansion is never published as a path.
+- Acta observes the workspace around a shell command and records what actually
+  changed as `observed_effects`, with `observation_status` distinguishing "the
+  filesystem was examined and nothing changed" from "nothing was examined".
+  A change the command text implied but the filesystem did not show no longer
+  publishes a path or a mutation. The observation is recorded rather than
+  recomputed, so re-digesting a bundle reproduces the original run.
 
 ### Changed
 
