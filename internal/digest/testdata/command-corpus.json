@@ -1195,14 +1195,9 @@
  {
   "command": "cp src/a.go archive/nested/..",
   "want_categories": [
-   "fs.create"
+   "workspace.escape"
   ],
-  "want_targets": [
-   {
-    "kind": "path",
-    "value": "archive/a.go"
-   }
-  ],
+  "want_targets": [],
   "want_mutations": [],
   "source": "review-r12-correctness"
  },
@@ -1351,26 +1346,10 @@
  {
   "command": "mv a.txt dir/sub/..",
   "want_categories": [
-   "fs.move"
+   "workspace.escape"
   ],
-  "want_targets": [
-   {
-    "kind": "path",
-    "value": "a.txt"
-   },
-   {
-    "kind": "path",
-    "value": "dir/a.txt"
-   }
-  ],
-  "want_mutations": [
-   {
-    "kind": "move",
-    "path": "",
-    "from": "a.txt",
-    "to": "dir/a.txt"
-   }
-  ],
+  "want_targets": [],
+  "want_mutations": [],
   "source": "review-r14-correctness"
  },
  {
@@ -3987,8 +3966,8 @@
   "want_categories": [],
   "want_targets": [],
   "want_mutations": [],
- "source": "review-r28-informational-read",
- "output": "Usage: cat [OPTION]... [FILE]...\n"
+  "source": "review-r28-informational-read",
+  "output": "Usage: cat [OPTION]... [FILE]...\n"
  },
  {
   "command": "builtin cd /tmp && chmod 600 victim.txt",
@@ -4010,5 +3989,140 @@
    "want_targets": [],
    "want_mutations": []
   }
+ },
+ {
+  "command": "/bin/sh -lc 'command cat --help .env.production'",
+  "want_categories": [],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r29-WWW",
+  "output": "Usage: cat [OPTION]... [FILE]...\n"
+ },
+ {
+  "command": "git remote -v",
+  "want_categories": [
+   "vcs.provenance"
+  ],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r30-vcs-remote",
+  "output": "origin\t/tmp/cache@sk-live-secret.example:repo (fetch)\norigin\t/tmp/cache@sk-live-secret.example:repo (push)\n"
+ },
+ {
+  "command": "brew install homebrew/core/wget",
+  "want_categories": [
+   "package.install"
+  ],
+  "want_targets": [
+   {
+    "kind": "package",
+    "value": "homebrew/core/wget"
+   }
+  ],
+  "want_mutations": [],
+  "source": "review-r30-package-name"
+ },
+ {
+  "command": "sed .env input.txt",
+  "want_categories": [],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r30-sed-program",
+  "output": "sed: invalid command code .\n",
+  "failure": {
+   "want_categories": [],
+   "want_targets": [],
+   "want_mutations": []
+  }
+ },
+ {
+  "command": "/bin/zsh -lc 'kill -s KILL $$; curl https://example.com'",
+  "want_categories": [],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r30-self-sigkill",
+  "failure": {
+   "want_categories": [],
+   "want_targets": [],
+   "want_mutations": []
+  }
+ },
+ {
+  "command": "git apply --allow-empty < /dev/null",
+  "want_categories": [],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r30-empty-patch"
+ },
+ {
+  "command": "cp -Hn source.txt dest.txt",
+  "want_categories": [],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r30-cp-no-clobber-cluster"
+ },
+ {
+  "command": "/bin/zsh -lc 'kill -s 9 $$; curl https://example.com'",
+  "want_categories": [],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r30-self-sigkill-number"
+ },
+ {
+  "command": "/bin/zsh -lc 'kill -SIGKILL $$; curl https://example.com'",
+  "want_categories": [],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r30-self-sigkill-name"
+ },
+ {
+  "command": "/bin/zsh -lc 'kill -s TERM $$; curl https://example.com'",
+  "want_categories": [
+   "network.egress"
+  ],
+  "want_targets": [
+   {
+    "kind": "url",
+    "value": "https://example.com"
+   }
+  ],
+  "want_mutations": [],
+  "source": "review-r30-trappable-self-signal"
+ },
+ {
+  "command": "kill -9 $BASHPID && rm victim.txt",
+  "want_categories": [],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "round30-orchestrator",
+  "note": "$BASHPID is the current shell's pid, like $$: the shell ends before the delete runs"
+ },
+ {
+  "command": "kill -9 ${BASHPID} && rm victim.txt",
+  "want_categories": [],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "round30-orchestrator",
+  "note": "braced spelling of the same variable"
+ },
+ {
+  "command": "kill -9 12345 && rm victim.txt",
+  "want_categories": [
+   "fs.delete"
+  ],
+  "want_targets": [
+   {
+    "kind": "path",
+    "value": "victim.txt"
+   }
+  ],
+  "want_mutations": [
+   {
+    "kind": "delete",
+    "path": "victim.txt"
+   }
+  ],
+  "source": "round30-orchestrator",
+  "note": "killing another process does not end this shell, so the delete still runs"
  }
 ]

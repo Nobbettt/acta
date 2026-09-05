@@ -364,6 +364,18 @@ func TestWorkspaceRelPortableWindowsPath(t *testing.T) {
 	}
 }
 
+func TestNewWorkspaceDoesNotReadProcessWorkingDirectory(t *testing.T) {
+	first := t.TempDir()
+	second := t.TempDir()
+	t.Chdir(first)
+	a := newWorkspace("workspace")
+	t.Chdir(second)
+	b := newWorkspace("workspace")
+	if !reflect.DeepEqual(a, b) || a.root != "workspace" {
+		t.Fatalf("relative recorded workspace depends on process cwd: first=%+v second=%+v", a, b)
+	}
+}
+
 func TestWorkspaceRelRejectsAliasSuffixSymlinkEscape(t *testing.T) {
 	root := t.TempDir()
 	workspaceDir := filepath.Join(root, "repo")
@@ -390,6 +402,72 @@ func TestWorkspaceRelRejectsAliasSuffixSymlinkEscape(t *testing.T) {
 	if facts == nil || !reflect.DeepEqual(facts.categories, []string{"workspace.escape"}) ||
 		len(facts.targets) != 0 || len(facts.mutations) != 0 {
 		t.Fatalf("alias suffix escape = %+v, want workspace.escape only", facts)
+	}
+}
+
+// The command corpus cannot model symlink topology or post-command filesystem
+// state, so these path-resolution regressions use temporary workspaces.
+func TestWorkspaceRelRejectsSymlinkTraversalBeforeLexicalCleaning(t *testing.T) {
+	root := t.TempDir()
+	workspaceDir := filepath.Join(root, "workspace")
+	outsideDir := filepath.Join(root, "outside")
+	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideDir, filepath.Join(workspaceDir, "out")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceDir, "victim"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(
+		filepath.Join(workspaceDir, "victim"),
+		workspaceDir+string(filepath.Separator)+"out/../outside/moved",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	facts := classifyCommand("mv victim out/../outside/moved", "", true, newWorkspace(workspaceDir))
+	if facts == nil || !reflect.DeepEqual(facts.categories, []string{"workspace.escape"}) ||
+		len(facts.targets) != 0 || len(facts.mutations) != 0 {
+		t.Fatalf("symlink traversal move = %+v, want workspace.escape only", facts)
+	}
+}
+
+func TestWorkspaceRelWithholdsDescendantOfDeletedSymlink(t *testing.T) {
+	root := t.TempDir()
+	workspaceDir := filepath.Join(root, "workspace")
+	outsideDir := filepath.Join(root, "outside")
+	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideDir, filepath.Join(workspaceDir, "out")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outsideDir, "secret"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(workspaceDir, "out", "secret")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(workspaceDir, "out")); err != nil {
+		t.Fatal(err)
+	}
+
+	facts := classifyCommand("rm out/secret out", "", true, newWorkspace(workspaceDir))
+	want := &commandFacts{
+		categories: []string{"fs.delete"},
+		targets:    []CommandTarget{{Kind: "path", Value: "out"}},
+		mutations:  []ShellMutation{{Kind: "delete", Path: "out"}},
+	}
+	if !reflect.DeepEqual(facts, want) {
+		t.Fatalf("deleted symlink ancestor = %+v, want %+v", facts, want)
 	}
 }
 

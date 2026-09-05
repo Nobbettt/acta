@@ -466,22 +466,11 @@ func gitRemoteOrigin(raw string) string {
 		}
 		return scheme + "://" + host
 	}
-	// scp-like: [user@]host:path. Only this exact shape is accepted — a
-	// `user@host` prefix followed by a colon before the path — because the
-	// parser refuses anything more ambiguous. The host must look
-	// like a host (a dotted name or a bracketed address); otherwise this is
-	// some opaque spelling and no target is published at all.
-	at := strings.LastIndex(raw, "@")
-	if at < 0 {
-		return ""
-	}
-	rest := raw[at+1:]
-	colon := strings.Index(rest, ":")
-	if colon <= 0 {
-		return ""
-	}
-	host := rest[:colon]
-	if !strings.Contains(host, ".") || strings.ContainsAny(host, " /") {
+	// scp-like: [user@]host:path. Parse only the authority before the first
+	// path-separating colon; host-shaped fragments inside a local path prove
+	// nothing.
+	host := execHostFromSpec(raw)
+	if !validCommandHost(host) {
 		return ""
 	}
 	return host

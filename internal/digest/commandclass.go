@@ -699,8 +699,25 @@ func terminatesShellList(tokens []string) bool {
 			tokens = tokens[1:]
 		}
 	}
-	return len(tokens) == 3 && path.Base(tokens[0]) == "kill" &&
-		(tokens[1] == "-9" || tokens[1] == "-KILL") && tokens[2] == "$$"
+	// `$$` is the shell's own pid and `$BASHPID` is the current bash process's,
+	// which differ only inside a subshell; killing either ends the shell that
+	// would have run whatever follows.
+	if len(tokens) == 0 || path.Base(tokens[0]) != "kill" || !isShellSelfPid(tokens[len(tokens)-1]) {
+		return false
+	}
+	signal := ""
+	switch len(tokens) {
+	case 3:
+		signal = strings.TrimPrefix(tokens[1], "-")
+	case 4:
+		if tokens[1] != "-s" {
+			return false
+		}
+		signal = tokens[2]
+	default:
+		return false
+	}
+	return signal == "9" || signal == "KILL" || signal == "SIGKILL"
 }
 
 func knownShellOutcome(tokens []string) shellOutcome {
@@ -1082,4 +1099,10 @@ func classifyEventCommand(e *Event, outputText string, exitOK bool, ws *workspac
 	e.Categories = facts.categories
 	e.Targets = facts.targets
 	e.ShellMutations = facts.mutations
+}
+
+// isShellSelfPid reports whether tok names the pid of the shell running the
+// command, in either of the two spellings a shell provides for it.
+func isShellSelfPid(tok string) bool {
+	return tok == "$$" || tok == "$BASHPID" || tok == "${BASHPID}"
 }

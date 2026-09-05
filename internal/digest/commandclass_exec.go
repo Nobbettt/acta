@@ -429,24 +429,47 @@ func execHostFromSpec(operand string) string {
 	if strings.Contains(operand, "://") {
 		return ""
 	}
-	if at := strings.LastIndexByte(operand, '@'); at >= 0 {
-		if strings.Contains(operand[:at], "/") {
-			return ""
+	colon, bracketed := -1, false
+scan:
+	for i := range operand {
+		switch operand[i] {
+		case '[':
+			if bracketed {
+				return ""
+			}
+			bracketed = true
+		case ']':
+			if !bracketed {
+				return ""
+			}
+			bracketed = false
+		case ':':
+			if !bracketed {
+				colon = i
+				break scan
+			}
 		}
-		operand = operand[at+1:]
 	}
-	if strings.HasPrefix(operand, "[") {
-		close := strings.IndexByte(operand, ']')
-		if close <= 1 || close+1 >= len(operand) || operand[close+1] != ':' {
-			return ""
-		}
-		return operand[1:close]
-	}
-	colon := strings.IndexByte(operand, ':')
-	if colon <= 0 || strings.Contains(operand[:colon], "/") {
+	if colon <= 0 || bracketed || strings.ContainsRune(operand[:colon], '/') {
 		return ""
 	}
-	return operand[:colon]
+	authority := operand[:colon]
+	if strings.Count(authority, "@") > 1 {
+		return ""
+	}
+	if at := strings.IndexByte(authority, '@'); at >= 0 {
+		if at == 0 || at == len(authority)-1 {
+			return ""
+		}
+		authority = authority[at+1:]
+	}
+	if strings.HasPrefix(authority, "[") && strings.HasSuffix(authority, "]") && len(authority) > 2 {
+		return authority[1 : len(authority)-1]
+	}
+	if strings.ContainsAny(authority, "[]@") {
+		return ""
+	}
+	return authority
 }
 
 func execHostName(operand string) string {
@@ -673,7 +696,8 @@ func execPackage(cmd execCommand) *commandFacts {
 }
 
 // execPackageName is the single gate for package targets. Slash-bearing names
-// are limited to scoped Node names and domain-qualified Go module paths.
+// are limited to scoped Node names, domain-qualified Go module paths, and
+// Homebrew's user/tap/formula shape.
 func execPackageName(word, name string) bool {
 	if name == "" || execPackageSource(name) || execCredentialPackage(name) || strings.HasPrefix(name, ".") ||
 		strings.HasPrefix(name, "-") || strings.ContainsFunc(name, func(r rune) bool {
@@ -693,6 +717,15 @@ func execPackageName(word, name string) bool {
 		strings.Count(name, "/") == 1 {
 		slash := strings.IndexByte(name, '/')
 		return slash > 1 && slash < len(name)-1 && name[slash+1] != '.'
+	}
+	if word == "" || word == "brew" {
+		parts := strings.Split(name, "/")
+		brewName := len(parts) == 3 && !slices.ContainsFunc(parts, func(part string) bool {
+			return part == "" || strings.HasPrefix(part, ".")
+		})
+		if brewName || word == "brew" {
+			return brewName
+		}
 	}
 	if word == "" || word == "go" {
 		parts := strings.Split(name, "/")
@@ -1473,6 +1506,9 @@ func execReadsDotEnv(word string, args []string) bool {
 	}
 	values := scan.operands
 	if word == "sed" {
+		if !scan.hasFlag("-e", "--expression", "-f", "--file") && len(values) != 0 {
+			values = values[1:]
+		}
 		values = append(values, execFlagValues(scan, "-f", "--file")...)
 	}
 	for _, arg := range values {

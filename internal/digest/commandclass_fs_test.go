@@ -258,10 +258,8 @@ func TestClassifyFS(t *testing.T) {
 			targets:    fsPathTargets("src.txt", "dest/src.txt"),
 			mutations:  []ShellMutation{{Kind: "move", From: "src.txt", To: "dest/src.txt"}},
 		}},
-		{"mv into a dot-dot-suffixed directory names the real destination", "mv a.txt dir/sub/..", true, &commandFacts{
-			categories: []string{"fs.move"},
-			targets:    fsPathTargets("a.txt", "dir/a.txt"),
-			mutations:  []ShellMutation{{Kind: "move", From: "a.txt", To: "dir/a.txt"}},
+		{"mv through a dot-dot-suffixed directory fails closed", "mv a.txt dir/sub/..", true, &commandFacts{
+			categories: []string{"workspace.escape"},
 		}},
 		{"mv into a directory outside the workspace escapes", "mv old.txt /tmp/", true, &commandFacts{
 			categories: []string{"workspace.escape"},
@@ -455,9 +453,8 @@ func TestClassifyFS(t *testing.T) {
 			categories: []string{"fs.create"},
 			targets:    fsPathTargets("backup/a.txt"),
 		}},
-		{"cp into a dot-dot-suffixed directory names the real destination", "cp a.txt dir/sub/..", true, &commandFacts{
-			categories: []string{"fs.create"},
-			targets:    fsPathTargets("dir/a.txt"),
+		{"cp through a dot-dot-suffixed directory fails closed", "cp a.txt dir/sub/..", true, &commandFacts{
+			categories: []string{"workspace.escape"},
 		}},
 		{"cp into a directory outside the workspace escapes", "cp a.txt /tmp/", true, &commandFacts{
 			categories: []string{"workspace.escape"},

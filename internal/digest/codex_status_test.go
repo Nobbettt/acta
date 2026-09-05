@@ -3,7 +3,6 @@ package digest
 import (
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 )
@@ -85,7 +84,7 @@ func TestCodexFileChangeRejectsTraversal(t *testing.T) {
 	}
 }
 
-func TestCodexFileChangeUsesProvenWorkspaceAlias(t *testing.T) {
+func TestCodexFileChangeRejectsUnrecordedWorkspaceAlias(t *testing.T) {
 	root := t.TempDir()
 	workspaceDir := filepath.Join(root, "workspace")
 	if err := os.Mkdir(workspaceDir, 0o755); err != nil {
@@ -107,9 +106,9 @@ func TestCodexFileChangeUsesProvenWorkspaceAlias(t *testing.T) {
 	}
 	for _, event := range d.Timeline {
 		if event.ProviderEvent == "file_change" {
-			if !reflect.DeepEqual(event.Files, []string{"sample.txt"}) ||
-				!reflect.DeepEqual(event.Changes, []FileMutation{{Path: "sample.txt", Kind: "update"}}) {
-				t.Fatalf("file_change = files %v changes %+v", event.Files, event.Changes)
+			if len(event.Files) != 0 || len(event.Changes) != 0 ||
+				!strings.Contains(strings.Join(event.FilePatchErrors, "; "), "capture warning: file_change dropped 1 path(s)") {
+				t.Fatalf("unrecorded alias was not rejected with a warning: %+v", event)
 			}
 			return
 		}

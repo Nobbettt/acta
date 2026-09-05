@@ -147,7 +147,7 @@ func TestControlPlaneClassificationSurvivesARedigest(t *testing.T) {
 	}
 }
 
-func TestRedigestIsIndependentOfProcessWorkingDirectory(t *testing.T) {
+func TestRedigestIsIndependentOfProcessWorkingDirectoryAndRejectsUnrecordedAlias(t *testing.T) {
 	root := t.TempDir()
 	workspaceDir := filepath.Join(root, "workspace")
 	if err := os.Mkdir(workspaceDir, 0o755); err != nil {
@@ -195,11 +195,11 @@ func TestRedigestIsIndependentOfProcessWorkingDirectory(t *testing.T) {
 	if string(a) != string(b) {
 		t.Fatalf("re-digest depends on process cwd\n  alias cwd: %s\n  other cwd: %s", a, b)
 	}
-	if !reflect.DeepEqual(fromOther.Files, []FileTouch{{Path: "sample.txt", Edited: true}}) {
-		t.Fatalf("recovered files = %+v, want sample.txt edit", fromOther.Files)
+	if len(fromOther.Files) != 0 {
+		t.Fatalf("unrecorded alias leaked into files: %+v", fromOther.Files)
 	}
-	if got := commandCategories(t, fromOther); !reflect.DeepEqual(got, []string{"control.access", "fs.delete"}) {
-		t.Fatalf("categories = %v, want [control.access fs.delete]", got)
+	if got := commandCategories(t, fromOther); !reflect.DeepEqual(got, []string{"fs.delete"}) {
+		t.Fatalf("categories = %v, want [fs.delete]", got)
 	}
 }
 

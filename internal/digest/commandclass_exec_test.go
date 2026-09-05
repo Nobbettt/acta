@@ -199,6 +199,10 @@ func TestClassifyExecNetworkEgress(t *testing.T) {
 			targets: host("build.example.com"),
 		},
 		{
+			name:    "scp path host fragment is not the peer",
+			command: "scp /tmp/cache@secret.example:repo local.txt",
+		},
+		{
 			name:    "scp bracketed ipv6 destination",
 			command: "scp /dev/null '[::1]:/tmp/'",
 			want:    []string{"network.egress"},

@@ -132,7 +132,7 @@ func TestCodexHeredocBodyDoesNotBecomeAReadEvent(t *testing.T) {
 	}
 }
 
-func TestCodexInformationalReadDoesNotBecomeAReadEvent(t *testing.T) {
+func TestCodexWrappedInformationalReadDoesNotBecomeAReadEvent(t *testing.T) {
 	started := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
 	digester, err := digest.NewStreamDigesterWithOptions("codex", t.TempDir(), digest.Options{})
 	if err != nil {
@@ -141,7 +141,7 @@ func TestCodexInformationalReadDoesNotBecomeAReadEvent(t *testing.T) {
 	item, err := json.Marshal(map[string]any{
 		"type": "item.completed",
 		"item": map[string]any{
-			"id": "c1", "type": "command_execution", "command": "cat --help .env.production",
+			"id": "c1", "type": "command_execution", "command": "/bin/sh -lc 'command cat --help .env.production'",
 			"status": "completed", "exit_code": 0, "aggregated_output": "Usage: cat [OPTION]... [FILE]...\n",
 		},
 	})

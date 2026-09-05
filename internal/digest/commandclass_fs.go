@@ -53,6 +53,9 @@ func classifyFS(segment commandSegment) *commandFacts {
 		if scan.hasFlag(fsInspectFlags...) || verb == "patch" && scan.hasFlag("-C", "-v") {
 			return nil
 		}
+		if verb == "git apply" && len(args) == 3 && args[0] == "--allow-empty" && args[1] == "<" && args[2] == "/dev/null" {
+			return nil
+		}
 	}
 	if fsRuntimeOutcomeUnproven(verb, scan) {
 		return nil
@@ -308,7 +311,8 @@ var fsFlagModels = map[string]commandFlagModel{
 	},
 	"cp": {
 		"-a": flagBoolean, "-b": flagBoolean, "-f": flagBoolean,
-		"-i": flagBoolean, "-n": flagBoolean, "-p": flagBoolean,
+		"-H": flagBoolean, "-i": flagBoolean, "-L": flagBoolean,
+		"-n": flagBoolean, "-p": flagBoolean, "-P": flagBoolean,
 		"-R": flagBoolean, "-r": flagBoolean, "-T": flagBoolean,
 		"-u": flagBoolean, "-v": flagBoolean, "--no-clobber": flagBoolean,
 		"--interactive": flagBoolean, "--no-target-directory": flagBoolean,
@@ -669,6 +673,22 @@ func fsDelete(operands []string, ws *workspace, cwdUncertain bool) *commandFacts
 	if facts == nil {
 		return nil
 	}
+	// If one successful rm also names an ancestor, command text cannot prove
+	// where an earlier descendant resolved through that possibly-symlinked path.
+	targets := facts.targets[:0]
+	for _, target := range facts.targets {
+		descendant := false
+		for _, other := range facts.targets {
+			if target.Value != other.Value && strings.HasPrefix(target.Value, other.Value+"/") {
+				descendant = true
+				break
+			}
+		}
+		if !descendant {
+			targets = append(targets, target)
+		}
+	}
+	facts.targets = targets
 	// Only the in-workspace targets back a file.deleted event; an escape has no
 	// path the file timeline could name.
 	for _, target := range facts.targets {

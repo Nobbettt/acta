@@ -322,6 +322,18 @@ func TestClassifyVCSProvenanceTargets(t *testing.T) {
 			"origin\tgit@github.com:nobbettt/acta.git (fetch)\n",
 			[]CommandTarget{{Kind: "url", Value: "github.com"}},
 		},
+		{
+			"local path with host-shaped fragment is dropped",
+			"git remote -v",
+			"origin\t/tmp/cache@secret.example:repo (fetch)\n",
+			nil,
+		},
+		{
+			"at sign in scp path does not replace the authority",
+			"git remote -v",
+			"origin\tgit@github.com:org/cache@secret.example:repo (fetch)\n",
+			[]CommandTarget{{Kind: "url", Value: "github.com"}},
+		},
 		{"read verb invents no target", "git log --oneline", sha + " subject\n", nil},
 		{
 			"credential with url-illegal char is dropped closed",
