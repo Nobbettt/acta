@@ -550,7 +550,7 @@ func sedReadStep(tokens []string, ws *workspace) *step {
 }
 
 func headReadStep(tokens []string, ws *workspace) *step {
-	if !shellStageStartsWith(tokens, "head") {
+	if !shellStageStartsWith(tokens, "head") || hasRedirectionToken(tokens) {
 		return nil
 	}
 	count := headCountFromTokens(tokens)

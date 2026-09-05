@@ -53,6 +53,9 @@ func classifyFS(segment commandSegment) *commandFacts {
 		if scan.hasFlag(fsInspectFlags...) || verb == "patch" && scan.hasFlag("-C", "-v") {
 			return nil
 		}
+		if verb == "patch" && fsRedirectsInputFromDevNull(args) {
+			return nil
+		}
 		if verb == "git apply" && len(args) == 3 && args[0] == "--allow-empty" && args[1] == "<" && args[2] == "/dev/null" {
 			return nil
 		}
@@ -361,6 +364,18 @@ func fsOwnArgs(args []string) []string {
 		}
 	}
 	return args
+}
+
+// fsRedirectsInputFromDevNull reports the shell spelling that proves patch
+// received no diff. BSD patch accepts that empty input and exits successfully
+// without changing a file, so fs.patch would credit an act that did not occur.
+func fsRedirectsInputFromDevNull(args []string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "<" && args[i+1] == "/dev/null" {
+			return true
+		}
+	}
+	return false
 }
 
 type commandFlag struct {
@@ -735,7 +750,8 @@ func fsMove(args, operands []string, ws *workspace, cwdUncertain bool) *commandF
 		return nil
 	}
 	src, dest := operands[0], operands[1]
-	if strings.HasSuffix(dest, "/") || fsDestinationNamesDirectory(dest) || fsIsWorkspaceRoot(dest, ws) {
+	if !scanCommandArgs(args, fsFlagModels["mv"]).hasFlag("-T", "--no-target-directory") &&
+		(strings.HasSuffix(dest, "/") || fsDestinationNamesDirectory(dest) || fsIsWorkspaceRoot(dest, ws)) {
 		return fsMoveIntoDir(src, dest, ws, cwdUncertain)
 	}
 	paths := fsPaths(operands, ws, cwdUncertain)

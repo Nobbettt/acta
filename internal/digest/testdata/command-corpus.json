@@ -4355,5 +4355,106 @@
     ],
     "source": "review-r31-parent-component",
     "note": "A literal Git directory remains attributable with a relative recorded root."
+  },
+  {
+    "command": "brew install private-audit-formula.rb",
+    "want_categories": [
+      "package.install"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r31-local-formula",
+    "note": "A bare local Ruby formula proves installation but does not literally name a package."
+  },
+  {
+    "command": "brew install path/to/formula.rb",
+    "want_categories": [
+      "package.install"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r31-local-formula",
+    "note": "A multi-component local Ruby formula proves installation but must not be published as a tap."
+  },
+  {
+    "command": "brew install secrets/sk-live-SECRET/formula.rb",
+    "want_categories": [
+      "package.install"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r31-local-formula",
+    "note": "A local formula path can contain credential text, so its package target is withheld."
+  },
+  {
+    "command": "brew install homebrew/core/wget",
+    "want_categories": [
+      "package.install"
+    ],
+    "want_targets": [
+      {
+        "kind": "package",
+        "value": "homebrew/core/wget"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r31-local-formula",
+    "note": "A three-component Homebrew tap name remains a package target."
+  },
+  {
+    "command": "grep TODO missing.go",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r31-failed-search",
+    "output": "grep: missing.go: No such file or directory\\n",
+    "failure": {
+      "want_categories": [
+        "search.query"
+      ],
+      "want_targets": [],
+      "want_mutations": []
+    }
+  },
+  {
+    "command": "grep TODO present.go",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r31-failed-search",
+    "output": "present.go:1:TODO\\n",
+    "note": "Successful content output from one literal file remains a retrieval, not a search query."
+  },
+  {
+    "command": "eslint -v",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r31-version-probe"
+  },
+  {
+    "command": "tsc -v",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r31-version-probe"
+  },
+  {
+    "command": "eslint .",
+    "want_categories": [
+      "verify.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r31-version-probe"
+  },
+  {
+    "command": "tsc --noEmit",
+    "want_categories": [
+      "verify.run"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r31-version-probe"
   }
 ]

@@ -40,8 +40,8 @@ func TestCommandCorpus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(corpus) < 200 || len(corpus) > 420 {
-		t.Fatalf("corpus has %d entries, want 200-420", len(corpus))
+	if len(corpus) < 200 || len(corpus) > 600 {
+		t.Fatalf("corpus has %d entries, want 200-600", len(corpus))
 	}
 	for i, tc := range corpus {
 		name := tc.Source + "/" + strings.ReplaceAll(tc.Command, "/", "_")

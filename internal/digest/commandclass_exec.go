@@ -697,7 +697,8 @@ func execPackage(cmd execCommand) *commandFacts {
 
 // execPackageName is the single gate for package targets. Slash-bearing names
 // are limited to scoped Node names, domain-qualified Go module paths, and
-// Homebrew's user/tap/formula shape.
+// Homebrew's user/tap/formula shape. A Ruby formula file proves installation,
+// but publishing its local path would invent a package identity.
 func execPackageName(word, name string) bool {
 	if name == "" || execPackageSource(name) || execCredentialPackage(name) || strings.HasPrefix(name, ".") ||
 		strings.HasPrefix(name, "-") || strings.ContainsFunc(name, func(r rune) bool {
@@ -707,7 +708,7 @@ func execPackageName(word, name string) bool {
 		return false
 	}
 	ext := strings.ToLower(path.Ext(name))
-	if slices.Contains([]string{".bz2", ".egg", ".gem", ".gz", ".jar", ".tar", ".tgz", ".whl", ".xz", ".zip"}, ext) {
+	if slices.Contains([]string{".bz2", ".egg", ".gem", ".gz", ".jar", ".rb", ".tar", ".tgz", ".whl", ".xz", ".zip"}, ext) {
 		return false
 	}
 	if !strings.ContainsRune(name, '/') {
@@ -862,8 +863,8 @@ func execSearchFlagModelFor(word string) commandFlagModel {
 }
 
 // execSearch credits a repository search. A search explicitly scoped to one
-// file is left out only when retrievalFromCommand will actually credit that
-// scope as a file read: it additionally requires
+// file is left out only when a successful command lets retrievalFromCommand
+// actually credit that scope as a file read: it additionally requires
 // searchCommandCanExposeFileContent (non-empty, untrusted-output-free
 // output, none of -c/-l/--files and friends). When that predicate fails —
 // `grep -c`, `rg -l`, a real search with no hits, output this package does
@@ -887,7 +888,7 @@ func execSearch(cmd execCommand) *commandFacts {
 	if len(scan.operands) == 0 && !hasRegexp && !hasPatternFile {
 		return nil
 	}
-	if explicitSingleSearchFile(cmd.seg.tokens, cmd.seg.ws) != "" &&
+	if cmd.seg.exitOK && explicitSingleSearchFile(cmd.seg.tokens, cmd.seg.ws) != "" &&
 		searchCommandCanExposeFileContent(cmd.seg.tokens, cmd.seg.output) {
 		return nil
 	}
@@ -1766,6 +1767,8 @@ func execCommandAssertsNoChange(cmd execCommand) bool {
 		return scan.hasFlag("-n", "--just-print", "--dry-run", "--recon", "-q", "--question", "-t", "--touch")
 	case "screen":
 		return scan.hasFlag("-v")
+	case "eslint", "tsc":
+		return slices.Contains(cmd.args, "-v")
 	case "ssh":
 		return scan.hasFlag("-G", "-Q")
 	}

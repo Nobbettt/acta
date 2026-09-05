@@ -829,6 +829,60 @@ func TestClassifyCommandPrunesEveryProvenUnexecutedSegment(t *testing.T) {
 	}
 }
 
+// A parameter expansion can abort its shell before the following command
+// starts. Its grammar applies inside double quotes too, so accepting it only
+// outside quotes would publish traffic that never occurred.
+func TestClassifyCommandRejectsQuotedParameterExpansion(t *testing.T) {
+	failed := `/bin/zsh -lc 'X=; Y="${X:?boom}" curl https://never.example'`
+	if facts := classifyCommand(failed, "", false, testWorkspace()); facts != nil {
+		t.Errorf("classifyCommand(%q) = %+v, want nil after a fatal parameter expansion", failed, facts)
+	}
+
+	command := `curl "https://example.com"`
+	facts := classifyCommand(command, "", true, testWorkspace())
+	want := []CommandTarget{{Kind: "url", Value: "https://example.com"}}
+	if facts == nil || !slices.Contains(facts.categories, "network.egress") || !reflect.DeepEqual(facts.targets, want) {
+		t.Errorf("classifyCommand(%q) = %+v, want network.egress with targets %+v", command, facts, want)
+	}
+}
+
+// A top-level return ends a zsh -c script even when it reports success, so a
+// later command cannot borrow that success from the wrapper's final status.
+func TestClassifyCommandPrunesAfterTopLevelReturn(t *testing.T) {
+	failed := `/bin/zsh -lc 'return 0; curl https://never.example'`
+	if facts := classifyCommand(failed, "", true, testWorkspace()); facts != nil {
+		t.Errorf("classifyCommand(%q) = %+v, want nil after return", failed, facts)
+	}
+
+	command := `printf return; curl https://example.com`
+	facts := classifyCommand(command, "", true, testWorkspace())
+	if facts == nil || !slices.Contains(facts.categories, "network.egress") {
+		t.Errorf("classifyCommand(%q) = %+v, want network.egress", command, facts)
+	}
+}
+
+// The option terminator is valid in each supported self-SIGKILL spelling.
+// Treating it as an operand lets commands after a killed shell borrow the
+// wrapper status and invent work that did not happen.
+func TestClassifyCommandPrunesSelfKillWithOptionTerminator(t *testing.T) {
+	for _, command := range []string{
+		"kill -9 -- $$; curl https://never.example",
+		"kill -KILL -- $$; curl https://never.example",
+		"kill -s KILL -- $$; curl https://never.example",
+		"kill -s SIGKILL -- $BASHPID; curl https://never.example",
+	} {
+		if facts := classifyCommand(command, "", false, testWorkspace()); facts != nil {
+			t.Errorf("classifyCommand(%q) = %+v, want nil after self-SIGKILL", command, facts)
+		}
+	}
+
+	command := "kill -9 -- 123; curl https://example.com"
+	facts := classifyCommand(command, "", true, testWorkspace())
+	if facts == nil || !slices.Contains(facts.categories, "network.egress") {
+		t.Errorf("classifyCommand(%q) = %+v, want network.egress", command, facts)
+	}
+}
+
 func TestClassifyCommandRejectsUnhandledShellCompounds(t *testing.T) {
 	commands := []string{
 		"if false\nthen\ngit status\nfi",

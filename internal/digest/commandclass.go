@@ -264,9 +264,10 @@ func splitRawChain(command string) ([]commandChainRaw, bool) {
 			// A command substitution has its own control flow and exit statuses.
 			// None of its apparent commands may borrow the outer command's status.
 			return nil, false
-		case c == '$' && !inSingle && !inDouble && i+1 < len(command) && command[i+1] == '{':
+		case c == '$' && !inSingle && i+1 < len(command) && command[i+1] == '{':
 			// Parameter expansions have their own quoting and separator grammar.
-			// Until it is modelled, apparent commands inside one prove nothing.
+			// Double quotes retain that grammar, so apparent commands inside one
+			// prove nothing until it is modelled.
 			return nil, false
 		case inSingle || inDouble:
 			// inside a quote: none of the separators below count
@@ -692,7 +693,7 @@ func pruneUnexecuted(raw []commandChainRaw) []commandChainRaw {
 }
 
 func terminatesShellList(tokens []string) bool {
-	if containsShellControlCommand(tokens, "exit", "exec") {
+	if containsShellControlCommand(tokens, "exit", "exec", "return") {
 		return true
 	}
 	tokens = execLeadingTokens(tokens)
@@ -709,15 +710,21 @@ func terminatesShellList(tokens []string) bool {
 	if len(tokens) == 0 || path.Base(tokens[0]) != "kill" || !isShellSelfPid(tokens[len(tokens)-1]) {
 		return false
 	}
+	args := tokens[1 : len(tokens)-1]
+	// `--` ends kill's options, not its argument list. Ignoring it would make a
+	// fatal self-signal look malformed and credit commands the shell never ran.
+	if len(args) > 0 && args[len(args)-1] == "--" {
+		args = args[:len(args)-1]
+	}
 	signal := ""
-	switch len(tokens) {
-	case 3:
-		signal = strings.TrimPrefix(tokens[1], "-")
-	case 4:
-		if tokens[1] != "-s" {
+	switch len(args) {
+	case 1:
+		signal = strings.TrimPrefix(args[0], "-")
+	case 2:
+		if args[0] != "-s" {
 			return false
 		}
-		signal = tokens[2]
+		signal = args[1]
 	default:
 		return false
 	}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -156,7 +157,7 @@ func (tracker *fileWriteTracker) read(path string) (capturedFileVersion, bool) {
 	if err != nil {
 		return capturedFileVersion{}, false
 	}
-	if _, ok := tracker.workspace.rel(resolved); !ok {
+	if !tracker.resolvedInsideWorkspace(resolved) {
 		return capturedFileVersion{}, false
 	}
 	content, err := os.ReadFile(resolved)
@@ -164,6 +165,33 @@ func (tracker *fileWriteTracker) read(path string) (capturedFileVersion, bool) {
 		return capturedFileVersion{}, false
 	}
 	return capturedFileVersion{exists: true, content: content, mode: info.Mode()}, true
+}
+
+// resolvedInsideWorkspace reports whether a path that has been through
+// EvalSymlinks still lies inside the workspace. It cannot ask workspace.rel,
+// because that compares against the root exactly as it was recorded while this
+// path has been rewritten by the filesystem: on Windows a temporary directory
+// is handed to us as an 8.3 short name and comes back from EvalSymlinks fully
+// expanded, so the two spellings of the same directory never share a prefix and
+// every snapshot is silently discarded. Resolving both sides the same way is
+// what makes the comparison meaningful. This is capture-side, where consulting
+// the filesystem is exactly the point; the digest's own path normalization
+// stays independent of it.
+func (tracker *fileWriteTracker) resolvedInsideWorkspace(resolved string) bool {
+	root := tracker.workspace.root
+	if resolvedRoot, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolvedRoot
+	}
+	if runtime.GOOS == "windows" {
+		// Windows path comparison is case-insensitive, and the two sides can
+		// still disagree in case when only one of them survived EvalSymlinks.
+		root, resolved = strings.ToLower(root), strings.ToLower(resolved)
+	}
+	rel, err := filepath.Rel(root, resolved)
+	if err != nil {
+		return false
+	}
+	return !hasParentPathComponent(rel)
 }
 
 func (tracker *fileWriteTracker) start(id string, paths []string) {

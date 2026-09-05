@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -285,6 +286,42 @@ func TestRetrievalFromCommand(t *testing.T) {
 	}
 }
 
+func TestHeadReadStepRejectsHereString(t *testing.T) {
+	ws := testWorkspace()
+	cases := []struct {
+		name      string
+		command   string
+		wantFiles []string
+		wantSpans map[string][]Span
+	}{
+		{
+			name:    "here string is data rather than a file read",
+			command: `head -n 1 <<< .env`,
+		},
+		{
+			name:      "file operand remains a read",
+			command:   `head -n 1 .env`,
+			wantFiles: []string{".env"},
+			wantSpans: map[string][]Span{
+				".env": {{Start: 1, End: 1}},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := retrievalFromCommand(tc.command, ".env\n", ws)
+			var files []string
+			var spans map[string][]Span
+			if got != nil {
+				files, spans = got.files, got.spans
+			}
+			if !reflect.DeepEqual(files, tc.wantFiles) || !reflect.DeepEqual(spans, tc.wantSpans) {
+				t.Fatalf("retrievalFromCommand(%q) = files=%#v spans=%#v, want files=%#v spans=%#v", tc.command, files, spans, tc.wantFiles, tc.wantSpans)
+			}
+		})
+	}
+}
+
 func TestRetrievalRetainsOnlyUnambiguousReadContent(t *testing.T) {
 	ws := testWorkspace()
 
@@ -388,10 +425,10 @@ func TestWorkspaceRelRejectsAliasSuffixSymlinkEscape(t *testing.T) {
 	}
 	alias := filepath.Join(root, "repo-alias")
 	if err := os.Symlink(workspaceDir, alias); err != nil {
-		t.Fatal(err)
+		skipIfSymlinksUnavailable(t, err)
 	}
 	if err := os.Symlink(outsideDir, filepath.Join(workspaceDir, "out")); err != nil {
-		t.Fatal(err)
+		skipIfSymlinksUnavailable(t, err)
 	}
 	secret := filepath.Join(outsideDir, "secret")
 	if err := os.WriteFile(secret, []byte("private"), 0o600); err != nil {
@@ -403,6 +440,18 @@ func TestWorkspaceRelRejectsAliasSuffixSymlinkEscape(t *testing.T) {
 		len(facts.targets) != 0 || len(facts.mutations) != 0 {
 		t.Fatalf("alias suffix escape = %+v, want workspace.escape only", facts)
 	}
+}
+
+// skipIfSymlinksUnavailable turns a refusal to create a symlink into a skip
+// rather than a failure. Creating one on Windows needs a privilege the CI
+// runner does not hold by default, and a fixture that cannot be built proves
+// nothing either way about the code under test.
+func skipIfSymlinksUnavailable(t *testing.T, err error) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+	t.Fatal(err)
 }
 
 // The command corpus cannot model symlink topology or post-command filesystem
@@ -418,15 +467,21 @@ func TestWorkspaceRelRejectsSymlinkTraversalBeforeLexicalCleaning(t *testing.T) 
 		t.Fatal(err)
 	}
 	if err := os.Symlink(outsideDir, filepath.Join(workspaceDir, "out")); err != nil {
-		t.Fatal(err)
+		skipIfSymlinksUnavailable(t, err)
 	}
 	if err := os.WriteFile(filepath.Join(workspaceDir, "victim"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Rename(
-		filepath.Join(workspaceDir, "victim"),
-		workspaceDir+string(filepath.Separator)+"out/../outside/moved",
-	); err != nil {
+	// The destination keeps its traversal, because going through `out/..` is
+	// the whole point of the fixture - filepath.Join would clean the `..` away
+	// along with the symlink it traverses. It still has to be spelled with the
+	// platform separator, since a rename given a mixed-separator path fails
+	// outright on Windows and the test would never reach its assertion.
+	traversed := strings.Join(
+		[]string{workspaceDir, "out", "..", "outside", "moved"},
+		string(filepath.Separator),
+	)
+	if err := os.Rename(filepath.Join(workspaceDir, "victim"), traversed); err != nil {
 		t.Fatal(err)
 	}
 

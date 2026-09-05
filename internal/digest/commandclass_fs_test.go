@@ -39,6 +39,52 @@ func fsSegmentCwdUncertain(command string, exitOK bool) commandSegment {
 	return seg
 }
 
+func TestClassifyFSNoTargetDirectoryDoesNotInventNestedDestination(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+		want    *commandFacts
+	}{
+		{"no-target-directory renames despite a trailing slash", "mv -T old new/", &commandFacts{
+			categories: []string{"fs.move"},
+			targets:    fsPathTargets("old", "new"),
+			mutations:  []ShellMutation{{Kind: "move", From: "old", To: "new"}},
+		}},
+		{"a trailing slash without no-target-directory keeps the nested destination", "mv old new/", &commandFacts{
+			categories: []string{"fs.move"},
+			targets:    fsPathTargets("old", "new/old"),
+			mutations:  []ShellMutation{{Kind: "move", From: "old", To: "new/old"}},
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := classifyFS(fsSegment(c.command, true)); !reflect.DeepEqual(got, c.want) {
+				t.Errorf("classifyFS(%q) = %+v, want %+v", c.command, got, c.want)
+			}
+		})
+	}
+}
+
+func TestClassifyFSEmptyPatchInputDoesNotApply(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+		want    *commandFacts
+	}{
+		{"an empty input applies nothing", "patch < /dev/null", nil},
+		{"a named input still applies a patch", "patch < fix.diff", &commandFacts{
+			categories: []string{"fs.patch"},
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := classifyFS(fsSegment(c.command, true)); !reflect.DeepEqual(got, c.want) {
+				t.Errorf("classifyFS(%q) = %+v, want %+v", c.command, got, c.want)
+			}
+		})
+	}
+}
+
 func TestClassifyFS(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -574,9 +620,7 @@ func TestClassifyFS(t *testing.T) {
 		{"patch repeated destinations remain category-only", "patch -d frontend -d /tmp -o inside.txt -o /tmp/out.txt orig.txt < fix.diff", true, &commandFacts{
 			categories: []string{"fs.patch"},
 		}},
-		{"patch empty stdin remains category-only", "patch victim.txt < /dev/null", true, &commandFacts{
-			categories: []string{"fs.patch"},
-		}},
+		{"patch empty stdin applies nothing", "patch victim.txt < /dev/null", true, nil},
 		{"patch from a heredoc", "patch -p1 <<'EOF'", true, &commandFacts{
 			categories: []string{"fs.patch"},
 		}},
