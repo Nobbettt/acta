@@ -414,6 +414,7 @@ func TestNewWorkspaceDoesNotReadProcessWorkingDirectory(t *testing.T) {
 }
 
 func TestWorkspaceRelRejectsAliasSuffixSymlinkEscape(t *testing.T) {
+	requirePOSIXSymlinkTraversal(t)
 	root := t.TempDir()
 	workspaceDir := filepath.Join(root, "repo")
 	outsideDir := filepath.Join(root, "outside")
@@ -425,10 +426,10 @@ func TestWorkspaceRelRejectsAliasSuffixSymlinkEscape(t *testing.T) {
 	}
 	alias := filepath.Join(root, "repo-alias")
 	if err := os.Symlink(workspaceDir, alias); err != nil {
-		skipIfSymlinksUnavailable(t, err)
+		t.Fatal(err)
 	}
 	if err := os.Symlink(outsideDir, filepath.Join(workspaceDir, "out")); err != nil {
-		skipIfSymlinksUnavailable(t, err)
+		t.Fatal(err)
 	}
 	secret := filepath.Join(outsideDir, "secret")
 	if err := os.WriteFile(secret, []byte("private"), 0o600); err != nil {
@@ -442,21 +443,27 @@ func TestWorkspaceRelRejectsAliasSuffixSymlinkEscape(t *testing.T) {
 	}
 }
 
-// skipIfSymlinksUnavailable turns a refusal to create a symlink into a skip
-// rather than a failure. Creating one on Windows needs a privilege the CI
-// runner does not hold by default, and a fixture that cannot be built proves
-// nothing either way about the code under test.
-func skipIfSymlinksUnavailable(t *testing.T, err error) {
+// requirePOSIXSymlinkTraversal skips a fixture whose escape depends on POSIX
+// path resolution. Both of the fixtures below turn on a symlinked directory
+// being traversed by a following `..`, and the two platforms disagree about
+// what that means: POSIX resolves the symlink and lands outside, while Windows
+// cleans `..` against the preceding NAME before any link is followed, so the
+// traversal simply returns to the parent and the escape these tests describe
+// cannot be staged there at all. The rejection itself is not
+// platform-specific - it is the same code on both, and the corpus exercises it
+// - but a fixture that cannot reproduce the hazard would only be asserting the
+// local filesystem's behaviour.
+func requirePOSIXSymlinkTraversal(t *testing.T) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		t.Skipf("symlinks unavailable on this platform: %v", err)
+		t.Skip("the escape under test depends on POSIX symlink-before-.. resolution")
 	}
-	t.Fatal(err)
 }
 
 // The command corpus cannot model symlink topology or post-command filesystem
 // state, so these path-resolution regressions use temporary workspaces.
 func TestWorkspaceRelRejectsSymlinkTraversalBeforeLexicalCleaning(t *testing.T) {
+	requirePOSIXSymlinkTraversal(t)
 	root := t.TempDir()
 	workspaceDir := filepath.Join(root, "workspace")
 	outsideDir := filepath.Join(root, "outside")
@@ -467,7 +474,7 @@ func TestWorkspaceRelRejectsSymlinkTraversalBeforeLexicalCleaning(t *testing.T) 
 		t.Fatal(err)
 	}
 	if err := os.Symlink(outsideDir, filepath.Join(workspaceDir, "out")); err != nil {
-		skipIfSymlinksUnavailable(t, err)
+		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(workspaceDir, "victim"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
