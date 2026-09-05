@@ -374,3 +374,87 @@ func TestPathStateChanged(t *testing.T) {
 		})
 	}
 }
+
+// The filesystem outranks the command text, on both agent paths, and only for
+// the facts it can actually speak to.
+func TestApplyObservedEffectsSuppressesOnlyContradictedChanges(t *testing.T) {
+	root := t.TempDir()
+	ws := newWorkspace(root)
+	writeObservedFile(t, root, "victim.txt", "x")
+
+	t.Run("a change the disk did not show loses its value but keeps its category", func(t *testing.T) {
+		e := &Event{
+			Kind: KindCommand, Command: "rm victim.txt",
+			Categories:        []string{"fs.delete"},
+			Targets:           []CommandTarget{{Kind: "path", Value: "victim.txt"}},
+			ShellMutations:    []ShellMutation{{Kind: "delete", Path: "victim.txt"}},
+			ObservationStatus: observationStatusObserved,
+		}
+		applyObservedEffects(e, ws)
+		if len(e.Targets) != 0 || len(e.ShellMutations) != 0 {
+			t.Fatalf("targets=%+v mutations=%+v, want both withheld", e.Targets, e.ShellMutations)
+		}
+		if !reflect.DeepEqual(e.Categories, []string{"fs.delete"}) {
+			t.Fatalf("categories = %v, want fs.delete kept", e.Categories)
+		}
+	})
+
+	t.Run("a change the disk confirmed is published", func(t *testing.T) {
+		e := &Event{
+			Kind: KindCommand, Command: "rm victim.txt",
+			Categories:        []string{"fs.delete"},
+			Targets:           []CommandTarget{{Kind: "path", Value: "victim.txt"}},
+			ShellMutations:    []ShellMutation{{Kind: "delete", Path: "victim.txt"}},
+			ObservedEffects:   []ObservedEffect{{Path: "victim.txt", Kind: "delete"}},
+			ObservationStatus: observationStatusObserved,
+		}
+		applyObservedEffects(e, ws)
+		if len(e.Targets) != 1 || len(e.ShellMutations) != 1 {
+			t.Fatalf("targets=%+v mutations=%+v, want both kept", e.Targets, e.ShellMutations)
+		}
+	})
+
+	// Absence of evidence is not evidence of absence: a bundle captured before
+	// observation existed must classify exactly as it did before.
+	t.Run("no observation leaves the classification alone", func(t *testing.T) {
+		e := &Event{
+			Kind: KindCommand, Command: "rm victim.txt",
+			Categories:     []string{"fs.delete"},
+			Targets:        []CommandTarget{{Kind: "path", Value: "victim.txt"}},
+			ShellMutations: []ShellMutation{{Kind: "delete", Path: "victim.txt"}},
+		}
+		applyObservedEffects(e, ws)
+		if len(e.Targets) != 1 || len(e.ShellMutations) != 1 {
+			t.Fatalf("targets=%+v mutations=%+v, want untouched", e.Targets, e.ShellMutations)
+		}
+	})
+
+	// A path nobody looked at cannot be contradicted, so a derived destination
+	// keeps whatever classification produced.
+	t.Run("an unwatched path is left alone", func(t *testing.T) {
+		e := &Event{
+			Kind: KindCommand, Command: "cp victim.txt dir/",
+			Categories:        []string{"fs.create"},
+			Targets:           []CommandTarget{{Kind: "path", Value: "dir/victim.txt"}},
+			ObservationStatus: observationStatusObserved,
+		}
+		applyObservedEffects(e, ws)
+		if len(e.Targets) != 1 {
+			t.Fatalf("targets = %+v, want the derived destination kept", e.Targets)
+		}
+	})
+
+	// A read alters nothing, so an unchanged file is no argument against it.
+	t.Run("a read target is never suppressed", func(t *testing.T) {
+		e := &Event{
+			Kind: KindCommand, Command: "cat victim.txt",
+			Categories:        []string{"instructions.read"},
+			Targets:           []CommandTarget{{Kind: "path", Value: "victim.txt"}},
+			ObservationStatus: observationStatusObserved,
+		}
+		applyObservedEffects(e, ws)
+		if len(e.Targets) != 1 {
+			t.Fatalf("targets = %+v, want the read target kept", e.Targets)
+		}
+	})
+}

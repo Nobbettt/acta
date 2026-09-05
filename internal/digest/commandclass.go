@@ -1274,6 +1274,10 @@ func classifyEventCommand(e *Event, outputText string, exitOK bool, ws *workspac
 	e.Categories = facts.categories
 	e.Targets = facts.targets
 	e.ShellMutations = facts.mutations
+	// Everything above is derived from the command text. Where the filesystem
+	// was actually examined around this command, it outranks that derivation:
+	// a change the text implied but the disk did not show did not happen.
+	applyObservedEffects(e, ws)
 }
 
 // isShellSelfPid reports whether tok names the pid of the shell running the

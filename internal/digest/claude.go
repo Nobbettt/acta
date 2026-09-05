@@ -472,6 +472,7 @@ func (s *claudeParseState) observeCommandEnd(id string, e *Event) {
 		return
 	}
 	delete(s.commandObservations, id)
+	e.ObservationStatus = observationStatusObserved
 	after := observePathStates(s.ws, sortedObservedPaths(before))
 	for _, effect := range diffPathStates(before, after) {
 		e.ObservedEffects = append(e.ObservedEffects, ObservedEffect{Path: effect.path, Kind: effect.kind})

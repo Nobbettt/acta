@@ -150,16 +150,21 @@ type Event struct {
 	// while the run was live. It is recorded rather than recomputed so a
 	// re-digest of the same bundle reproduces it instead of describing whatever
 	// the workspace happens to look like afterwards.
-	ObservedEffects []ObservedEffect       `json:"observed_effects,omitempty"`
-	Changes         []FileMutation         `json:"changes,omitempty"`
-	Spans           map[string][]Span      `json:"spans,omitempty"`
-	ReadRanges      map[string][]ReadRange `json:"read_ranges,omitempty"`
-	FilePatches     []FilePatch            `json:"file_patches,omitempty"`
-	FilePatchStatus string                 `json:"file_patch_status,omitempty"`
-	FilePatchErrors []string               `json:"file_patch_errors,omitempty"`
-	Details         json.RawMessage        `json:"details,omitempty"`
-	RawEventLines   []int                  `json:"raw_event_lines,omitempty"`
-	Redacted        bool                   `json:"redacted,omitempty"`
+	ObservedEffects []ObservedEffect `json:"observed_effects,omitempty"`
+	// ObservationStatus records that the filesystem WAS examined around this
+	// command. Without it an empty ObservedEffects would be ambiguous - it
+	// would read the same whether nothing changed or nothing was ever looked
+	// at - and only the first of those is evidence.
+	ObservationStatus string                 `json:"observation_status,omitempty"`
+	Changes           []FileMutation         `json:"changes,omitempty"`
+	Spans             map[string][]Span      `json:"spans,omitempty"`
+	ReadRanges        map[string][]ReadRange `json:"read_ranges,omitempty"`
+	FilePatches       []FilePatch            `json:"file_patches,omitempty"`
+	FilePatchStatus   string                 `json:"file_patch_status,omitempty"`
+	FilePatchErrors   []string               `json:"file_patch_errors,omitempty"`
+	Details           json.RawMessage        `json:"details,omitempty"`
+	RawEventLines     []int                  `json:"raw_event_lines,omitempty"`
+	Redacted          bool                   `json:"redacted,omitempty"`
 
 	srcLine       int // raw JSONL line that produced this event, for the sidecar join
 	inputFilePath string

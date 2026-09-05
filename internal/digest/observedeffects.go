@@ -65,11 +65,11 @@ func observePathStates(ws *workspace, candidates []string) map[string]pathState 
 		if len(states) >= maxObservedCandidatePaths {
 			break
 		}
-		if _, seen := states[candidate]; seen {
-			continue
-		}
 		rel, ok := normalizeWorkspacePath(candidate, ws)
 		if !ok {
+			continue
+		}
+		if _, seen := states[rel]; seen {
 			continue
 		}
 		states[rel] = statPath(ws, rel)
@@ -200,4 +200,102 @@ func sortedObservedPaths(states map[string]pathState) []string {
 	}
 	sort.Strings(paths)
 	return paths
+}
+
+// observationStatusObserved marks an event whose command had the filesystem
+// examined around it.
+const observationStatusObserved = "observed"
+
+// applyObservedEffects drops the facts the filesystem contradicted.
+//
+// It suppresses a predicted change only when this package actually LOOKED at
+// that path and saw it unchanged. A path that was never fingerprinted - a
+// destination derived rather than typed, say - is left exactly as classified,
+// because absence of evidence is not evidence of absence and silently dropping
+// a real mutation would be its own kind of false record.
+//
+// Only change-implying facts are subject to this. A read or a search alters
+// nothing, so the filesystem has nothing to say about whether it happened.
+func applyObservedEffects(e *Event, ws *workspace) {
+	if e == nil || e.Kind != KindCommand || e.ObservationStatus != observationStatusObserved {
+		return
+	}
+	watched := observedWatchedPaths(e.Command, ws)
+	if len(watched) == 0 {
+		return
+	}
+	changed := make(map[string]bool, len(e.ObservedEffects))
+	for _, effect := range e.ObservedEffects {
+		changed[effect.Path] = true
+	}
+	contradicted := func(path string) bool {
+		return path != "" && watched[path] && !changed[path]
+	}
+
+	mutations := e.ShellMutations[:0:0]
+	for _, mutation := range e.ShellMutations {
+		// A move is one act across two paths, so it survives if the filesystem
+		// showed either end of it happening.
+		switch {
+		case mutation.Kind == "move" && contradicted(mutation.From) && contradicted(mutation.To):
+		case mutation.Kind != "move" && contradicted(mutation.Path):
+		default:
+			mutations = append(mutations, mutation)
+			continue
+		}
+	}
+	e.ShellMutations = mutations
+
+	if !slicesContainsAny(e.Categories, changeImplyingCategories) {
+		return
+	}
+	targets := e.Targets[:0:0]
+	for _, target := range e.Targets {
+		if target.Kind == "path" && contradicted(target.Value) {
+			continue
+		}
+		targets = append(targets, target)
+	}
+	e.Targets = targets
+}
+
+// changeImplyingCategories are the categories whose path target names something
+// the command is claimed to have altered. A path target on a read names what
+// was looked at, which the filesystem cannot refute.
+var changeImplyingCategories = []string{
+	"fs.create", "fs.delete", "fs.move", "fs.patch", "permission.changed",
+}
+
+func slicesContainsAny(values, wanted []string) bool {
+	for _, value := range values {
+		for _, want := range wanted {
+			if value == want {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// observedWatchedPaths recomputes which workspace paths were fingerprinted for
+// a command. It is derived from the command text rather than recorded because
+// the derivation is pure - the same text yields the same set - so persisting it
+// would only add a second copy that could disagree with the first. It touches
+// no files: which paths were WATCHED depends on the command and the recorded
+// workspace root, never on what is on disk when this runs, which is what lets a
+// re-digest reach the same answer long after the run.
+func observedWatchedPaths(command string, ws *workspace) map[string]bool {
+	if ws == nil || ws.root == "" {
+		return nil
+	}
+	watched := map[string]bool{}
+	for _, candidate := range commandObservationCandidates(command) {
+		if len(watched) >= maxObservedCandidatePaths {
+			break
+		}
+		if rel, ok := normalizeWorkspacePath(candidate, ws); ok {
+			watched[rel] = true
+		}
+	}
+	return watched
 }

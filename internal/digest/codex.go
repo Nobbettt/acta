@@ -199,6 +199,7 @@ func (st *codexParseState) observeCommandEnd(id string, e *Event) {
 		return
 	}
 	delete(st.commandObservations, id)
+	e.ObservationStatus = observationStatusObserved
 	after := observePathStates(st.ws, sortedObservedPaths(before))
 	for _, effect := range diffPathStates(before, after) {
 		e.ObservedEffects = append(e.ObservedEffects, ObservedEffect{Path: effect.path, Kind: effect.kind})
@@ -351,9 +352,13 @@ func (st *codexParseState) consume(event *CodexEvent, lineNo int, at time.Time) 
 			e.fileSnapshots = st.writeTracker.finish(item.ID, e.Files)
 		}
 		if e.Kind == KindCommand {
-			// Look before classifying: what the filesystem shows outranks what
-			// the command text suggests.
+			// codexItemEvent has already classified from the command text, so
+			// the observation is attached and then applied here rather than
+			// being picked up inside classification as it is on the claude
+			// path. What the filesystem shows outranks what the text suggested
+			// either way.
 			st.observeCommandEnd(item.ID, &e)
+			applyObservedEffects(&e, st.ws)
 		}
 		st.d.appendEvent(e)
 	}

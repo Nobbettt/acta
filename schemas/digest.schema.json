@@ -398,6 +398,12 @@
             "$ref": "#/$defs/observedEffect"
           }
         },
+        "observation_status": {
+          "type": "string",
+          "enum": [
+            "observed"
+          ]
+        },
         "changes": {
           "type": "array",
           "items": {
