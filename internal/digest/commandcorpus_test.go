@@ -18,6 +18,11 @@ type commandCorpusWant struct {
 	Categories []string        `json:"want_categories"`
 	Targets    []CommandTarget `json:"want_targets"`
 	Mutations  []ShellMutation `json:"want_mutations"`
+	// Files is what retrieval published as having been READ. It is optional
+	// only because most entries predate it; without it an entry can assert
+	// the right categories while the same command quietly publishes a file it
+	// never read, which is exactly how a directory operand reached Files.
+	Files []string `json:"want_files,omitempty"`
 }
 
 type commandCorpusCase struct {
@@ -175,6 +180,7 @@ func classifyCorpusCommand(tc commandCorpusCase, exitOK bool) commandCorpusWant 
 		Categories: nonNil(facts.categories),
 		Targets:    nonNil(facts.targets),
 		Mutations:  nonNil(facts.mutations),
+		Files:      paths,
 	}
 }
 
@@ -187,6 +193,15 @@ func nonNil[S ~[]E, E any](s S) S {
 
 func compareCorpusWant(t *testing.T, command string, want, got commandCorpusWant) {
 	t.Helper()
+	// An entry that publishes no files may say so by omitting want_files or by
+	// writing an empty list; both mean the same thing, and neither excuses an
+	// entry whose command DOES publish a file from naming it.
+	if len(want.Files) == 0 {
+		want.Files = nil
+	}
+	if len(got.Files) == 0 {
+		got.Files = nil
+	}
 	if reflect.DeepEqual(want, got) {
 		return
 	}

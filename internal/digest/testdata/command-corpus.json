@@ -2764,7 +2764,10 @@
     "want_mutations": [],
     "source": "contract:PLAN.md",
     "output": "file.go:1:TODO\n",
-    "note": "A successful single-file content search is credited as a read, not search.query."
+    "note": "A successful single-file content search is credited as a read, not search.query.",
+    "want_files": [
+      "file.go"
+    ]
   },
   {
     "command": "head -50",
@@ -2793,7 +2796,10 @@
       "want_categories": [],
       "want_targets": [],
       "want_mutations": []
-    }
+    },
+    "want_files": [
+      "README.md"
+    ]
   },
   {
     "command": "cat CONTRIBUTING",
@@ -2804,7 +2810,10 @@
     "want_mutations": [],
     "source": "contract:PLAN.md",
     "output": "Contributing\n",
-    "note": "Regression: named extensionless instruction basenames remain eligible reads."
+    "note": "Regression: named extensionless instruction basenames remain eligible reads.",
+    "want_files": [
+      "CONTRIBUTING"
+    ]
   },
   {
     "command": "cat .orchestrator-stage-control/result.json",
@@ -2814,7 +2823,10 @@
     "want_targets": [],
     "want_mutations": [],
     "source": "contract:PLAN.md",
-    "output": "{}\n"
+    "output": "{}\n",
+    "want_files": [
+      ".orchestrator-stage-control/result.json"
+    ]
   },
   {
     "command": "cat .github/workflows/ci.yml",
@@ -2824,7 +2836,10 @@
     "want_targets": [],
     "want_mutations": [],
     "source": "contract:PLAN.md",
-    "output": "name: ci\n"
+    "output": "name: ci\n",
+    "want_files": [
+      ".github/workflows/ci.yml"
+    ]
   },
   {
     "command": "cat Dockerfile.dev",
@@ -2834,7 +2849,10 @@
     "want_targets": [],
     "want_mutations": [],
     "source": "contract:PLAN.md",
-    "output": "FROM scratch\n"
+    "output": "FROM scratch\n",
+    "want_files": [
+      "Dockerfile.dev"
+    ]
   },
   {
     "command": "cat .env.local",
@@ -2845,7 +2863,10 @@
     "want_targets": [],
     "want_mutations": [],
     "source": "contract:PLAN.md",
-    "output": "KEY=value\n"
+    "output": "KEY=value\n",
+    "want_files": [
+      ".env.local"
+    ]
   },
   {
     "command": "cat go.sum",
@@ -2855,7 +2876,10 @@
     "want_targets": [],
     "want_mutations": [],
     "source": "contract:PLAN.md",
-    "output": "module sum\n"
+    "output": "module sum\n",
+    "want_files": [
+      "go.sum"
+    ]
   },
   {
     "command": "cat dist/app.js",
@@ -2865,7 +2889,10 @@
     "want_targets": [],
     "want_mutations": [],
     "source": "contract:PLAN.md",
-    "output": "bundle\n"
+    "output": "bundle\n",
+    "want_files": [
+      "dist/app.js"
+    ]
   },
   {
     "command": "rm .orchestrator-stage-control/result.json",
@@ -4403,7 +4430,9 @@
   },
   {
     "command": "grep TODO missing.go",
-    "want_categories": [],
+    "want_categories": [
+      "search.query"
+    ],
     "want_targets": [],
     "want_mutations": [],
     "source": "review-r31-failed-search",
@@ -4414,7 +4443,8 @@
       ],
       "want_targets": [],
       "want_mutations": []
-    }
+    },
+    "note": "A diagnostic naming the tool is not match content: no file was read, and the search itself is what remains creditable."
   },
   {
     "command": "grep TODO present.go",
@@ -4423,7 +4453,10 @@
     "want_mutations": [],
     "source": "review-r31-failed-search",
     "output": "present.go:1:TODO\\n",
-    "note": "Successful content output from one literal file remains a retrieval, not a search query."
+    "note": "Successful content output from one literal file remains a retrieval, not a search query.",
+    "want_files": [
+      "present.go"
+    ]
   },
   {
     "command": "eslint -v",
@@ -4456,5 +4489,87 @@
     "want_targets": [],
     "want_mutations": [],
     "source": "review-r31-version-probe"
+  },
+  {
+    "command": "rg TODO .env.production",
+    "want_categories": [
+      "search.query"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "want_files": [],
+    "source": "review-r32-correctness",
+    "output": ".env.production/settings:1:TODO\n",
+    "note": "The output proves the match came from a child, so the operand is a searched directory."
+  },
+  {
+    "command": "rg -n TODO docs.api",
+    "want_categories": [
+      "search.query"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "want_files": [],
+    "source": "review-r32-correctness",
+    "output": "docs.api/file.go:1:TODO\n",
+    "note": "A dotted name is not evidence of a file; the output names the file that was read."
+  },
+  {
+    "command": "rg TODO app.config",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "want_files": [
+      "app.config"
+    ],
+    "source": "review-r32-correctness",
+    "output": "1:TODO\n",
+    "note": "Output with no path prefix is content from the single operand itself, which was read."
+  },
+  {
+    "command": "head -n 1 < README.md",
+    "want_categories": [
+      "instructions.read"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "want_files": [
+      "README.md"
+    ],
+    "source": "review-r32-correctness",
+    "output": "first line\n",
+    "note": "The shell opens the named file and head reads it."
+  },
+  {
+    "command": "head <<< .env",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "want_files": [],
+    "source": "review-r32-correctness",
+    "output": "x\n",
+    "note": "A here-string is literal data; its text is never a file that was read."
+  },
+  {
+    "command": "head -n 1 README.md > out.txt",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "want_files": [],
+    "source": "review-r32-correctness",
+    "output": "",
+    "note": "Redirected output is not the captured stream, so it proves nothing about content."
+  },
+  {
+    "command": "rg TODO fixtures.test",
+    "want_categories": [
+      "search.query"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "want_files": [],
+    "source": "review-r32-correctness",
+    "output": "fixtures.test/case.go:1:TODO\n",
+    "note": "An ordinary dotted directory: the output names the child that matched."
   }
 ]

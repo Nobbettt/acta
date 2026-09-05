@@ -378,7 +378,13 @@ func (s *claudeParseState) consumeToolUse(e *Event, content *ClaudeContent) {
 		Prompt       string       `json:"prompt"`
 		Todos        []claudeTodo `json:"todos"`
 	}
-	_ = json.Unmarshal(content.Input, &input)
+	// encoding/json fills the fields it managed to decode before it reports a
+	// type error, so discarding the error leaves a struct that is part real
+	// input and part zero value. A Bash command taken from such a struct is a
+	// fragment of a payload this parser did not understand, and crediting a
+	// delete from it invents the very act the malformed field should have made
+	// us doubt.
+	inputDecoded := json.Unmarshal(content.Input, &input) == nil
 
 	e.Tool = content.Name
 	setEventInput(e, content.Input)
@@ -391,7 +397,9 @@ func (s *claudeParseState) consumeToolUse(e *Event, content *ClaudeContent) {
 	switch {
 	case content.Name == "Bash":
 		e.Kind = KindCommand
-		e.Command = strings.Trim(input.Command, " \t\n")
+		if inputDecoded {
+			e.Command = strings.Trim(input.Command, " \t\n")
+		}
 		s.d.Metrics.Commands++
 	case claudeEditTools[content.Name]:
 		e.Kind = KindFileEdit
@@ -757,15 +765,27 @@ func toolUseResultOutcomeUnreadable(raw json.RawMessage) bool {
 		// report is unreadable rather than absent.
 		return true
 	}
+	decoded := 0
+	first := 0
 	for _, name := range []string{"exit_code", "exitCode"} {
 		value, ok := fields[name]
 		if !ok {
 			continue
 		}
 		var code *int
-		if json.Unmarshal(value, &code) != nil {
+		// A JSON null unmarshals into *int without error and leaves the
+		// pointer nil. The field is present and claims to report an outcome,
+		// so a null is a value this parser could not read - not an absent one.
+		if json.Unmarshal(value, &code) != nil || code == nil {
 			return true
 		}
+		if decoded > 0 && *code != first {
+			// The two spellings of the same field contradict each other, and
+			// nothing in the stream says which one to believe.
+			return true
+		}
+		decoded++
+		first = *code
 	}
 	return false
 }

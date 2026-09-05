@@ -888,7 +888,7 @@ func execSearch(cmd execCommand) *commandFacts {
 	if len(scan.operands) == 0 && !hasRegexp && !hasPatternFile {
 		return nil
 	}
-	if cmd.seg.exitOK && explicitSingleSearchFile(cmd.seg.tokens, cmd.seg.ws) != "" &&
+	if cmd.seg.exitOK && explicitSingleSearchFile(cmd.seg.tokens, cmd.seg.output, cmd.seg.ws) != "" &&
 		searchCommandCanExposeFileContent(cmd.seg.tokens, cmd.seg.output) {
 		return nil
 	}

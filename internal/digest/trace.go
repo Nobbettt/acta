@@ -426,6 +426,29 @@ func hasRedirectionToken(tokens []string) bool {
 	return false
 }
 
+// hasHereStringToken reports whether a `<<<` supplies the command's input as
+// literal text rather than from a file.
+func hasHereStringToken(tokens []string) bool {
+	for _, token := range tokens {
+		if strings.HasPrefix(token, "<<<") {
+			return true
+		}
+	}
+	return false
+}
+
+// hasOutputRedirectionToken reports whether any output was sent somewhere other
+// than the captured stream, which means the captured output cannot be taken as
+// what the command produced.
+func hasOutputRedirectionToken(tokens []string) bool {
+	for _, token := range tokens {
+		if strings.Contains(token, ">") {
+			return true
+		}
+	}
+	return false
+}
+
 func fileBeforePipe(tokens []string, ws *workspace) string {
 	beforePipe := tokens
 	if idx := firstPipeIndexAfter(tokens, 0); idx < len(tokens) {
@@ -550,7 +573,13 @@ func sedReadStep(tokens []string, ws *workspace) *step {
 }
 
 func headReadStep(tokens []string, ws *workspace) *step {
-	if !shellStageStartsWith(tokens, "head") || hasRedirectionToken(tokens) {
+	// A here-string supplies literal data, so `head <<< .env` reads no file at
+	// all and its operand must never be published as one. A plain `< file`
+	// redirection is the opposite case: the shell opens that exact file and
+	// head reads it. Rejecting every redirection would confuse the two and
+	// lose a read the command plainly performed.
+	if !shellStageStartsWith(tokens, "head") || hasHereStringToken(tokens) ||
+		hasOutputRedirectionToken(tokens) {
 		return nil
 	}
 	count := headCountFromTokens(tokens)
@@ -639,6 +668,9 @@ func searchCommandCanExposeFileContent(tokens []string, outputText string) bool 
 	if strings.TrimSpace(outputText) == "" || hasRedirectionToken(tokens) {
 		return false
 	}
+	if searchOutputIsDiagnostic(tokens, outputText) {
+		return false
+	}
 	for _, token := range tokens {
 		if contentSuppressingFlags[token] {
 			return false
@@ -647,7 +679,14 @@ func searchCommandCanExposeFileContent(tokens []string, outputText string) bool 
 	return true
 }
 
-func explicitSingleSearchFile(tokens []string, ws *workspace) string {
+// explicitSingleSearchFile names the one file a search was scoped to, or "" if
+// the operand was not provably a single file. outputText is consulted because
+// it settles what no amount of name inspection can: grep and rg prefix every
+// matched line with a path only when the match came from BELOW the operand, so
+// a line starting with the operand plus a separator proves the operand was a
+// directory. `.env.production` and `docs.api` are the cases that matter - both
+// wear a filename's shape, and only the output distinguishes them from a file.
+func explicitSingleSearchFile(tokens []string, outputText string, ws *workspace) string {
 	start := -1
 	word := ""
 	for i, token := range tokens {
@@ -694,10 +733,26 @@ func explicitSingleSearchFile(tokens []string, ws *workspace) string {
 			candidates = append(candidates, normalized)
 		}
 	}
-	if len(candidates) == 1 {
-		return candidates[0]
+	if len(candidates) != 1 {
+		return ""
 	}
-	return ""
+	if searchOutputNamesChildOf(candidates[0], outputText) {
+		return ""
+	}
+	return candidates[0]
+}
+
+// searchOutputNamesChildOf reports whether any output line begins with the
+// operand followed by a separator, which only happens when the tool descended
+// into it.
+func searchOutputNamesChildOf(operand, outputText string) bool {
+	prefix := strings.TrimSuffix(operand, "/") + "/"
+	for _, line := range strings.Split(outputText, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // searchFileStepFromCommand credits a file-only retrieval when a grep/rg
@@ -712,7 +767,7 @@ func searchFileStepFromCommand(chain []chainSegment, outputText string, ws *work
 		if !searchCommandCanExposeFileContent(tokens, outputText) {
 			continue
 		}
-		if filePath := explicitSingleSearchFile(tokens, ws); filePath != "" && !slices.Contains(files, filePath) {
+		if filePath := explicitSingleSearchFile(tokens, outputText, ws); filePath != "" && !slices.Contains(files, filePath) {
 			files = append(files, filePath)
 		}
 	}
@@ -720,6 +775,29 @@ func searchFileStepFromCommand(chain []chainSegment, outputText string, ws *work
 		return nil
 	}
 	return &step{files: files}
+}
+
+// searchOutputIsDiagnostic reports whether the output is the search tool
+// complaining rather than showing file content. `grep TODO missing.go` can
+// report a zero exit status while printing `grep: missing.go: No such file or
+// directory`, and treating that as a match would publish a file the command
+// proved it never read. The tool names itself first in such a line, which is
+// the one shape that distinguishes a diagnostic from a matched line - matched
+// content is arbitrary text and cannot be pattern-matched safely.
+func searchOutputIsDiagnostic(tokens []string, outputText string) bool {
+	text := strings.TrimSpace(outputText)
+	if i := strings.IndexByte(text, '\n'); i >= 0 {
+		text = text[:i]
+	}
+	for _, token := range tokens {
+		if token != "grep" && token != "rg" {
+			continue
+		}
+		if strings.HasPrefix(text, token+": ") {
+			return true
+		}
+	}
+	return false
 }
 
 var grepNoMatchMarkers = []string{"no matches found", "no files found"}
