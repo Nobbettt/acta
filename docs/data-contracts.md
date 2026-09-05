@@ -20,6 +20,42 @@ producer has `name`, release/development `version`, source `commit`, and build
 `date`; name and version are required in current schemas. Raw provider streams
 are vendor evidence and do not use Acta schema versions.
 
+## Shell command classification
+
+Digest timeline entries and the `shell.command.completed` /
+`shell.command.incomplete` payloads carry two optional facets derived from a
+shell command: `categories`, a sorted deduped list of what the command did
+(`vcs.read`, `fs.delete`, `package.install`, …), and `targets`, the things it
+acted on. A target is `{kind, value}`, where `kind` is one of `path`,
+`package`, `url`, `host`, `pattern`, `ref` or `tool`. A category is credited
+only when the command text — or, for a single-segment command, its bounded
+output — proves it; nothing is inferred from intent, so an unclassifiable
+command carries neither field. `tool` is reserved: no current classifier emits
+it, and it stays in the enum because widening a published enum later is the
+breaking direction.
+
+`control.access` is credited only against a caller-declared control-plane
+directory (`digest.Options.ControlPlaneDir`). Acta declares none of its own, and
+a re-digest must be given the same directory — `digest.FromRunDirWithOptions` —
+to reproduce it.
+
+Digest timeline entries additionally carry `shell_mutations`, a list of
+`{kind, path}` or `{kind, from, to}` records (`kind` is `delete` or `move`)
+proving the workspace changes a shell command made outside an edit tool. It is
+the digest-side source the `file.deleted` / `file.moved` events below are
+projected from; it is v3-only and does not appear in event stream payloads.
+
+Two event types carry workspace changes a shell command proved, alongside the
+command event the same way `file.read` does:
+
+- `file.deleted` — `{path, source_event_sequence, command}`
+- `file.moved` — `{from, to, source_event_sequence, command}`
+
+Timeline-derived event payloads carry optional `file_patch_errors`. A
+`capture warning:` means a provider-reported path could not be made
+workspace-relative; it is non-fatal, and the dropped paths remain recoverable
+from the raw provider artifact using `raw_event_lines`.
+
 ## Compatibility rules
 
 - Version 2 is the first published run-record, digest, and Acta-event contract;

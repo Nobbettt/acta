@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -129,6 +130,78 @@ printf 'codex stderr\n' >&2
 	agentArgs := strings.Split(strings.TrimSpace(readFile(t, agentArgsPath)), "\n")
 	if !containsAdjacent(agentArgs, "--cd", cwd) || !containsAdjacent(agentArgs, "--add-dir", resolvedWritableDir) {
 		t.Fatalf("agent args = %#v, want explicit project and writable directory", agentArgs)
+	}
+}
+
+func TestRunControlAccessRequiresExplicitDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	cwd := t.TempDir()
+	withStagingLookupHooks(t)
+	stagingBase, err := os.MkdirTemp(".", ".control-access-staging-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stagingBase, err = filepath.Abs(stagingBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(stagingBase) })
+	lookupUserCacheDir = func() (string, error) { return stagingBase, nil }
+	lookupUserHomeDir = func() (string, error) { return "", errors.New("disabled for test") }
+	controlDir := filepath.Join(cwd, ".stage-control")
+	if err := os.Mkdir(controlDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fakeBin := t.TempDir()
+	writeFakeAgent(t, fakeBin, "codex", `#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"type":"item.completed","item":{"id":"control-read","type":"command_execution","command":"cat .stage-control/result.json","status":"completed","exit_code":0,"aggregated_output":"{}\\n"}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}'
+`)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	for _, tc := range []struct {
+		name            string
+		controlPlaneDir string
+		want            bool
+	}{
+		{"explicit control directory", controlDir, true},
+		{"generic writable directory", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			record, err := runForTest(context.Background(), Options{
+				Agent:             "codex",
+				CWD:               cwd,
+				Prompt:            "read the control result",
+				PromptSource:      "test",
+				AgentWritableDirs: []string{controlDir},
+				ControlPlaneDir:   tc.controlPlaneDir,
+				Stream:            false,
+			}, io.Discard, io.Discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload, err := os.ReadFile(filepath.Join(record.RunDir, "digest.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got digest.Digest
+			if err := json.Unmarshal(payload, &got); err != nil {
+				t.Fatal(err)
+			}
+			for _, event := range got.Timeline {
+				if event.Kind != digest.KindCommand || event.Command != "cat .stage-control/result.json" {
+					continue
+				}
+				if credited := slices.Contains(event.Categories, "control.access"); credited != tc.want {
+					t.Fatalf("command categories = %v, control.access = %v, want %v", event.Categories, credited, tc.want)
+				}
+				return
+			}
+			t.Fatal("control-plane command missing from digest")
+		})
 	}
 }
 

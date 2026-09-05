@@ -25,7 +25,7 @@ func TestRestoreCapturedFilePatches(t *testing.T) {
 	}
 
 	replayed := Digest{Timeline: []Event{{Kind: KindFileEdit, ProviderEvent: "file_change", ID: "write-1"}}}
-	if err := restoreCapturedFilePatches(context.Background(), dir, &replayed); err != nil {
+	if _, err := restoreCapturedFilePatches(context.Background(), dir, &replayed); err != nil {
 		t.Fatal(err)
 	}
 	if len(replayed.Timeline[0].FilePatches) != 1 || replayed.Timeline[0].FilePatches[0].Path != "src/clock.ts" {

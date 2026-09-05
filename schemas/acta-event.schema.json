@@ -22,7 +22,8 @@
         "agent.lifecycle", "agent.error", "agent.event.unsupported", "tool.call.completed",
         "tool.call.incomplete", "tool.result.orphaned", "shell.command.completed",
         "shell.command.incomplete", "web.search.completed", "web.search.incomplete",
-        "file.read", "file.written", "file.write.incomplete", "diff.generated",
+        "file.read", "file.written", "file.write.incomplete", "file.deleted",
+        "file.moved", "diff.generated",
         "tokens.reported", "run.completed", "run.failed"
       ]
     },
@@ -61,6 +62,14 @@
     {
       "if": {"properties": {"type": {"const": "file.read"}}, "required": ["type"]},
       "then": {"properties": {"payload": {"$ref": "#/$defs/fileRead"}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "file.deleted"}}, "required": ["type"]},
+      "then": {"properties": {"payload": {"$ref": "#/$defs/fileDeleted"}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "file.moved"}}, "required": ["type"]},
+      "then": {"properties": {"payload": {"$ref": "#/$defs/fileMoved"}}}
     },
     {
       "if": {"properties": {"type": {"const": "diff.generated"}}, "required": ["type"]},
@@ -118,6 +127,10 @@
       "type": "object", "additionalProperties": false, "required": ["path"],
       "properties": {"path": {"type": "string"}, "kind": {"type": "string"}}
     },
+    "target": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "value"],
+      "properties": {"kind": {"enum": ["path", "package", "url", "host", "pattern", "ref", "tool"]}, "value": {"type": "string", "minLength": 1}}
+    },
     "timeline": {
       "type": "object", "additionalProperties": false, "required": ["kind"],
       "properties": {
@@ -131,9 +144,12 @@
         "output": {"type": "string"}, "output_chars": {"type": "integer", "minimum": 0}, "output_truncated": {"type": "boolean"},
         "text": {"type": "string"}, "text_chars": {"type": "integer", "minimum": 0}, "text_truncated": {"type": "boolean"},
         "query": {"type": "string"}, "action": {}, "files": {"type": "array", "items": {"type": "string"}},
+        "categories": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "targets": {"type": "array", "items": {"$ref": "#/$defs/target"}},
         "changes": {"type": "array", "items": {"$ref": "#/$defs/mutation"}},
         "spans": {"type": "object", "additionalProperties": {"type": "array", "items": {"$ref": "#/$defs/span"}}},
-        "patches": {"type": "array", "items": {"$ref": "#/$defs/patch"}}, "details": {},
+        "patches": {"type": "array", "items": {"$ref": "#/$defs/patch"}},
+        "file_patch_errors": {"type": "array", "items": {"type": "string"}}, "details": {},
         "raw_event_lines": {"type": "array", "items": {"type": "integer", "minimum": 1}},
         "redacted": {"type": "boolean"}
       }
@@ -141,6 +157,14 @@
     "fileRead": {
       "type": "object", "additionalProperties": false, "required": ["path", "source_event_sequence"],
       "properties": {"path": {"type": "string"}, "spans": {"type": "array", "items": {"$ref": "#/$defs/span"}}, "ranges": {"type": "array", "items": {"$ref": "#/$defs/range"}}, "source_event_sequence": {"type": "integer", "minimum": 1}, "tool": {"type": "string"}, "command": {"type": "string"}}
+    },
+    "fileDeleted": {
+      "type": "object", "additionalProperties": false, "required": ["path", "source_event_sequence"],
+      "properties": {"path": {"type": "string", "minLength": 1}, "source_event_sequence": {"type": "integer", "minimum": 1}, "command": {"type": "string"}}
+    },
+    "fileMoved": {
+      "type": "object", "additionalProperties": false, "required": ["from", "to", "source_event_sequence"],
+      "properties": {"from": {"type": "string", "minLength": 1}, "to": {"type": "string", "minLength": 1}, "source_event_sequence": {"type": "integer", "minimum": 1}, "command": {"type": "string"}}
     },
     "diff": {"type": "object", "additionalProperties": false, "required": ["path"], "properties": {"path": {"type": "string"}}},
     "tokenUsage": {

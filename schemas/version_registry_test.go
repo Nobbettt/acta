@@ -90,9 +90,56 @@ func diffSchemaProperties(v2Root, v3Root map[string]any, v2Node, v3Node any, pat
 
 	v2Branches := schemaBranchesByCondition(v2Object["allOf"])
 	for condition, v3Branch := range schemaBranchesByCondition(v3Object["allOf"]) {
-		v2Branch := v2Branches[condition]
+		v2Branch, matched := v2Branches[condition]
+		if !matched && branchSelectsOnlyV3Types(v2Object, v3Branch) {
+			// A payload contract for a document type v2 has no name for cannot
+			// have a v2 counterpart. The whole type, not any single field of it,
+			// is the v3-only unit, so there is nothing to gate field by field.
+			continue
+		}
 		diffSchemaProperties(v2Root, v3Root, schemaThen(v2Branch), schemaThen(v3Branch), path, paths)
 	}
+}
+
+// branchSelectsOnlyV3Types reports whether a v3 conditional branch applies
+// exclusively to type values absent from the v2 type enum.
+func branchSelectsOnlyV3Types(v2Node map[string]any, v3Branch map[string]any) bool {
+	selected := schemaTypeValues(v3Branch["if"])
+	if len(selected) == 0 {
+		return false
+	}
+	known := make(map[string]bool)
+	for _, value := range schemaTypeValues(v2Node) {
+		known[value] = true
+	}
+	for _, value := range selected {
+		if known[value] {
+			return false
+		}
+	}
+	return true
+}
+
+// schemaTypeValues returns the type values a schema node constrains, whether it
+// spells them as a const or an enum.
+func schemaTypeValues(node any) []string {
+	object, ok := node.(map[string]any)
+	if !ok {
+		return nil
+	}
+	properties, _ := object["properties"].(map[string]any)
+	typeSchema, _ := properties["type"].(map[string]any)
+	if constant, ok := typeSchema["const"].(string); ok {
+		return []string{constant}
+	}
+	values, _ := typeSchema["enum"].([]any)
+	var result []string
+	for _, value := range values {
+		if text, ok := value.(string); ok {
+			result = append(result, text)
+		}
+	}
+	return result
 }
 
 func resolveLocalSchemaRef(root map[string]any, node any) any {

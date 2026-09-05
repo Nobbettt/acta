@@ -1,11 +1,13 @@
 package digest
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -87,6 +89,129 @@ func TestStreamDigesterMatchesFromRunDir(t *testing.T) {
 	if string(a) != string(b) {
 		t.Fatalf("live digest != re-digest\n  from_run_dir: %s\n  live:         %s", a, b)
 	}
+}
+
+// Classification must not depend on how the digest was produced. The
+// control-plane directory is caller-declared rather than recorded in the
+// bundle, so the re-digest has to be given the same one the run ran with —
+// that is what FromRunDirWithOptions is for, and with it the two paths credit
+// exactly the same categories.
+func TestControlPlaneClassificationSurvivesARedigest(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Date(2026, 9, 2, 9, 0, 0, 0, time.UTC)
+	lines := []string{
+		`{"type":"thread.started","thread_id":"thread-control"}`,
+		`{"type":"turn.started"}`,
+		`{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"rm stage-control/task.json","status":"completed","exit_code":0,"aggregated_output":""}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`,
+	}
+	if err := os.WriteFile(filepath.Join(dir, "codex-events.jsonl"), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rec := validTestRecord(dir, "codex-events.jsonl")
+	payload, _ := json.Marshal(rec)
+	if err := os.WriteFile(filepath.Join(dir, "run.json"), payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	options := Options{ControlPlaneDir: "stage-control"}
+	sd, err := NewStreamDigesterWithOptions("codex", dir, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, line := range lines {
+		sd.Line([]byte(line), base.Add(time.Duration(i)*time.Second))
+	}
+	live := sd.Finalize(&rec, dir)
+
+	redigested, err := FromRunDirWithOptions(context.Background(), dir, "", options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"control.access", "fs.delete"}
+	if got := commandCategories(t, live); !reflect.DeepEqual(got, want) {
+		t.Fatalf("live categories = %v, want %v", got, want)
+	}
+	if got := commandCategories(t, redigested); !reflect.DeepEqual(got, want) {
+		t.Fatalf("re-digest categories = %v, want %v", got, want)
+	}
+
+	// And without the declaration the category is simply never credited, so the
+	// option is what carries it rather than something the bundle leaks.
+	plain, err := FromRunDir(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := commandCategories(t, plain); !reflect.DeepEqual(got, []string{"fs.delete"}) {
+		t.Fatalf("undeclared re-digest categories = %v, want [fs.delete]", got)
+	}
+}
+
+func TestRedigestIsIndependentOfProcessWorkingDirectoryAndRejectsUnrecordedAlias(t *testing.T) {
+	root := t.TempDir()
+	workspaceDir := filepath.Join(root, "workspace")
+	if err := os.Mkdir(workspaceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "agent-cwd")
+	if err := os.Symlink(workspaceDir, alias); err != nil {
+		t.Fatal(err)
+	}
+	runDir := filepath.Join(root, "run")
+	if err := os.Mkdir(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lines := []string{
+		`{"type":"thread.started","thread_id":"thread-alias"}`,
+		`{"type":"turn.started"}`,
+		`{"type":"item.completed","item":{"id":"f1","type":"file_change","status":"completed","changes":[{"path":"` + filepath.ToSlash(filepath.Join(alias, "sample.txt")) + `","kind":"update"}]}}`,
+		`{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"rm stage-control/task.json","status":"completed","exit_code":0,"aggregated_output":""}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`,
+	}
+	rawName := "codex-events.jsonl"
+	if err := os.WriteFile(filepath.Join(runDir, rawName), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rec := validTestRecord(workspaceDir, rawName)
+	rec.RunDir = runDir
+	rec.RawStdoutPath = filepath.Join(runDir, rawName)
+	rec.RawStderrPath = filepath.Join(runDir, "agent.stderr.log")
+	writeRecord(t, runDir, rec)
+	options := Options{ControlPlaneDir: filepath.Join(alias, "stage-control")}
+
+	t.Chdir(alias)
+	fromAlias, err := FromRunDirWithOptions(context.Background(), runDir, "", options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+	fromOther, err := FromRunDirWithOptions(context.Background(), runDir, "", options)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a, _ := json.Marshal(fromAlias)
+	b, _ := json.Marshal(fromOther)
+	if string(a) != string(b) {
+		t.Fatalf("re-digest depends on process cwd\n  alias cwd: %s\n  other cwd: %s", a, b)
+	}
+	if len(fromOther.Files) != 0 {
+		t.Fatalf("unrecorded alias leaked into files: %+v", fromOther.Files)
+	}
+	if got := commandCategories(t, fromOther); !reflect.DeepEqual(got, []string{"fs.delete"}) {
+		t.Fatalf("categories = %v, want [fs.delete]", got)
+	}
+}
+
+func commandCategories(t *testing.T, d *Digest) []string {
+	t.Helper()
+	for _, event := range d.Timeline {
+		if event.Kind == KindCommand {
+			return event.Categories
+		}
+	}
+	t.Fatal("digest has no command event")
+	return nil
 }
 
 func TestStreamDigesterCapturesExactPerWritePatch(t *testing.T) {

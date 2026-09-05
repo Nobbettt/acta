@@ -316,7 +316,7 @@ func TestGoProducedCurrentArtifactsValidateAgainstPublishedSchemas(t *testing.T)
 			name: "digest", schema: "digest.schema.json",
 			value: digest.Digest{
 				SchemaVersion: digest.SchemaVersion, Producer: producer, RunID: "run-example", Agent: "codex", AgentVersion: "0.147.0",
-				Status: digest.StatusOK, Timeline: []digest.Event{}, Metrics: digest.Metrics{}, Files: []digest.FileTouch{}, HasWorkspaceDiff: false,
+				Status: digest.StatusOK, Timeline: []digest.Event{classifiedCommandEvent()}, Metrics: digest.Metrics{}, Files: []digest.FileTouch{}, HasWorkspaceDiff: false,
 				OTLPStatus: "pending",
 			},
 		},
@@ -479,7 +479,7 @@ func TestGoBuiltActaEventStreamValidatesPayloadContracts(t *testing.T) {
 	}
 	d := &digest.Digest{
 		SchemaVersion: digest.SchemaVersion, Producer: producer, RunID: record.ID, Agent: record.Agent, AgentVersion: record.AgentVersion,
-		Status: digest.StatusOK, Timeline: []digest.Event{}, Metrics: digest.Metrics{}, Files: []digest.FileTouch{},
+		Status: digest.StatusOK, Timeline: []digest.Event{classifiedCommandEvent()}, Metrics: digest.Metrics{}, Files: []digest.FileTouch{},
 		Termination: digest.Termination{Outcome: digest.OutcomeCompleted, RunnerReason: digest.OutcomeCompleted},
 	}
 	events, err := actaevents.BuildForBundle("", record, d, "")
@@ -492,6 +492,18 @@ func TestGoBuiltActaEventStreamValidatesPayloadContracts(t *testing.T) {
 			t.Fatal(err)
 		}
 		validateJSON(t, schema, encoded)
+	}
+}
+
+// classifiedCommandEvent is a shell command carrying every classification field
+// the digest and event contracts publish, so the schemas are checked against
+// what the Go types really emit rather than against an empty timeline.
+func classifiedCommandEvent() digest.Event {
+	return digest.Event{
+		Kind: digest.KindCommand, Command: "rm old.txt", Status: "completed",
+		Categories:     []string{"fs.delete"},
+		Targets:        []digest.CommandTarget{{Kind: "path", Value: "old.txt"}},
+		ShellMutations: []digest.ShellMutation{{Kind: "delete", Path: "old.txt"}},
 	}
 }
 

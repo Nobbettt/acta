@@ -30,12 +30,11 @@ var (
 	sedRangeRe            = regexp.MustCompile(`^(\d+)\s*,\s*(\d+)\s*p$`)
 	pathWithLineRe        = regexp.MustCompile(`^(.+?):(\d+)(?::.*)?$`)
 	pathLikeRe            = regexp.MustCompile(`(?:/|\.{0,2}/)?[A-Za-z0-9_.@%+=~:/-]+\.[A-Za-z0-9_+-]+`)
-	segmentSplitRe        = regexp.MustCompile(`\n|&&|\|\||;`)
 )
 
 var knownRootFilenames = map[string]bool{
 	"BUILD": true, "BUILD.bazel": true, "Brewfile": true, "CMakeLists.txt": true,
-	"Dockerfile": true, "Gemfile": true, "Jenkinsfile": true, "LICENSE": true,
+	"CONTRIBUTING": true, "Dockerfile": true, "Gemfile": true, "Jenkinsfile": true, "LICENSE": true,
 	"Makefile": true, "NOTICE": true, "Procfile": true, "README": true,
 	"Rakefile": true, "Vagrantfile": true, "WORKSPACE": true, "WORKSPACE.bazel": true,
 }
@@ -49,13 +48,15 @@ type step struct {
 	readRanges map[string][]ReadRange
 }
 
-// workspace resolves agent-reported paths to repo-relative ones. It matches
-// against the workspace root plus its symlink-resolved and macOS
-// /private-prefixed variants (claude reports /private/var/... while codex
-// reports /var/... for the same directory).
+// workspace resolves agent-reported paths to repo-relative ones using only
+// recorded path spellings. The macOS /private variants cover the stable alias
+// reported by different providers without consulting the live filesystem.
 type workspace struct {
 	variants []string
 	root     string
+	// controlPrefix is the caller-declared control-plane directory, relative to
+	// the root. Empty — the default — means control.access is never credited.
+	controlPrefix string
 }
 
 func newWorkspace(dir string) *workspace {
@@ -64,21 +65,12 @@ func newWorkspace(dir string) *workspace {
 		return w
 	}
 	logical := canonicalWorkspacePath(dir)
-	var abs string
-	if filepath.IsAbs(dir) {
-		abs = filepath.Clean(dir)
-	} else if isPortableAbsolute(logical) {
+	root := filepath.Clean(dir)
+	if isPortableAbsolute(logical) && !filepath.IsAbs(dir) {
 		// Preserve a recorded path from another OS for offline re-digestion.
-		// filepath.Abs would incorrectly prefix it with the Windows CWD.
-		abs = filepath.Clean(filepath.FromSlash(logical))
-	} else {
-		var err error
-		abs, err = filepath.Abs(dir)
-		if err != nil {
-			abs = dir
-		}
+		root = filepath.Clean(filepath.FromSlash(logical))
 	}
-	w.root = abs
+	w.root = root
 	seen := map[string]bool{}
 	add := func(p string) {
 		p = canonicalWorkspacePath(p)
@@ -87,11 +79,8 @@ func newWorkspace(dir string) *workspace {
 			w.variants = append(w.variants, p)
 		}
 	}
-	add(abs)
+	add(root)
 	add(logical)
-	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-		add(resolved)
-	}
 	for _, v := range append([]string(nil), w.variants...) {
 		add(togglePrivatePrefix(v))
 	}
@@ -109,7 +98,14 @@ func togglePrivatePrefix(p string) string {
 }
 
 func canonicalWorkspacePath(value string) string {
-	return path.Clean(strings.ReplaceAll(filepath.ToSlash(strings.TrimSpace(value)), `\`, "/"))
+	return path.Clean(strings.ReplaceAll(filepath.ToSlash(value), `\`, "/"))
+}
+
+// sameCommandPath compares only lexical aliases. Parent components can cross a
+// symlink, so treating them as a cleaned match would suppress a real change.
+func sameCommandPath(left, right string) bool {
+	return left != "" && right != "" && !hasParentPathComponent(left) && !hasParentPathComponent(right) &&
+		canonicalWorkspacePath(left) == canonicalWorkspacePath(right)
 }
 
 func isPortableAbsolute(value string) bool {
@@ -122,6 +118,9 @@ func isPortableAbsolute(value string) bool {
 // rel converts p to a workspace-relative posix path. The second return is
 // false when p is absolute but outside the workspace (p returned unchanged).
 func (w *workspace) rel(p string) (string, bool) {
+	if hasParentPathComponent(p) {
+		return p, false
+	}
 	canonical := canonicalWorkspacePath(p)
 	if !filepath.IsAbs(p) && !isPortableAbsolute(canonical) {
 		return path.Clean(canonical), true
@@ -143,19 +142,27 @@ func (w *workspace) rel(p string) (string, bool) {
 	return p, false
 }
 
+func hasParentPathComponent(value string) bool {
+	for _, component := range strings.Split(strings.ReplaceAll(value, `\`, "/"), "/") {
+		if component == ".." {
+			return true
+		}
+	}
+	return false
+}
+
 // normalizeWorkspacePath admits only paths inside the recorded workspace. It
 // accepts ordinary relative tool paths, but rejects traversal such as ../x and
 // absolute paths that workspace.rel could not relativize.
 func normalizeWorkspacePath(value string, ws *workspace) (string, bool) {
-	raw := strings.TrimSpace(value)
-	if raw == "" {
+	if value == "" {
 		return "", false
 	}
-	normalized, ok := ws.rel(raw)
+	normalized, ok := ws.rel(value)
 	if !ok {
 		return "", false
 	}
-	normalized = path.Clean(filepath.ToSlash(strings.TrimSpace(normalized)))
+	normalized = path.Clean(filepath.ToSlash(normalized))
 	if normalized == "" || normalized == "." || normalized == ".." || strings.HasPrefix(normalized, "/") {
 		return "", false
 	}
@@ -358,19 +365,6 @@ func normalizeCommandPathToken(token string, ws *workspace) string {
 	return normalizeInferredFilePath(token, ws)
 }
 
-func pathTokenFromTokens(tokens []string, ws *workspace, reverse bool) string {
-	for i := range tokens {
-		idx := i
-		if reverse {
-			idx = len(tokens) - 1 - i
-		}
-		if normalized := normalizeCommandPathToken(tokens[idx], ws); normalized != "" {
-			return normalized
-		}
-	}
-	return ""
-}
-
 func sedRangeFromTokens(tokens []string) (Span, bool) {
 	for _, token := range tokens {
 		m := sedRangeRe.FindStringSubmatch(strings.Trim(token, "'\""))
@@ -417,48 +411,25 @@ func firstPipeIndexAfter(tokens []string, start int) int {
 	return len(tokens)
 }
 
-func hasRedirectionToken(tokens []string) bool {
-	for _, token := range tokens {
-		if strings.Contains(token, ">") || strings.HasPrefix(token, "<") {
-			return true
-		}
-	}
-	return false
-}
-
-func fileBeforePipe(tokens []string, ws *workspace) string {
-	beforePipe := tokens
-	if idx := firstPipeIndexAfter(tokens, 0); idx < len(tokens) {
-		beforePipe = tokens[:idx]
-	}
-	return pathTokenFromTokens(beforePipe, ws, true)
-}
-
-func fileAfterCommand(tokens []string, commandWord string, ws *workspace) string {
-	start := -1
-	for i, token := range tokens {
-		if token == commandWord {
-			start = i + 1
-			break
-		}
-	}
+func fileAfterCommand(command shellSimpleCommand, commandWord string, ws *workspace) string {
+	start := slices.IndexFunc(command.words, func(word shellWord) bool {
+		return word.text == commandWord
+	})
 	if start < 0 {
 		return ""
 	}
-	stop := firstPipeIndexAfter(tokens, start)
-	return pathTokenFromTokens(tokens[start:stop], ws, true)
+	for i := len(command.words) - 1; i > start; i-- {
+		word := command.words[i]
+		if word.literal {
+			if normalized := normalizeCommandPathToken(word.text, ws); normalized != "" {
+				return normalized
+			}
+		}
+	}
+	return ""
 }
 
 var readLikeWords = []string{"sed", "cat", "head", "tail", "nl"}
-
-func hasReadLikeCommand(rawCommand string, tokens []string) bool {
-	for _, word := range readLikeWords {
-		if slices.Contains(tokens, word) || commandHasWord(rawCommand, word) {
-			return true
-		}
-	}
-	return false
-}
 
 func hasGrepLikeCommand(rawCommand string, tokens []string) bool {
 	return slices.Contains(tokens, "rg") || slices.Contains(tokens, "grep") ||
@@ -475,13 +446,38 @@ func readSegmentStep(segment, outputText string, ws *workspace) *step {
 	if len(tokens) == 0 {
 		return untokenizedReadStep(segment, outputText, ws)
 	}
-	if s := sedReadStep(tokens, ws); s != nil {
+	if readSegmentIsInformational(tokens) {
+		return nil
+	}
+	if s := sedReadStep(segment, tokens, ws); s != nil {
 		return s
 	}
-	if s := headReadStep(tokens, ws); s != nil {
+	if s := headReadStep(segment, tokens, ws); s != nil {
 		return s
 	}
-	return catLikeReadStep(tokens, outputText, ws)
+	return catLikeReadStep(segment, tokens, outputText, ws)
+}
+
+func readSegmentIsInformational(tokens []string) bool {
+	for len(tokens) > 0 {
+		end := firstPipeIndexAfter(tokens, 0)
+		stage := tokens[:end]
+		for _, word := range readLikeWords {
+			if shellStageStartsWith(stage, word) {
+				index := slices.IndexFunc(stage, func(token string) bool {
+					return path.Base(strings.Trim(token, "()")) == word
+				})
+				if index >= 0 && execCommandAssertsNoChange(execCommand{word: word, args: fsOwnArgs(stage[index+1:])}) {
+					return true
+				}
+			}
+		}
+		if end == len(tokens) {
+			break
+		}
+		tokens = tokens[end+1:]
+	}
+	return false
 }
 
 // untokenizedReadStep handles a segment the tokenizer couldn't parse.
@@ -504,28 +500,27 @@ func untokenizedReadStep(segment, outputText string, ws *workspace) *step {
 	return fileSpanStep(filePath, outputText)
 }
 
-func sedReadStep(tokens []string, ws *workspace) *step {
-	if !slices.Contains(tokens, "sed") {
+func sedReadStep(raw string, tokens []string, ws *workspace) *step {
+	if !shellStageStartsWith(tokens, "sed") {
+		return nil
+	}
+	command, ok := firstShellCommand(raw)
+	if !ok {
 		return nil
 	}
 	sedRange, haveRange := sedRangeFromTokens(tokens)
 	var filePath string
-	if pipeIdx := firstPipeIndexAfter(tokens, 0); pipeIdx < len(tokens) {
-		// Only credit the file left of the pipe when a read-like command
-		// produced the piped text; `python x.py | sed -n '1,50p'` filters
-		// program output, not file content.
-		readLike := false
-		for _, token := range tokens[:pipeIdx] {
-			if slices.Contains(readLikeWords, token) {
-				readLike = true
-				break
+	if firstPipeIndexAfter(tokens, 0) < len(tokens) {
+		// A later pipeline stage observes sed's output, not its input. The
+		// parser keeps its operand separate from every redirect target.
+		filePath = fileAfterCommand(command, "sed", ws)
+		if filePath == "" {
+			if input, ok := command.inputFile(); ok {
+				filePath = normalizeCommandPathToken(input, ws)
 			}
 		}
-		if readLike {
-			filePath = fileBeforePipe(tokens, ws)
-		}
 	} else {
-		filePath = fileAfterCommand(tokens, "sed", ws)
+		filePath = fileAfterCommand(command, "sed", ws)
 	}
 	if haveRange && filePath != "" {
 		return &step{files: []string{filePath}, spans: map[string][]Span{filePath: {sedRange}}}
@@ -533,24 +528,66 @@ func sedReadStep(tokens []string, ws *workspace) *step {
 	return nil
 }
 
-func headReadStep(tokens []string, ws *workspace) *step {
-	if len(tokens) == 0 || tokens[0] != "head" {
+func headReadStep(raw string, tokens []string, ws *workspace) *step {
+	command, ok := firstShellCommand(raw)
+	if !ok || !shellStageStartsWith(tokens, "head") || !command.stdoutCaptured() {
 		return nil
 	}
 	count := headCountFromTokens(tokens)
-	filePath := fileAfterCommand(tokens, "head", ws)
+	filePath, explicit := headFileOperand(command, ws)
+	if !explicit {
+		if input, ok := command.inputFile(); ok {
+			filePath = normalizeCommandPathToken(input, ws)
+		}
+	}
 	if count > 0 && filePath != "" {
 		return &step{files: []string{filePath}, spans: map[string][]Span{filePath: {{Start: 1, End: count}}}}
 	}
 	return nil
 }
 
-func catLikeReadStep(tokens []string, outputText string, ws *workspace) *step {
+// headFileOperand distinguishes a real but unpublishable operand from no
+// operand. Falling through from `/etc/hosts` to redirected stdin would credit
+// a file head did not read merely because the real file lies outside the repo.
+func headFileOperand(command shellSimpleCommand, ws *workspace) (string, bool) {
+	start := slices.IndexFunc(command.words, func(word shellWord) bool {
+		return word.text == "head"
+	})
+	if start < 0 {
+		return "", false
+	}
+	for i := len(command.words) - 1; i > start; i-- {
+		word := command.words[i]
+		token := word.text
+		if word.literal {
+			if normalized := normalizeCommandPathToken(token, ws); normalized != "" {
+				return normalized, true
+			}
+		}
+		if !word.literal {
+			return "", true
+		}
+		candidate, _ := stripPathDecoration(token)
+		if !strings.HasPrefix(token, "-") && (looksLikePlainPath(candidate) || looksLikePathHead(candidate)) {
+			return "", true
+		}
+	}
+	return "", false
+}
+
+func catLikeReadStep(raw string, tokens []string, outputText string, ws *workspace) *step {
+	commands, ok := parseShellCommand(raw)
+	if !ok || len(commands) == 0 || slices.ContainsFunc(commands, func(command shellSimpleCommand) bool {
+		return len(command.redirects) != 0
+	}) {
+		return nil
+	}
+	command := commands[0]
 	for _, commandWord := range []string{"nl", "cat", "tail"} {
-		if !slices.Contains(tokens, commandWord) || hasRedirectionToken(tokens) {
+		if !shellStageStartsWith(tokens, commandWord) {
 			continue
 		}
-		filePath := fileAfterCommand(tokens, commandWord, ws)
+		filePath := fileAfterCommand(command, commandWord, ws)
 		if filePath == "" {
 			continue
 		}
@@ -569,17 +606,18 @@ func fileSpanStep(filePath, outputText string) *step {
 	return s
 }
 
-func readLikeStep(rawCommand, outputText string, ws *workspace) *step {
+func readLikeStep(chain []chainSegment, outputText string, ws *workspace) *step {
 	merged := &step{}
-	segments := splitCommandSegments(rawCommand)
-	for _, segment := range segments {
-		mergeStep(merged, readSegmentStep(segment, outputText, ws))
+	for _, segment := range chain {
+		if !segment.cwdUncertain && !segment.orGated {
+			mergeStep(merged, readSegmentStep(segment.raw, outputText, ws))
+		}
 	}
 	if len(merged.files) == 0 && len(merged.spans) == 0 {
 		return nil
 	}
-	if len(segments) == 1 {
-		attachReadRange(merged, outputText, !strings.Contains(segments[0], "|"))
+	if len(chain) == 1 {
+		attachReadRange(merged, outputText, !strings.Contains(chain[0].raw, "|"))
 	}
 	return merged
 }
@@ -618,8 +656,14 @@ var contentSuppressingFlags = map[string]bool{
 	"--files": true,
 }
 
-func searchCommandCanExposeFileContent(tokens []string, outputText string) bool {
-	if strings.TrimSpace(outputText) == "" || hasRedirectionToken(tokens) {
+func searchCommandCanExposeFileContent(raw string, tokens []string, outputText string) bool {
+	commands, ok := parseShellCommand(raw)
+	if strings.TrimSpace(outputText) == "" || !ok || slices.ContainsFunc(commands, func(command shellSimpleCommand) bool {
+		return len(command.redirects) != 0
+	}) {
+		return false
+	}
+	if searchOutputIsDiagnostic(tokens, outputText) {
 		return false
 	}
 	for _, token := range tokens {
@@ -630,11 +674,20 @@ func searchCommandCanExposeFileContent(tokens []string, outputText string) bool 
 	return true
 }
 
-func explicitSingleSearchFile(tokens []string, ws *workspace) string {
+// explicitSingleSearchFile names the one file a search was scoped to, or "" if
+// the operand was not provably a single file. outputText is consulted because
+// it settles what no amount of name inspection can: grep and rg prefix every
+// matched line with a path only when the match came from BELOW the operand, so
+// a line starting with the operand plus a separator proves the operand was a
+// directory. `.env.production` and `docs.api` are the cases that matter - both
+// wear a filename's shape, and only the output distinguishes them from a file.
+func explicitSingleSearchFile(tokens []string, outputText string, ws *workspace) string {
 	start := -1
+	word := ""
 	for i, token := range tokens {
 		if token == "grep" || token == "rg" {
 			start = i + 1
+			word = token
 			break
 		}
 	}
@@ -642,31 +695,89 @@ func explicitSingleSearchFile(tokens []string, ws *workspace) string {
 		return ""
 	}
 	stop := firstPipeIndexAfter(tokens, start)
+	args := tokens[start:stop]
+	if execSearchPattern(word, args) == "" {
+		return ""
+	}
+	scan := scanCommandArgs(args, execSearchFlagModelFor(word))
+	if scan.unknownFlag {
+		return ""
+	}
+	if _, ok := scan.flagValue("-f", "--file"); ok {
+		return "" // the pattern file is a second input, not search result content
+	}
+	operands := scan.operands
+	if _, explicit := scan.flagValue("-e", "--regexp"); !explicit {
+		if len(operands) == 0 {
+			return ""
+		}
+		operands = operands[1:] // the first operand is the pattern, never a file
+	}
 	var candidates []string
-	for _, token := range tokens[start:stop] {
-		if normalized := normalizeCommandPathToken(token, ws); normalized != "" && !slices.Contains(candidates, normalized) {
+	for _, token := range operands {
+		// A directory operand is a repository search, not a file read, and it
+		// must not be published as a file that was read. Nothing here may touch
+		// the filesystem to tell the two apart, so the same shape rule the
+		// claude Grep path already applies decides it: `.github` and
+		// `jquery-3.6` look like filenames but are rejected as directories.
+		normalized := normalizeCommandPathToken(token, ws)
+		if normalized == "" || !looksLikeSingleSearchFile(path.Base(normalized)) {
+			continue
+		}
+		if !slices.Contains(candidates, normalized) {
 			candidates = append(candidates, normalized)
 		}
 	}
-	if len(candidates) == 1 {
-		return candidates[0]
+	if len(candidates) != 1 {
+		return ""
 	}
-	return ""
+	if searchOutputNamesChildOf(candidates[0], outputText) {
+		return ""
+	}
+	return candidates[0]
+}
+
+// searchOutputNamesChildOf reports whether any output line begins with the
+// operand followed by a separator, which only happens when the tool descended
+// into it.
+func searchOutputNamesChildOf(operand, outputText string) bool {
+	prefix := strings.TrimSuffix(canonicalWorkspacePath(operand), "/") + "/"
+	for _, line := range strings.Split(outputText, "\n") {
+		if strings.HasPrefix(canonicalWorkspacePath(stripANSI(line)), prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func stripANSI(text string) string {
+	var clean strings.Builder
+	for i := 0; i < len(text); i++ {
+		if text[i] != '\x1b' || i+1 == len(text) || text[i+1] != '[' {
+			clean.WriteByte(text[i])
+			continue
+		}
+		i += 2
+		for i < len(text) && (text[i] < '@' || text[i] > '~') {
+			i++
+		}
+	}
+	return clean.String()
 }
 
 // searchFileStepFromCommand credits a file-only retrieval when a grep/rg
 // command was explicitly scoped to exactly one file and produced output.
-func searchFileStepFromCommand(rawCommand, outputText string, ws *workspace) *step {
+func searchFileStepFromCommand(chain []chainSegment, outputText string, ws *workspace) *step {
 	var files []string
-	for _, segment := range splitCommandSegments(rawCommand) {
-		tokens := tokensForSegment(segment)
-		if len(tokens) == 0 || !hasGrepLikeCommand(segment, tokens) {
+	for _, segment := range chain {
+		tokens := tokensForSegment(segment.raw)
+		if segment.cwdUncertain || segment.orGated || len(tokens) == 0 || !hasGrepLikeCommand(segment.raw, tokens) {
 			continue
 		}
-		if !searchCommandCanExposeFileContent(tokens, outputText) {
+		if !searchCommandCanExposeFileContent(segment.raw, tokens, outputText) {
 			continue
 		}
-		if filePath := explicitSingleSearchFile(tokens, ws); filePath != "" && !slices.Contains(files, filePath) {
+		if filePath := explicitSingleSearchFile(tokens, outputText, ws); filePath != "" && !slices.Contains(files, filePath) {
 			files = append(files, filePath)
 		}
 	}
@@ -674,6 +785,29 @@ func searchFileStepFromCommand(rawCommand, outputText string, ws *workspace) *st
 		return nil
 	}
 	return &step{files: files}
+}
+
+// searchOutputIsDiagnostic reports whether the output is the search tool
+// complaining rather than showing file content. `grep TODO missing.go` can
+// report a zero exit status while printing `grep: missing.go: No such file or
+// directory`, and treating that as a match would publish a file the command
+// proved it never read. The tool names itself first in such a line, which is
+// the one shape that distinguishes a diagnostic from a matched line - matched
+// content is arbitrary text and cannot be pattern-matched safely.
+func searchOutputIsDiagnostic(tokens []string, outputText string) bool {
+	text := strings.TrimSpace(outputText)
+	if i := strings.IndexByte(text, '\n'); i >= 0 {
+		text = text[:i]
+	}
+	for _, token := range tokens {
+		if token != "grep" && token != "rg" {
+			continue
+		}
+		if strings.HasPrefix(text, token+": ") {
+			return true
+		}
+	}
+	return false
 }
 
 var grepNoMatchMarkers = []string{"no matches found", "no files found"}
@@ -829,20 +963,20 @@ func attachReadRange(s *step, outputText string, allowPlain bool) {
 // single-file grep/rg yields file-only, everything else yields nothing.
 func retrievalFromCommand(command, outputText string, ws *workspace) *step {
 	rawCommand := unwrapShell(command)
-	tokens := commandTokens(command)
-
-	if slices.Contains(tokens, "Read") || commandHasWord(rawCommand, "Read") {
+	chain := splitCommandChain(rawCommand)
+	if len(chain) == 0 {
 		return nil
 	}
-	if hasReadLikeCommand(rawCommand, tokens) {
-		if s := readLikeStep(rawCommand, outputText, ws); s != nil {
-			return s
+	for _, segment := range chain {
+		tokens := tokensForSegment(segment.raw)
+		if slices.Contains(tokens, "Read") || commandHasWord(segment.raw, "Read") {
+			return nil
 		}
 	}
-	if hasGrepLikeCommand(rawCommand, tokens) {
-		return searchFileStepFromCommand(rawCommand, outputText, ws)
+	if s := readLikeStep(chain, outputText, ws); s != nil {
+		return s
 	}
-	return nil
+	return searchFileStepFromCommand(chain, outputText, ws)
 }
 
 // boundedOutput excludes very large outputs from retrieval inference because

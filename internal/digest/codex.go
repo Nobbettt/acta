@@ -42,31 +42,32 @@ type CodexError struct {
 }
 
 type CodexItem struct {
-	ID                string            `json:"id"`
-	Type              string            `json:"type"`
-	Command           string            `json:"command,omitempty"`
-	AggregatedOutput  string            `json:"aggregated_output,omitempty"`
-	ExitCode          *int              `json:"exit_code,omitempty"`
-	Status            string            `json:"status,omitempty"`
-	Text              string            `json:"text,omitempty"`
-	TextChars         int               `json:"text_chars,omitempty"`
-	TextTruncated     bool              `json:"text_truncated,omitempty"`
-	Redacted          bool              `json:"redacted,omitempty"`
-	Message           string            `json:"message,omitempty"`
-	Changes           []CodexFileChange `json:"changes,omitempty"`
-	Items             []CodexTodoItem   `json:"items,omitempty"`
-	Server            string            `json:"server,omitempty"`
-	Tool              string            `json:"tool,omitempty"`
-	Arguments         json.RawMessage   `json:"arguments,omitempty"`
-	Result            json.RawMessage   `json:"result,omitempty"`
-	Error             *CodexError       `json:"error,omitempty"`
-	Query             string            `json:"query,omitempty"`
-	Action            json.RawMessage   `json:"action,omitempty"`
-	SenderThreadID    string            `json:"sender_thread_id,omitempty"`
-	ReceiverThreadIDs []string          `json:"receiver_thread_ids,omitempty"`
-	Prompt            string            `json:"prompt,omitempty"`
-	AgentsStates      json.RawMessage   `json:"agents_states,omitempty"`
-	Raw               json.RawMessage   `json:"-"`
+	ID                 string            `json:"id"`
+	Type               string            `json:"type"`
+	Command            string            `json:"command,omitempty"`
+	AggregatedOutput   string            `json:"aggregated_output,omitempty"`
+	ExitCode           *int              `json:"exit_code,omitempty"`
+	Status             string            `json:"status,omitempty"`
+	Text               string            `json:"text,omitempty"`
+	TextChars          int               `json:"text_chars,omitempty"`
+	TextTruncated      bool              `json:"text_truncated,omitempty"`
+	Redacted           bool              `json:"redacted,omitempty"`
+	Message            string            `json:"message,omitempty"`
+	Changes            []CodexFileChange `json:"changes,omitempty"`
+	Items              []CodexTodoItem   `json:"items,omitempty"`
+	Server             string            `json:"server,omitempty"`
+	Tool               string            `json:"tool,omitempty"`
+	Arguments          json.RawMessage   `json:"arguments,omitempty"`
+	Result             json.RawMessage   `json:"result,omitempty"`
+	Error              *CodexError       `json:"error,omitempty"`
+	Query              string            `json:"query,omitempty"`
+	Action             json.RawMessage   `json:"action,omitempty"`
+	SenderThreadID     string            `json:"sender_thread_id,omitempty"`
+	ReceiverThreadIDs  []string          `json:"receiver_thread_ids,omitempty"`
+	Prompt             string            `json:"prompt,omitempty"`
+	AgentsStates       json.RawMessage   `json:"agents_states,omitempty"`
+	Raw                json.RawMessage   `json:"-"`
+	exitCodeUnreadable bool
 }
 
 func (i *CodexItem) UnmarshalJSON(raw []byte) error {
@@ -75,6 +76,8 @@ func (i *CodexItem) UnmarshalJSON(raw []byte) error {
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		return err
 	}
+	exitCodeFields, _ := decoderMatchedJSONFieldValues(raw, "exit_code")
+	decoded.exitCodeUnreadable = len(exitCodeFields) > 0 && decoded.ExitCode == nil
 	*i = CodexItem(decoded)
 	i.Raw = append(i.Raw[:0], raw...)
 	return nil
@@ -82,11 +85,13 @@ func (i *CodexItem) UnmarshalJSON(raw []byte) error {
 
 // Failed reports whether a terminal codex item represents a failure, so the
 // digest and the tracing span agree on error state (a single rule instead of
-// four hand-coded copies). A nonzero exit code always means failure; otherwise
-// only an explicit non-success status does. The real stream stamps
-// "completed"/"failed"; empty and "success" are treated as ok.
+// four hand-coded copies). A present but unreadable exit code means failure,
+// because treating null as absent would invent success from no outcome. A
+// nonzero exit code always means failure; otherwise only an explicit
+// non-success status does. The real stream stamps "completed"/"failed"; empty
+// and "success" are treated as ok.
 func (i *CodexItem) Failed() bool {
-	if i.ExitCode != nil && *i.ExitCode != 0 {
+	if i.exitCodeUnreadable || (i.ExitCode != nil && *i.ExitCode != 0) {
 		return true
 	}
 	switch i.Status {
@@ -144,14 +149,18 @@ type codexParseState struct {
 	// item.started line/time per item id, so a completed event's observed_at
 	// joins the call's start (matching claude and the span start), not its end
 	// startTimes is populated only on the live stream path.
-	startLines     map[string]int
-	startTimes     map[string]time.Time
-	startedItems   map[string]CodexItem
-	seenThread     bool
-	seenTurn       bool
-	seenTerminal   bool
-	semanticIssues []string
-	finalized      bool
+	startLines   map[string]int
+	startTimes   map[string]time.Time
+	startedItems map[string]CodexItem
+	// commandObservations holds the filesystem fingerprint taken when a shell
+	// command STARTED, keyed by item id. The before-state exists only while the
+	// run is live, so it is captured here and compared when the item completes.
+	commandObservations map[string]map[string]pathState
+	seenThread          bool
+	seenTurn            bool
+	seenTerminal        bool
+	semanticIssues      []string
+	finalized           bool
 }
 
 func newCodexState(ws *workspace) *codexParseState {
@@ -161,6 +170,39 @@ func newCodexState(ws *workspace) *codexParseState {
 		startLines:   map[string]int{},
 		startTimes:   map[string]time.Time{},
 		startedItems: map[string]CodexItem{},
+	}
+}
+
+// observeCommandStart fingerprints the paths a command names, before it runs.
+func (st *codexParseState) observeCommandStart(id, command string) {
+	if st == nil || id == "" || command == "" {
+		return
+	}
+	before := observePathStates(st.ws, commandObservationCandidates(command))
+	if len(before) == 0 {
+		return
+	}
+	if st.commandObservations == nil {
+		st.commandObservations = map[string]map[string]pathState{}
+	}
+	st.commandObservations[id] = before
+}
+
+// observeCommandEnd re-fingerprints those paths and records what actually
+// changed, so the event carries evidence rather than a prediction.
+func (st *codexParseState) observeCommandEnd(id string, e *Event) {
+	if st == nil || id == "" || e == nil {
+		return
+	}
+	before, ok := st.commandObservations[id]
+	if !ok {
+		return
+	}
+	delete(st.commandObservations, id)
+	e.ObservationStatus = observationStatusObserved
+	after := observePathStates(st.ws, sortedObservedPaths(before))
+	for _, effect := range diffPathStates(before, after) {
+		e.ObservedEffects = append(e.ObservedEffects, ObservedEffect{Path: effect.path, Kind: effect.kind})
 	}
 }
 
@@ -180,6 +222,9 @@ func (st *codexParseState) consume(event *CodexEvent, lineNo int, at time.Time) 
 			}
 			if event.Item.Type == "file_change" {
 				st.writeTracker.start(event.Item.ID, codexChangePaths(event.Item, st.ws))
+			}
+			if event.Item.Type == "command_execution" {
+				st.observeCommandStart(event.Item.ID, event.Item.Command)
 			}
 		}
 		return
@@ -305,6 +350,15 @@ func (st *codexParseState) consume(event *CodexEvent, lineNo int, at time.Time) 
 		if e.Kind == KindFileEdit {
 			st.writeTracker.assumeMissing(item.ID, codexAddedPaths(item, st.ws))
 			e.fileSnapshots = st.writeTracker.finish(item.ID, e.Files)
+		}
+		if e.Kind == KindCommand {
+			// codexItemEvent has already classified from the command text, so
+			// the observation is attached and then applied here rather than
+			// being picked up inside classification as it is on the claude
+			// path. What the filesystem shows outranks what the text suggested
+			// either way.
+			st.observeCommandEnd(item.ID, &e)
+			applyObservedEffects(&e, st.ws)
 		}
 		st.d.appendEvent(e)
 	}
@@ -450,6 +504,7 @@ func codexItemEvent(d *Digest, item *CodexItem, srcLine int, completedLine int, 
 		srcLine: srcLine, completedLine: completedLine,
 		RawEventLines: rawEventLines(srcLine, completedLine),
 	}
+	droppedPaths := 0
 	switch item.Type {
 	case "command_execution":
 		e.Kind = KindCommand
@@ -458,16 +513,37 @@ func codexItemEvent(d *Digest, item *CodexItem, srcLine int, completedLine int, 
 		e.IsError = e.IsError || item.Failed()
 		setEventOutput(&e, item.AggregatedOutput)
 		d.Metrics.Commands++
+		// Retrieval inference stays success-only, but a command is classified
+		// whether or not it succeeded: the per-category gates decide what a
+		// failed command may still be credited with.
 		if !e.IsError {
 			applyStep(&e, retrievalFromCommand(item.Command, boundedOutput(item.AggregatedOutput), ws))
 		}
+		// completedLine is 0 only when this event is built from finalize's
+		// started-but-never-completed path (codexParseState.finalize). Failed
+		// treats an empty status as "not failed", so without this, an item that
+		// never ran to completion would still classify as exitOK: true.
+		exitOK := completedLine != 0 && !item.Failed()
+		classifyEventCommand(&e, item.AggregatedOutput, exitOK, ws)
+		applyRunState(d, &e, item.AggregatedOutput)
 	case "file_change":
 		e.Kind = KindFileEdit
-		e.Files = codexChangePaths(item, ws)
+		e.Files = make([]string, 0, len(item.Changes))
 		for _, change := range item.Changes {
 			if rel, ok := normalizeWorkspacePath(change.Path, ws); ok {
+				if !slices.Contains(e.Files, rel) {
+					e.Files = append(e.Files, rel)
+				}
 				e.Changes = append(e.Changes, FileMutation{Path: rel, Kind: change.Kind})
+			} else {
+				droppedPaths++
 			}
+		}
+		if droppedPaths > 0 {
+			e.FilePatchErrors = append(e.FilePatchErrors, fmt.Sprintf(
+				"capture warning: file_change dropped %d path(s) that could not be made workspace-relative; raw_event_lines=%v",
+				droppedPaths, e.RawEventLines,
+			))
 		}
 		e.IsError = item.Failed()
 		d.Metrics.Edits++

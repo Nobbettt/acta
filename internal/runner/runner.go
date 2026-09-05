@@ -98,12 +98,14 @@ type Options struct {
 	// MaxRawOutputBytes bounds stdout+stderr combined. Zero explicitly keeps
 	// full fidelity without a byte limit. Crossing a positive limit terminates
 	// the process tree and fails the run; it never silently truncates success.
-	MaxRawOutputBytes       int64
-	MaxWorkspaceDiffBytes   int64
-	MaxUploadBytes          int64
-	MaxRedactionLineBytes   int
-	Stream                  bool
-	AgentWritableDirs       []string
+	MaxRawOutputBytes     int64
+	MaxWorkspaceDiffBytes int64
+	MaxUploadBytes        int64
+	MaxRedactionLineBytes int
+	Stream                bool
+	AgentWritableDirs     []string
+	// ControlPlaneDir is the caller-declared control directory classified by the digest.
+	ControlPlaneDir         string
 	CodexSandbox            string
 	ClaudePermissionMode    string
 	OTLPEndpoint            string
@@ -309,6 +311,7 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 	digester, err := digest.NewStreamDigesterWithOptions(adapter.Name(), cwd, digest.Options{
 		EvidenceExclusions: gitExcludes,
 		WorkspaceIsRepo:    gitInfo.IsRepo,
+		ControlPlaneDir:    opts.ControlPlaneDir,
 	})
 	if err != nil {
 		return nil, err

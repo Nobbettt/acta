@@ -352,6 +352,13 @@ func digestCommand(ctx context.Context, args []string, stdout io.Writer, stderr 
 		return 1
 	}
 	fmt.Fprintln(stdout, filepath.Join(runDir, "digest.json"))
+	for _, event := range d.Timeline {
+		for _, warning := range event.FilePatchErrors {
+			if strings.HasPrefix(warning, "capture warning:") {
+				fmt.Fprintf(stderr, "digest: %s\n", warning)
+			}
+		}
+	}
 	if softErr != nil {
 		fmt.Fprintf(stderr, "digest: wrote explicitly allowed degraded projection: %v\n", softErr)
 	}

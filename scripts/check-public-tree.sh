@@ -42,6 +42,31 @@ scan() {
 for fragment in "$forbidden_session" "$forbidden_claude" "$forbidden_worktree" "$forbidden_commit"; do
   scan "public snapshot contains a forbidden historical fixture fragment" -F "$fragment"
 done
+# Phrases that contain a codename's letters but are not the codename: the git
+# subcommand `cherry-pick` is a real command this project classifies, and
+# refusing it would mean dropping a supported command to satisfy a name check.
+# Each entry is removed from a candidate line before the line is judged, so a
+# genuine codename sitting on the same line is still caught.
+allowed_phrases=('cher''ry-pick')
+
+scan_codename() {
+  local fragment=$1
+  local matches
+  matches=$(LC_ALL=C grep -R -I -n -i -w -F \
+    --exclude=check-public-tree.sh --exclude=public-snapshot-test.sh \
+    "$fragment" "$tree" || true)
+  local phrase
+  for phrase in "${allowed_phrases[@]}"; do
+    matches=$(printf '%s' "$matches" | LC_ALL=C sed "s/${phrase}//gI" || true)
+  done
+  matches=$(printf '%s' "$matches" | LC_ALL=C grep -i -w -F "$fragment" || true)
+  if [[ -n $matches ]]; then
+    printf '%s\n' "$matches"
+    echo "public snapshot contains a forbidden internal codename" >&2
+    exit 1
+  fi
+}
+
 for fragment in "${forbidden_codenames[@]}"; do
-  scan "public snapshot contains a forbidden internal codename" -i -w -F "$fragment"
+  scan_codename "$fragment"
 done

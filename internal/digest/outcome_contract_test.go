@@ -80,6 +80,46 @@ func TestNormalizeEventBoundsEveryFreeFormField(t *testing.T) {
 	}
 }
 
+func TestNormalizeEventBoundsClassificationFields(t *testing.T) {
+	large := strings.Repeat("x", MaxEventTextBytes)
+	manyCategories := make([]string, 2048)
+	manyTargets := make([]CommandTarget, 2048)
+	manyMutations := make([]ShellMutation, 2048)
+	for i := range manyCategories {
+		manyCategories[i] = large
+	}
+	for i := range manyTargets {
+		manyTargets[i] = CommandTarget{Kind: large, Value: large}
+	}
+	for i := range manyMutations {
+		manyMutations[i] = ShellMutation{Kind: "move", Path: large, From: large, To: large}
+	}
+	d := &Digest{}
+	if !d.appendEvent(Event{Kind: KindCommand, Categories: manyCategories, Targets: manyTargets, ShellMutations: manyMutations}) {
+		t.Fatal("bounded event was unexpectedly dropped")
+	}
+	got := d.Timeline[0]
+	if len(got.Categories) > 1024 || len(got.Targets) > 1024 || len(got.ShellMutations) > 1024 {
+		t.Fatalf("classification fields not capped: categories=%d targets=%d mutations=%d",
+			len(got.Categories), len(got.Targets), len(got.ShellMutations))
+	}
+	for _, category := range got.Categories {
+		if len(category) > 4096 {
+			t.Fatalf("category retained %d bytes", len(category))
+		}
+	}
+	for _, target := range got.Targets {
+		if len(target.Value) > 4096 {
+			t.Fatalf("target value retained %d bytes", len(target.Value))
+		}
+	}
+	for _, mutation := range got.ShellMutations {
+		if len(mutation.Path) > 4096 || len(mutation.From) > 4096 || len(mutation.To) > 4096 {
+			t.Fatalf("shell mutation retained oversized field: %+v", mutation)
+		}
+	}
+}
+
 func TestProjectionBudgetIncludesLocalReasoning(t *testing.T) {
 	// Quotes exercise JSON expansion as well as the retained string bytes. The
 	// event stream must fit the same projection budget after reasoning is copied

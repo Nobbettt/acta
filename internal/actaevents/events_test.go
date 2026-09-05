@@ -209,6 +209,60 @@ func TestBuildCarriesPerWritePatches(t *testing.T) {
 	}
 }
 
+func TestBuildCarriesCodexFileChangeCaptureWarning(t *testing.T) {
+	started := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
+	workspace := t.TempDir()
+	digester, err := digest.NewStreamDigesterWithOptions("codex", workspace, digest.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(filepath.Dir(workspace), "outside.go")
+	item, err := json.Marshal(map[string]any{
+		"type": "item.completed",
+		"item": map[string]any{
+			"id": "write-1", "type": "file_change", "status": "completed",
+			"changes": []map[string]string{{"path": outside, "kind": "update"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digester.Line([]byte(`{"type":"thread.started","thread_id":"thread-warning"}`), started)
+	digester.Line([]byte(`{"type":"turn.started"}`), started)
+	digester.Line(item, started)
+	digester.Line([]byte(`{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`), started)
+	record := &runrecord.Record{
+		Producer: runrecord.Producer{Name: "acta", Version: "test"},
+		ID:       "run-warning", Agent: "codex", StartedAt: started, CompletedAt: started, OK: true,
+	}
+	events, err := Build(record, digester.Finalize(record, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Type != TypeFileWritten {
+			continue
+		}
+		var payload struct {
+			Files           []string `json:"files"`
+			FilePatchErrors []string `json:"file_patch_errors"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		warning := strings.Join(payload.FilePatchErrors, "; ")
+		if len(payload.Files) != 0 || !strings.Contains(warning, "capture warning: file_change dropped 1 path(s)") ||
+			!strings.Contains(warning, "raw_event_lines=[3]") {
+			t.Fatalf("file.written payload = %+v", payload)
+		}
+		if err := ValidateEvent(event, record.ID, event.Sequence); err != nil {
+			t.Fatalf("file.written capture warning failed published schema validation: %v", err)
+		}
+		return
+	}
+	t.Fatal("file.written event missing")
+}
+
 func TestBuildWithPromptPlacesCapturedPromptFirst(t *testing.T) {
 	started := time.Date(2026, 8, 12, 10, 0, 0, 0, time.UTC)
 	record := &runrecord.Record{

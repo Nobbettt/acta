@@ -1,7 +1,10 @@
 package digest
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -107,6 +110,25 @@ func TestShellTokens(t *testing.T) {
 	}
 }
 
+func TestShellTokensRemovesContinuationsAndSeparatesOperators(t *testing.T) {
+	cases := []struct {
+		command string
+		want    []string
+	}{
+		{"rm foo\\\nbar", []string{"rm", "foobar"}},
+		{"rm old.txt>/dev/null", []string{"rm", "old.txt", ">", "/dev/null"}},
+		{"curl https://example.com|cat", []string{"curl", "https://example.com", "|", "cat"}},
+		{`printf '%s' 'a|b'`, []string{"printf", "%s", "a|b"}},
+		{`printf a\|b`, []string{"printf", "a|b"}},
+		{"rm old.txt 2>&1", []string{"rm", "old.txt", "2>&", "1"}},
+	}
+	for _, c := range cases {
+		if got := shellTokens(c.command); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("shellTokens(%q) = %#v, want %#v", c.command, got, c.want)
+		}
+	}
+}
+
 func TestRetrievalFromCommand(t *testing.T) {
 	ws := testWorkspace()
 	output := "some output\nlines here"
@@ -141,11 +163,11 @@ func TestRetrievalFromCommand(t *testing.T) {
 			map[string][]Span{"main.go": {{1, 50}}},
 		},
 		{
-			"nl piped to sed keeps file credit",
+			"pipeline status cannot prove nl read the file",
 			`nl -ba pkg/mod.py | sed -n '250,310p'`,
 			numbered,
-			[]string{"pkg/mod.py"},
-			map[string][]Span{"pkg/mod.py": {{250, 310}}},
+			nil,
+			nil,
 		},
 		{
 			"program output piped to sed credits nothing",
@@ -162,9 +184,51 @@ func TestRetrievalFromCommand(t *testing.T) {
 			nil,
 		},
 		{
+			"named extensionless instruction file",
+			`cat CONTRIBUTING`,
+			output,
+			[]string{"CONTRIBUTING"},
+			nil,
+		},
+		{
+			"arbitrary extensionless file",
+			`cat NOTES`,
+			output,
+			nil,
+			nil,
+		},
+		{
+			"echoed read command is only text",
+			`echo cat README.md`,
+			"cat README.md\n",
+			nil,
+			nil,
+		},
+		{
 			"single-file grep",
 			`grep -n "pattern" pkg/mod.py`,
 			output,
+			[]string{"pkg/mod.py"},
+			nil,
+		},
+		{
+			"filename-shaped search pattern is not a file",
+			`rg README.md .`,
+			"notes.txt:README.md",
+			nil,
+			nil,
+		},
+		{
+			"filename-shaped explicit pattern is not a file",
+			`rg -e README.md .`,
+			"notes.txt:README.md",
+			nil,
+			nil,
+		},
+		{
+			"filename-shaped pattern does not hide the scoped file",
+			`rg "config.yaml" pkg/mod.py`,
+			"pkg/mod.py: config.yaml",
 			[]string{"pkg/mod.py"},
 			nil,
 		},
@@ -222,6 +286,42 @@ func TestRetrievalFromCommand(t *testing.T) {
 	}
 }
 
+func TestHeadReadStepRejectsHereString(t *testing.T) {
+	ws := testWorkspace()
+	cases := []struct {
+		name      string
+		command   string
+		wantFiles []string
+		wantSpans map[string][]Span
+	}{
+		{
+			name:    "here string is data rather than a file read",
+			command: `head -n 1 <<< .env`,
+		},
+		{
+			name:      "file operand remains a read",
+			command:   `head -n 1 .env`,
+			wantFiles: []string{".env"},
+			wantSpans: map[string][]Span{
+				".env": {{Start: 1, End: 1}},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := retrievalFromCommand(tc.command, ".env\n", ws)
+			var files []string
+			var spans map[string][]Span
+			if got != nil {
+				files, spans = got.files, got.spans
+			}
+			if !reflect.DeepEqual(files, tc.wantFiles) || !reflect.DeepEqual(spans, tc.wantSpans) {
+				t.Fatalf("retrievalFromCommand(%q) = files=%#v spans=%#v, want files=%#v spans=%#v", tc.command, files, spans, tc.wantFiles, tc.wantSpans)
+			}
+		})
+	}
+}
+
 func TestRetrievalRetainsOnlyUnambiguousReadContent(t *testing.T) {
 	ws := testWorkspace()
 
@@ -263,8 +363,15 @@ func TestRetrievalRetainsOnlyUnambiguousReadContent(t *testing.T) {
 		"export const ready = true;\n",
 		ws,
 	)
-	if filtered == nil || len(filtered.readRanges) != 0 {
-		t.Fatalf("filtered output must not be presented as a contiguous range: %#v", filtered)
+	if filtered != nil {
+		t.Fatalf("pipeline output cannot prove the leading read succeeded: %#v", filtered)
+	}
+}
+
+func TestRetrievalFromCommandRejectsPipelineMaskedReadFailure(t *testing.T) {
+	got := retrievalFromCommand("cat missing.txt | printf fallback", "fallback", testWorkspace())
+	if got != nil {
+		t.Fatalf("retrievalFromCommand credited an unproven pipeline read: %+v", got)
 	}
 }
 
@@ -294,6 +401,160 @@ func TestWorkspaceRelPortableWindowsPath(t *testing.T) {
 	}
 }
 
+func TestNewWorkspaceDoesNotReadProcessWorkingDirectory(t *testing.T) {
+	first := t.TempDir()
+	second := t.TempDir()
+	t.Chdir(first)
+	a := newWorkspace("workspace")
+	t.Chdir(second)
+	b := newWorkspace("workspace")
+	if !reflect.DeepEqual(a, b) || a.root != "workspace" {
+		t.Fatalf("relative recorded workspace depends on process cwd: first=%+v second=%+v", a, b)
+	}
+}
+
+func TestWorkspaceRelRejectsAliasSuffixSymlinkEscape(t *testing.T) {
+	requirePOSIXSymlinkTraversal(t)
+	root := t.TempDir()
+	workspaceDir := filepath.Join(root, "repo")
+	outsideDir := filepath.Join(root, "outside")
+	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "repo-alias")
+	if err := os.Symlink(workspaceDir, alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideDir, filepath.Join(workspaceDir, "out")); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(outsideDir, "secret")
+	if err := os.WriteFile(secret, []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	facts := classifyCommand("rm "+filepath.Join(alias, "out", "secret"), "", true, newWorkspace(workspaceDir))
+	if facts == nil || !reflect.DeepEqual(facts.categories, []string{"workspace.escape"}) ||
+		len(facts.targets) != 0 || len(facts.mutations) != 0 {
+		t.Fatalf("alias suffix escape = %+v, want workspace.escape only", facts)
+	}
+}
+
+// requirePOSIXSymlinkTraversal skips a fixture whose escape depends on POSIX
+// path resolution. Both of the fixtures below turn on a symlinked directory
+// being traversed by a following `..`, and the two platforms disagree about
+// what that means: POSIX resolves the symlink and lands outside, while Windows
+// cleans `..` against the preceding NAME before any link is followed, so the
+// traversal simply returns to the parent and the escape these tests describe
+// cannot be staged there at all. The rejection itself is not
+// platform-specific - it is the same code on both, and the corpus exercises it
+// - but a fixture that cannot reproduce the hazard would only be asserting the
+// local filesystem's behaviour.
+func requirePOSIXSymlinkTraversal(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the escape under test depends on POSIX symlink-before-.. resolution")
+	}
+}
+
+// The command corpus cannot model symlink topology or post-command filesystem
+// state, so these path-resolution regressions use temporary workspaces.
+func TestWorkspaceRelRejectsSymlinkTraversalBeforeLexicalCleaning(t *testing.T) {
+	requirePOSIXSymlinkTraversal(t)
+	root := t.TempDir()
+	workspaceDir := filepath.Join(root, "workspace")
+	outsideDir := filepath.Join(root, "outside")
+	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideDir, filepath.Join(workspaceDir, "out")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceDir, "victim"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The destination keeps its traversal, because going through `out/..` is
+	// the whole point of the fixture - filepath.Join would clean the `..` away
+	// along with the symlink it traverses. It still has to be spelled with the
+	// platform separator, since a rename given a mixed-separator path fails
+	// outright on Windows and the test would never reach its assertion.
+	traversed := strings.Join(
+		[]string{workspaceDir, "out", "..", "outside", "moved"},
+		string(filepath.Separator),
+	)
+	if err := os.Rename(filepath.Join(workspaceDir, "victim"), traversed); err != nil {
+		t.Fatal(err)
+	}
+
+	facts := classifyCommand("mv victim out/../outside/moved", "", true, newWorkspace(workspaceDir))
+	if facts == nil || !reflect.DeepEqual(facts.categories, []string{"workspace.escape"}) ||
+		len(facts.targets) != 0 || len(facts.mutations) != 0 {
+		t.Fatalf("symlink traversal move = %+v, want workspace.escape only", facts)
+	}
+}
+
+func TestWorkspaceRelWithholdsDescendantOfDeletedSymlink(t *testing.T) {
+	root := t.TempDir()
+	workspaceDir := filepath.Join(root, "workspace")
+	outsideDir := filepath.Join(root, "outside")
+	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideDir, filepath.Join(workspaceDir, "out")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outsideDir, "secret"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(workspaceDir, "out", "secret")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(workspaceDir, "out")); err != nil {
+		t.Fatal(err)
+	}
+
+	facts := classifyCommand("rm out/secret out", "", true, newWorkspace(workspaceDir))
+	want := &commandFacts{
+		categories: []string{"fs.delete"},
+		targets:    []CommandTarget{{Kind: "path", Value: "out"}},
+		mutations:  []ShellMutation{{Kind: "delete", Path: "out"}},
+	}
+	if !reflect.DeepEqual(facts, want) {
+		t.Fatalf("deleted symlink ancestor = %+v, want %+v", facts, want)
+	}
+}
+
+func TestNormalizeWorkspacePathPreservesWhitespace(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+		ok    bool
+	}{
+		{name: "trailing space", value: "victim ", want: "victim ", ok: true},
+		{name: "leading space", value: " victim", want: " victim", ok: true},
+		{name: "space-only filename", value: " ", want: " ", ok: true},
+		{name: "empty operand", value: "", ok: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := normalizeWorkspacePath(tt.value, testWorkspace())
+			if got != tt.want || ok != tt.ok {
+				t.Fatalf("normalizeWorkspacePath(%q) = %q, %v; want %q, %v", tt.value, got, ok, tt.want, tt.ok)
+			}
+		})
+	}
+}
+
 func TestInferSearchFileStepFromPath(t *testing.T) {
 	ws := testWorkspace()
 	if s := inferSearchFileStepFromPath("pkg/mod.py", "match found", ws); s == nil || s.files[0] != "pkg/mod.py" {
@@ -307,6 +568,44 @@ func TestInferSearchFileStepFromPath(t *testing.T) {
 	}
 	if s := inferSearchFileStepFromPath("jquery-3.6", "match", ws); s != nil {
 		t.Errorf("version-suffixed directory should credit nothing, got %+v", s)
+	}
+}
+
+func TestSearchOutputNamesChildOf(t *testing.T) {
+	for _, tc := range []struct {
+		operand string
+		output  string
+	}{
+		{"docs.api", "./docs.api/file.go:1:TODO\n"},
+		{".env.production", "\x1b[32m.env.production/settings\x1b[0m:TODO\n"},
+		{"docs.api", `.\\docs.api\\file.go:1:TODO` + "\n"},
+	} {
+		if !searchOutputNamesChildOf(tc.operand, tc.output) {
+			t.Fatalf("child output %q was not recognized", tc.output)
+		}
+	}
+	if file := explicitSingleSearchFile(tokensForSegment("rg --color=always TODO .env.production"), "\x1b[32m.env.production/settings\x1b[0m:TODO\n", testWorkspace()); file != "" {
+		t.Fatalf("colored directory output was credited as %q", file)
+	}
+}
+
+func TestShellCommandStdoutCaptured(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want bool
+	}{
+		{"chmod -c 0600 file.txt '>' changes.log", false},
+		{"chmod -c 0600 file.txt <> rw.log", false},
+		{"chmod -c 0600 file.txt 2>&1", false},
+		{"chmod -c 0600 file.txt &> changes.log", true},
+	} {
+		command, ok := firstShellCommand(tc.raw)
+		if !ok {
+			t.Fatalf("firstShellCommand(%q) failed", tc.raw)
+		}
+		if got := !command.stdoutCaptured(); got != tc.want {
+			t.Fatalf("stdout captured for %q = %v, want redirected %v", tc.raw, !got, tc.want)
+		}
 	}
 }
 
