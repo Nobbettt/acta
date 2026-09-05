@@ -385,6 +385,9 @@ func (s *claudeParseState) consumeToolUse(e *Event, content *ClaudeContent) {
 	// delete from it invents the very act the malformed field should have made
 	// us doubt.
 	inputDecoded := json.Unmarshal(content.Input, &input) == nil
+	if fields, ok := decoderMatchedJSONFieldValues(content.Input, "command"); ok && len(fields) > 1 {
+		inputDecoded = false
+	}
 
 	e.Tool = content.Name
 	setEventInput(e, content.Input)
@@ -748,6 +751,23 @@ func claudeTokens(usage *ClaudeUsage) TokenUsage {
 	}
 }
 
+// decoderMatchedJSONFieldValues returns every object key encoding/json can
+// bind to name. Raw validation must use the decoder's case-insensitive fallback
+// too, or a differently cased key can overwrite the field that was checked.
+func decoderMatchedJSONFieldValues(raw json.RawMessage, name string) ([]json.RawMessage, bool) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil {
+		return nil, false
+	}
+	var values []json.RawMessage
+	for key, value := range fields {
+		if strings.EqualFold(key, name) {
+			values = append(values, value)
+		}
+	}
+	return values, true
+}
+
 // ExitCodeFromToolUseResult pulls the bash exit code out of a claude
 // tool_use_result payload. Shared with the live tracing mapper.
 // toolUseResultOutcomeUnreadable reports whether a tool result claims to carry
@@ -759,33 +779,31 @@ func toolUseResultOutcomeUnreadable(raw json.RawMessage) bool {
 	if len(raw) == 0 {
 		return false
 	}
-	var fields map[string]json.RawMessage
-	if json.Unmarshal(raw, &fields) != nil {
-		// The payload is not even an object, so whatever outcome it meant to
-		// report is unreadable rather than absent.
-		return true
-	}
 	decoded := 0
 	first := 0
 	for _, name := range []string{"exit_code", "exitCode"} {
-		value, ok := fields[name]
+		values, ok := decoderMatchedJSONFieldValues(raw, name)
 		if !ok {
-			continue
-		}
-		var code *int
-		// A JSON null unmarshals into *int without error and leaves the
-		// pointer nil. The field is present and claims to report an outcome,
-		// so a null is a value this parser could not read - not an absent one.
-		if json.Unmarshal(value, &code) != nil || code == nil {
+			// The payload is not even an object, so whatever outcome it meant to
+			// report is unreadable rather than absent.
 			return true
 		}
-		if decoded > 0 && *code != first {
-			// The two spellings of the same field contradict each other, and
-			// nothing in the stream says which one to believe.
-			return true
+		for _, value := range values {
+			var code *int
+			// A JSON null unmarshals into *int without error and leaves the
+			// pointer nil. The field is present and claims to report an outcome,
+			// so a null is a value this parser could not read - not an absent one.
+			if json.Unmarshal(value, &code) != nil || code == nil {
+				return true
+			}
+			if decoded > 0 && *code != first {
+				// The two spellings of the same field contradict each other, and
+				// nothing in the stream says which one to believe.
+				return true
+			}
+			decoded++
+			first = *code
 		}
-		decoded++
-		first = *code
 	}
 	return false
 }

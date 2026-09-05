@@ -101,6 +101,13 @@ func canonicalWorkspacePath(value string) string {
 	return path.Clean(strings.ReplaceAll(filepath.ToSlash(value), `\`, "/"))
 }
 
+// sameCommandPath compares only lexical aliases. Parent components can cross a
+// symlink, so treating them as a cleaned match would suppress a real change.
+func sameCommandPath(left, right string) bool {
+	return left != "" && right != "" && !hasParentPathComponent(left) && !hasParentPathComponent(right) &&
+		canonicalWorkspacePath(left) == canonicalWorkspacePath(right)
+}
+
 func isPortableAbsolute(value string) bool {
 	if strings.HasPrefix(value, "/") {
 		return true
@@ -418,35 +425,7 @@ func firstPipeIndexAfter(tokens []string, start int) int {
 }
 
 func hasRedirectionToken(tokens []string) bool {
-	for _, token := range tokens {
-		if strings.Contains(token, ">") || strings.HasPrefix(token, "<") {
-			return true
-		}
-	}
-	return false
-}
-
-// hasHereStringToken reports whether a `<<<` supplies the command's input as
-// literal text rather than from a file.
-func hasHereStringToken(tokens []string) bool {
-	for _, token := range tokens {
-		if strings.HasPrefix(token, "<<<") {
-			return true
-		}
-	}
-	return false
-}
-
-// hasOutputRedirectionToken reports whether any output was sent somewhere other
-// than the captured stream, which means the captured output cannot be taken as
-// what the command produced.
-func hasOutputRedirectionToken(tokens []string) bool {
-	for _, token := range tokens {
-		if strings.Contains(token, ">") {
-			return true
-		}
-	}
-	return false
+	return len(commandRedirections(tokens)) != 0
 }
 
 func fileBeforePipe(tokens []string, ws *workspace) string {
@@ -469,7 +448,7 @@ func fileAfterCommand(tokens []string, commandWord string, ws *workspace) string
 		return ""
 	}
 	stop := firstPipeIndexAfter(tokens, start)
-	return pathTokenFromTokens(tokens[start:stop], ws, true)
+	return pathTokenFromTokens(commandWords(tokens[start:stop]), ws, true)
 }
 
 var readLikeWords = []string{"sed", "cat", "head", "tail", "nl"}
@@ -573,21 +552,42 @@ func sedReadStep(tokens []string, ws *workspace) *step {
 }
 
 func headReadStep(tokens []string, ws *workspace) *step {
-	// A here-string supplies literal data, so `head <<< .env` reads no file at
-	// all and its operand must never be published as one. A plain `< file`
-	// redirection is the opposite case: the shell opens that exact file and
-	// head reads it. Rejecting every redirection would confuse the two and
-	// lose a read the command plainly performed.
-	if !shellStageStartsWith(tokens, "head") || hasHereStringToken(tokens) ||
-		hasOutputRedirectionToken(tokens) {
+	if !shellStageStartsWith(tokens, "head") || commandStdoutRedirected(tokens) {
 		return nil
 	}
 	count := headCountFromTokens(tokens)
-	filePath := fileAfterCommand(tokens, "head", ws)
+	filePath, explicit := headFileOperand(tokens, ws)
+	if !explicit {
+		if redirect, ok := commandStdinRedirection(tokens); ok && !redirect.data && !redirect.descriptor {
+			filePath = normalizeCommandPathToken(redirect.target, ws)
+		}
+	}
 	if count > 0 && filePath != "" {
 		return &step{files: []string{filePath}, spans: map[string][]Span{filePath: {{Start: 1, End: count}}}}
 	}
 	return nil
+}
+
+// headFileOperand distinguishes a real but unpublishable operand from no
+// operand. Falling through from `/etc/hosts` to redirected stdin would credit
+// a file head did not read merely because the real file lies outside the repo.
+func headFileOperand(tokens []string, ws *workspace) (string, bool) {
+	start := slices.Index(tokens, "head")
+	if start < 0 {
+		return "", false
+	}
+	args := commandWords(tokens[start+1:])
+	for i := len(args) - 1; i >= 0; i-- {
+		token := args[i]
+		if normalized := normalizeCommandPathToken(token, ws); normalized != "" {
+			return normalized, true
+		}
+		candidate, _ := stripPathDecoration(token)
+		if !strings.HasPrefix(token, "-") && (looksLikePlainPath(candidate) || looksLikePathHead(candidate)) {
+			return "", true
+		}
+	}
+	return "", false
 }
 
 func catLikeReadStep(tokens []string, outputText string, ws *workspace) *step {
@@ -746,13 +746,28 @@ func explicitSingleSearchFile(tokens []string, outputText string, ws *workspace)
 // operand followed by a separator, which only happens when the tool descended
 // into it.
 func searchOutputNamesChildOf(operand, outputText string) bool {
-	prefix := strings.TrimSuffix(operand, "/") + "/"
+	prefix := strings.TrimSuffix(canonicalWorkspacePath(operand), "/") + "/"
 	for _, line := range strings.Split(outputText, "\n") {
-		if strings.HasPrefix(line, prefix) {
+		if strings.HasPrefix(canonicalWorkspacePath(stripANSI(line)), prefix) {
 			return true
 		}
 	}
 	return false
+}
+
+func stripANSI(text string) string {
+	var clean strings.Builder
+	for i := 0; i < len(text); i++ {
+		if text[i] != '\x1b' || i+1 == len(text) || text[i+1] != '[' {
+			clean.WriteByte(text[i])
+			continue
+		}
+		i += 2
+		for i < len(text) && (text[i] < '@' || text[i] > '~') {
+			i++
+		}
+	}
+	return clean.String()
 }
 
 // searchFileStepFromCommand credits a file-only retrieval when a grep/rg

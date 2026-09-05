@@ -9,6 +9,7 @@ import (
 	"path"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -641,6 +642,222 @@ func redirectionsComplete(tokens []string) bool {
 	return true
 }
 
+// commandRedirection records the file descriptor a shell redirection changes.
+// Here-documents and here-strings carry data rather than open target as a file,
+// while descriptor redirects name another descriptor rather than a path.
+type commandRedirection struct {
+	fd         int
+	reads      bool
+	writes     bool
+	target     string
+	data       bool
+	descriptor bool
+}
+
+// commandRedirections is the single shell-redirection model used by retrieval
+// and command classification. Treating every '<' or '>' alike would turn a
+// heredoc delimiter into a filename or mistake stderr for captured stdout.
+func commandRedirections(tokens []string) []commandRedirection {
+	var redirects []commandRedirection
+	for i, token := range tokens {
+		fds, reads, writes, data, descriptor, ok := commandRedirectionOperator(token)
+		if !ok || i+1 == len(tokens) {
+			continue
+		}
+		for _, fd := range fds {
+			redirects = append(redirects, commandRedirection{
+				fd:         fd,
+				reads:      reads,
+				writes:     writes,
+				target:     tokens[i+1],
+				data:       data,
+				descriptor: descriptor,
+			})
+		}
+	}
+	return redirects
+}
+
+// commandWords omits redirection operators and their targets, which are never
+// command operands, and stops before a downstream command-control operator.
+func commandWords(tokens []string) []string {
+	words := make([]string, 0, len(tokens))
+	for i := 0; i < len(tokens); i++ {
+		if slices.Contains([]string{"|", "|&", "&&", "||", ";", "&"}, tokens[i]) {
+			return words
+		}
+		if isRedirection(tokens[i]) {
+			if i+1 < len(tokens) {
+				i++
+			}
+			continue
+		}
+		words = append(words, tokens[i])
+	}
+	return words
+}
+
+func commandStdoutRedirected(tokens []string) bool {
+	return slices.ContainsFunc(commandRedirections(tokens), func(redirect commandRedirection) bool {
+		return redirect.fd == 1 && redirect.writes
+	})
+}
+
+// commandRawRedirections preserves quote context that shellTokens deliberately
+// discards. A quoted '>' is an argument, not a redirect; inventing a stdout
+// redirect from it would make readable silence look unknowable.
+func commandRawRedirections(raw string) []commandRedirection {
+	var redirects []commandRedirection
+	quote, substitutions := byte(0), 0
+	backtick := false
+	for i := 0; i < len(raw); i++ {
+		switch raw[i] {
+		case '\\':
+			if quote != '\'' && i+1 < len(raw) {
+				i++
+			}
+		case '\'', '"':
+			switch quote {
+			case 0:
+				quote = raw[i]
+			case raw[i]:
+				quote = 0
+			}
+		case '`':
+			if quote != '\'' {
+				backtick = !backtick
+			}
+		case '$':
+			if !backtick && quote != '\'' && i+1 < len(raw) && raw[i+1] == '(' {
+				substitutions++
+				i++
+			}
+		case '(':
+			if !backtick && substitutions != 0 {
+				substitutions++
+			}
+		case ')':
+			if !backtick && substitutions != 0 {
+				substitutions--
+			}
+		case '>':
+			if backtick || quote != 0 || substitutions != 0 {
+				continue
+			}
+			if i > 0 && raw[i-1] == '&' {
+				fd, start := 1, i-1
+				for start > 0 && raw[start-1] >= '0' && raw[start-1] <= '9' {
+					start--
+				}
+				if start < i-1 && (start == 0 || strings.ContainsRune(" \t\n;&|()<>", rune(raw[start-1]))) {
+					fd, _ = strconv.Atoi(raw[start : i-1])
+					redirects = append(redirects, commandRedirection{fd: fd, writes: true, descriptor: true})
+					continue
+				}
+				redirects = append(redirects, commandRedirection{fd: 1, writes: true}, commandRedirection{fd: 2, writes: true})
+				continue
+			}
+			if i > 0 && raw[i-1] == '<' {
+				fd, start := 0, i-1
+				for start > 0 && raw[start-1] >= '0' && raw[start-1] <= '9' {
+					start--
+				}
+				if start < i-1 && (start == 0 || strings.ContainsRune(" \t\n;&|()<>", rune(raw[start-1]))) {
+					fd, _ = strconv.Atoi(raw[start : i-1])
+				}
+				redirects = append(redirects, commandRedirection{fd: fd, reads: true, writes: true})
+				continue
+			}
+			fd, start := 1, i
+			for start > 0 && raw[start-1] >= '0' && raw[start-1] <= '9' {
+				start--
+			}
+			if start < i && (start == 0 || strings.ContainsRune(" \t\n;&|()<>", rune(raw[start-1]))) {
+				fd, _ = strconv.Atoi(raw[start:i])
+			}
+			redirects = append(redirects, commandRedirection{fd: fd, writes: true})
+		}
+	}
+	return redirects
+}
+
+func commandRawStdoutRedirected(raw string) bool {
+	return slices.ContainsFunc(commandRawRedirections(raw), func(redirect commandRedirection) bool {
+		return redirect.fd == 1 && redirect.writes
+	})
+}
+
+func commandStdinRedirection(tokens []string) (commandRedirection, bool) {
+	var stdin commandRedirection
+	found := false
+	for _, redirect := range commandRedirections(tokens) {
+		if redirect.fd == 0 && redirect.reads {
+			stdin, found = redirect, true
+		}
+	}
+	return stdin, found
+}
+
+func commandRedirectionOperator(token string) (fds []int, reads, writes, data, descriptor, ok bool) {
+	operator := token
+	fd := -1
+	for i, r := range operator {
+		if r < '0' || r > '9' {
+			if i != 0 {
+				parsed, err := strconv.Atoi(operator[:i])
+				if err != nil {
+					return nil, false, false, false, false, false
+				}
+				fd = parsed
+			}
+			operator = operator[i:]
+			break
+		}
+	}
+	if operator == token && strings.Trim(token, "0123456789") == "" {
+		return nil, false, false, false, false, false
+	}
+	if strings.HasPrefix(operator, "&>") {
+		return []int{1, 2}, false, true, false, false, true
+	}
+	if strings.HasPrefix(operator, "<<<") {
+		return []int{defaultRedirectionFD(fd, 0)}, true, false, true, false, true
+	}
+	if strings.HasPrefix(operator, "<<") {
+		return []int{defaultRedirectionFD(fd, 0)}, true, false, true, false, true
+	}
+	if strings.HasPrefix(operator, "<&") {
+		return []int{defaultRedirectionFD(fd, 0)}, true, false, false, true, true
+	}
+	if strings.HasPrefix(operator, "<>") {
+		return []int{defaultRedirectionFD(fd, 0)}, true, true, false, false, true
+	}
+	if strings.HasPrefix(operator, "<") {
+		return []int{defaultRedirectionFD(fd, 0)}, true, false, false, false, true
+	}
+	if strings.HasPrefix(operator, ">&") {
+		return []int{defaultRedirectionFD(fd, 1)}, false, true, false, true, true
+	}
+	if strings.HasPrefix(operator, ">") {
+		return []int{defaultRedirectionFD(fd, 1)}, false, true, false, false, true
+	}
+	return nil, false, false, false, false, false
+}
+
+func defaultRedirectionFD(fd, defaultFD int) int {
+	if fd >= 0 {
+		return fd
+	}
+	return defaultFD
+}
+
+// isRedirection keeps the existing command-boundary callers on the same
+// grammar as commandRedirections instead of duplicating operator detection.
+func isRedirection(token string) bool {
+	_, _, _, _, _, ok := commandRedirectionOperator(token)
+	return ok
+}
+
 type shellOutcome uint8
 
 const (
@@ -720,39 +937,41 @@ func terminatesShellList(tokens []string, returnTerminates bool) bool {
 }
 
 func killSelfSIGKILL(tokens []string) bool {
-	args := make([]string, 0, len(tokens))
-	for i := 0; i < len(tokens); i++ {
-		if isRedirection(tokens[i]) {
-			i++
-			continue
-		}
-		args = append(args, tokens[i])
-	}
-	// Redirections never reach kill as arguments. Treating their targets as
-	// PIDs would either invent a self-kill or miss the one that really ran.
-	tokens = args
+	tokens = commandWords(tokens)
+	// Redirection targets never reach kill as arguments. Treating one as a PID
+	// would either invent a self-kill or miss the one that really ran.
 	signal, pids, options := "", []string{}, true
 	for i := 0; i < len(tokens); i++ {
 		if !options {
+			if tokens[i] == "--" {
+				continue
+			}
 			pids = append(pids, tokens[i])
 			continue
 		}
 		switch tokens[i] {
 		case "--":
 			options = false
-		case "-s", "-n", "--signal":
+		case "-s", "-n":
 			if i+1 == len(tokens) {
 				return false
 			}
 			i++
 			signal = tokens[i]
+			options = false
 		case "-l", "-L":
 			return false
 		default:
-			if strings.HasPrefix(tokens[i], "--signal=") {
-				signal = strings.TrimPrefix(tokens[i], "--signal=")
+			if strings.HasPrefix(tokens[i], "--") {
+				return false
 			} else if strings.HasPrefix(tokens[i], "-") {
-				signal = strings.TrimPrefix(tokens[i], "-")
+				value := strings.TrimPrefix(tokens[i], "-")
+				if number, err := strconv.Atoi(value); err == nil && (number < 1 || number > 64) {
+					pids = append(pids, tokens[i])
+				} else {
+					signal = value
+				}
+				options = false
 			} else {
 				options = false
 				pids = append(pids, tokens[i])
@@ -786,12 +1005,12 @@ func knownShellOutcome(tokens []string) shellOutcome {
 }
 
 // shellReturnTerminates keeps the wrapper identity that unwrapShell removes:
-// Bash reports an invalid top-level return and continues, while zsh stops its
-// command list. Assuming zsh's behavior for an unknown wrapper would hide
-// later work that the command text still proves ran.
+// Bash reports an invalid top-level return and continues, while dash, ksh and
+// zsh stop their command lists. Assuming that behavior for an unknown wrapper
+// would hide later work that the command text still proves ran.
 func shellReturnTerminates(command string) bool {
 	tokens := execLeadingTokens(tokensForSegment(command))
-	if len(tokens) < 3 || path.Base(tokens[0]) != "zsh" {
+	if len(tokens) < 3 || !slices.Contains([]string{"dash", "ksh", "zsh"}, path.Base(tokens[0])) {
 		return false
 	}
 	for _, token := range tokens[1 : len(tokens)-1] {

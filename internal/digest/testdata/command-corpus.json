@@ -4676,5 +4676,259 @@
       "want_mutations": []
     },
     "note": "Lowercase signal names still name SIGKILL and stop the later request."
+  },
+  {
+    "command": "head -n 1 public.txt 3< README.md",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "want_files": [
+      "public.txt"
+    ],
+    "source": "fix-r33-redirections",
+    "output": "public\\n",
+    "note": "A non-stdin input redirect is not a head operand."
+  },
+  {
+    "command": "head -n 1 actual.txt < .env",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "want_files": [
+      "actual.txt"
+    ],
+    "source": "fix-r33-redirections",
+    "output": "actual\\n",
+    "note": "An explicit head operand wins over redirected stdin."
+  },
+  {
+    "command": "head -n 1 <<.env\nSECRET=value\n.env",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "want_files": [],
+    "source": "fix-r33-redirections",
+    "output": "SECRET=value\\n",
+    "note": "A heredoc delimiter is not a file."
+  },
+  {
+    "command": "head -n 1 README.md 2> errors.log",
+    "want_categories": [
+      "instructions.read"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "want_files": [
+      "README.md"
+    ],
+    "source": "fix-r33-redirections",
+    "output": "first line\\n",
+    "note": "Redirecting stderr does not hide captured stdout."
+  },
+  {
+    "command": "chmod -c 0644 file.txt <> rw.log",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "fix-r33-redirections",
+    "note": "Bare read-write redirection opens stdin and leaves stdout captured."
+  },
+  {
+    "command": "chmod -c 0600 file.txt 2> errors.log > changes.log",
+    "want_categories": [
+      "permission.changed"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "file.txt"
+      }
+    ],
+    "want_mutations": [],
+    "source": "fix-r33-redirections",
+    "note": "A later stdout redirect makes chmod's silence unreadable."
+  },
+  {
+    "command": "patch -i - < /dev/null",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "fix-r33-redirections",
+    "note": "Patch's dash input alias reads the empty redirected stdin."
+  },
+  {
+    "command": "git apply --allow-empty - < /dev/null",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "fix-r33-redirections",
+    "note": "Git apply's dash input alias reads the empty redirected stdin."
+  },
+  {
+    "command": "git apply --allow-empty <<< ''",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "fix-r33-redirections",
+    "note": "An empty here-string supplies no patch."
+  },
+  {
+    "command": "patch -i fix.diff < /dev/null",
+    "want_categories": [
+      "fs.patch"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "fix-r33-redirections",
+    "note": "Patch's explicit file input overrides stdin."
+  },
+  {
+    "command": "patch < /dev/null < fix.diff",
+    "want_categories": [
+      "fs.patch"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "fix-r33-redirections",
+    "note": "The final stdin redirection supplies patch's input."
+  },
+  {
+    "command": "chmod --reference=./victim.txt victim.txt",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "fix-r33-canonical-paths",
+    "note": "Lexical path aliases name the same chmod reference and target."
+  },
+  {
+    "command": "chown --reference=reference.txt target.txt",
+    "want_categories": [
+      "permission.changed"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "target.txt"
+      }
+    ],
+    "want_mutations": [],
+    "source": "fix-r33-canonical-paths",
+    "note": "Reference ownership changes the explicit target."
+  },
+  {
+    "command": "chgrp --reference=reference.txt target.txt",
+    "want_categories": [
+      "permission.changed"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "target.txt"
+      }
+    ],
+    "want_mutations": [],
+    "source": "fix-r33-canonical-paths",
+    "note": "Reference group changes the explicit target."
+  },
+  {
+    "command": "rg TODO ./docs.api",
+    "want_categories": [
+      "search.query"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "want_files": [],
+    "source": "fix-r33-canonical-paths",
+    "output": "./docs.api/file.go:1:TODO\\n",
+    "note": "Output naming a child proves the dotted operand was a directory."
+  },
+  {
+    "command": "rg --color=always TODO .env.production",
+    "want_categories": [
+      "search.query"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "want_files": [],
+    "source": "fix-r33-canonical-paths",
+    "output": "\u001b[32m.env.production/settings\u001b[0m:TODO\n",
+    "note": "ANSI decoration must not hide a child-path proof."
+  },
+  {
+    "command": "/bin/bash -lc 'kill -9 -999999 $$; curl https://example.com'",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "fix-r33-shell-control",
+    "failure": {
+      "want_categories": [],
+      "want_targets": [],
+      "want_mutations": []
+    },
+    "note": "A negative process-group operand does not replace the self-SIGKILL signal."
+  },
+  {
+    "command": "env kill -9 $$; curl https://never.example",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "fix-r33-shell-control",
+    "failure": {
+      "want_categories": [],
+      "want_targets": [],
+      "want_mutations": []
+    },
+    "note": "Bare env runs its command, which kills the invoking shell."
+  },
+  {
+    "command": "/bin/dash -lc 'return 0; curl https://never.example'",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "fix-r33-shell-control",
+    "note": "Dash ends a top-level command list at return."
+  },
+  {
+    "command": "/bin/ksh -lc 'return 0; curl https://never.example'",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "fix-r33-shell-control",
+    "note": "Ksh ends a top-level command list at return."
+  },
+  {
+    "command": "/bin/bash -lc 'kill --signal=KILL $$; curl https://example.com'",
+    "want_categories": [
+      "network.egress"
+    ],
+    "want_targets": [
+      {
+        "kind": "url",
+        "value": "https://example.com"
+      }
+    ],
+    "want_mutations": [],
+    "source": "fix-r33-shell-control",
+    "note": "Bash rejects this long kill option and runs the later command."
+  },
+  {
+    "command": "pip install sk-live-SECRET",
+    "want_categories": [
+      "package.install"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "fix-r33-credentials",
+    "note": "A credential-shaped package operand is not publishable."
+  },
+  {
+    "command": "cp -RT source .",
+    "want_categories": [
+      "fs.create"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "fix-r33-copy",
+    "note": "Copying a directory's contents into the workspace root proves a create without one target."
   }
 ]

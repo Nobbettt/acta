@@ -9,6 +9,87 @@ import (
 	"time"
 )
 
+func TestClaudeCaseFoldedCommandKeyDoesNotCreditDelete(t *testing.T) {
+	lines := []string{
+		`{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"true","Command":"rm victim.txt"}}]}}`,
+		`{"type":"user","tool_use_result":{"exit_code":0},"message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"done"}]}}`,
+	}
+	d, err := parseClaude(strings.NewReader(claudeSuccessfulStream(lines...)), newWorkspace(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Timeline) != 1 {
+		t.Fatalf("timeline = %d events, want 1", len(d.Timeline))
+	}
+	e := d.Timeline[0]
+	if e.Command == "rm victim.txt" || slices.Contains(e.Categories, "fs.delete") {
+		t.Fatalf("case-folded command was credited: command=%q categories=%v", e.Command, e.Categories)
+	}
+	for _, target := range e.Targets {
+		if target.Kind == "path" && target.Value == "victim.txt" {
+			t.Fatalf("targets = %v, want no victim.txt target", e.Targets)
+		}
+	}
+	if len(e.ShellMutations) != 0 {
+		t.Fatalf("shell mutations = %+v, want none", e.ShellMutations)
+	}
+}
+
+func TestClaudeCaseFoldedExitCodeConflictDoesNotCreditDelete(t *testing.T) {
+	lines := []string{
+		`{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"rm victim.txt"}}]}}`,
+		`{"type":"user","tool_use_result":{"exit_code":1,"Exit_Code":0},"message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"done"}]}}`,
+	}
+	d, err := parseClaude(strings.NewReader(claudeSuccessfulStream(lines...)), newWorkspace(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Timeline) != 1 {
+		t.Fatalf("timeline = %d events, want 1", len(d.Timeline))
+	}
+	e := d.Timeline[0]
+	if e.ExitCode == nil || *e.ExitCode != 0 {
+		t.Fatalf("exit code = %v, want decoder's overwritten zero", e.ExitCode)
+	}
+	if slices.Contains(e.Categories, "fs.delete") {
+		t.Fatalf("categories = %v, want no fs.delete", e.Categories)
+	}
+	for _, target := range e.Targets {
+		if target.Kind == "path" && target.Value == "victim.txt" {
+			t.Fatalf("targets = %v, want no victim.txt target", e.Targets)
+		}
+	}
+	if len(e.ShellMutations) != 0 {
+		t.Fatalf("shell mutations = %+v, want none", e.ShellMutations)
+	}
+}
+
+func TestClaudeLowercaseExitCodesKeepTheirMeaning(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		exitCode       int
+		wantDeleteFact bool
+	}{
+		{name: "zero succeeds", exitCode: 0, wantDeleteFact: true},
+		{name: "nonzero fails", exitCode: 1, wantDeleteFact: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lines := []string{
+				`{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"rm victim.txt"}}]}}`,
+				fmt.Sprintf(`{"type":"user","tool_use_result":{"exit_code":%d},"message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"done"}]}}`, tc.exitCode),
+			}
+			d, err := parseClaude(strings.NewReader(claudeSuccessfulStream(lines...)), newWorkspace(""))
+			if err != nil {
+				t.Fatal(err)
+			}
+			e := d.Timeline[0]
+			if got := slices.Contains(e.Categories, "fs.delete"); got != tc.wantDeleteFact {
+				t.Fatalf("fs.delete = %t, want %t", got, tc.wantDeleteFact)
+			}
+		})
+	}
+}
+
 // A malformed exit code says neither that the command failed nor that it
 // succeeded. Crediting its delete would invent a file mutation from an
 // outcome the stream did not actually provide.

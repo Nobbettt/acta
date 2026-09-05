@@ -53,7 +53,7 @@ func classifyFS(segment commandSegment) *commandFacts {
 		if scan.hasFlag(fsInspectFlags...) || verb == "patch" && scan.hasFlag("-C", "-v") {
 			return nil
 		}
-		if verb == "patch" && fsPatchInputIsDevNull(args) {
+		if verb == "patch" && fsPatchInputIsEmpty(args) {
 			return nil
 		}
 		if verb == "git apply" && fsGitApplyInputIsEmpty(args) {
@@ -366,64 +366,50 @@ func fsOwnArgs(args []string) []string {
 	return args
 }
 
-// fsPatchArgs removes shell redirections while preserving options that follow
-// them. Cutting at a redirect would treat an overridden empty stdin as patch's
-// input and suppress a patch that its native -i/--input option really applies.
-func fsPatchArgs(args []string) ([]string, bool) {
-	words := make([]string, 0, len(args))
-	stdinDevNull := false
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if arg == "|" || arg == "|&" || arg == "&" {
-			break
-		}
-		if !isRedirection(arg) {
-			words = append(words, arg)
-			continue
-		}
-		op := strings.IndexAny(arg, "<>")
-		redirect, target := arg[op:], arg[op+1:]
-		if target == "" && i+1 < len(args) {
-			i++
-			target = args[i]
-		}
-		if (arg[:op] == "" || arg[:op] == "0") && strings.HasPrefix(redirect, "<") &&
-			!strings.HasPrefix(redirect, "<<") && target == "/dev/null" {
-			stdinDevNull = true
-		}
-	}
-	return words, stdinDevNull
+// patchInputIsEmpty reports whether the final stdin source is known empty.
+// A later redirection wins, so recording an earlier /dev/null as a sticky fact
+// would suppress a patch that a following file redirect actually supplies.
+func patchInputIsEmpty(args []string) bool {
+	redirect, ok := commandStdinRedirection(args)
+	return ok && (redirect.data && redirect.target == "" || !redirect.data && !redirect.descriptor && redirect.target == "/dev/null")
 }
 
-// fsPatchInputIsDevNull reports whether patch's effective input is empty.
-// Its native input option overrides stdin, so an empty redirect only matters
-// when no -i/--input value names the patch instead.
-func fsPatchInputIsDevNull(args []string) bool {
-	args, stdinDevNull := fsPatchArgs(args)
+// fsPatchInputIsEmpty reports whether patch's effective input is empty. Its
+// native input option overrides stdin, and '-' is an explicit stdin alias.
+func fsPatchInputIsEmpty(args []string) bool {
+	words := commandWords(args)
 	input, explicit := "", false
-	for _, flag := range scanCommandArgs(args, fsFlagModels["patch"]).flags {
+	for _, flag := range scanCommandArgs(words, fsFlagModels["patch"]).flags {
 		if flag.name == "-i" || flag.name == "--input" {
 			input, explicit = flag.value, true
 		}
 	}
-	return explicit && input == "/dev/null" || !explicit && stdinDevNull
+	if !explicit {
+		return patchInputIsEmpty(args)
+	}
+	return input == "/dev/null" || input == "-" && patchInputIsEmpty(args)
 }
 
 // fsGitApplyInputIsEmpty reports git apply's --allow-empty forms that prove
-// no patch was supplied. A named patch overrides stdin just as patch's -i
-// does, so any nonempty patch operand keeps the fs.patch classification.
+// no patch was supplied. A dash operand reads stdin, while named files override
+// it; classifying either the heredoc delimiter or dash itself as a patch file
+// would invent an application that did not happen.
 func fsGitApplyInputIsEmpty(args []string) bool {
-	args, stdinDevNull := fsPatchArgs(args)
-	scan := scanCommandArgs(args, nil)
+	scan := scanCommandArgs(commandWords(args), nil)
 	if !scan.hasFlag("--allow-empty") {
 		return false
 	}
+	stdin := false
 	for _, operand := range scan.operands {
-		if operand != "/dev/null" {
+		switch operand {
+		case "/dev/null":
+		case "-":
+			stdin = true
+		default:
 			return false
 		}
 	}
-	return len(scan.operands) != 0 || stdinDevNull
+	return !stdin && len(scan.operands) != 0 || (stdin || len(scan.operands) == 0) && patchInputIsEmpty(args)
 }
 
 type commandFlag struct {
@@ -584,14 +570,6 @@ func commandAssertsNoChange(args []string, model commandFlagModel) bool {
 	return scanCommandArgs(args, model).hasModeFlag(
 		"--help", "-h", "--version", "-V", "--usage", "--dry-run",
 	)
-}
-
-// isRedirection reports whether tok opens a redirection (`<`, `>`, `2>`, `&>`,
-// `<<EOF`), including the attached form where the stream name follows in the
-// same token.
-func isRedirection(tok string) bool {
-	rest := strings.TrimLeft(tok, "0123456789&")
-	return strings.HasPrefix(rest, "<") || strings.HasPrefix(rest, ">")
 }
 
 // fsShellMetacharacters is the set of characters that prove an operand carries
@@ -923,6 +901,11 @@ func fsCopy(args, operands []string, ws *workspace, cwdUncertain bool) *commandF
 		return nil
 	}
 	dest := operands[len(operands)-1]
+	if scan.hasFlag("-T", "--no-target-directory") && scan.hasFlag("-R", "--recursive") && fsIsWorkspaceRoot(dest, ws) {
+		// Recursive -T copies a source directory's contents into the existing
+		// workspace root. The command proves creation but not one child path.
+		return &commandFacts{categories: []string{"fs.create"}}
+	}
 	if !scan.hasFlag("-T", "--no-target-directory") &&
 		(strings.HasSuffix(dest, "/") || fsDestinationNamesDirectory(dest) || fsIsWorkspaceRoot(dest, ws)) {
 		facts := &commandFacts{}

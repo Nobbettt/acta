@@ -116,15 +116,16 @@ var execRules = []func(execCommand) *commandFacts{
 }
 
 // execLeadingTokens drops the prefixes that stand in front of the real command
-// word — environment assignments, `sudo`, and `env` used as an assignment
-// runner — so `FOO=1 sudo chmod +x x` still classifies as a chmod. A bare `env`
-// is left alone: that one is an inspection, not a prefix.
+// word — environment assignments, `sudo`, and `env` used as a runner — so
+// `FOO=1 sudo chmod +x x` still classifies as a chmod. Only argument-free env
+// is an inspection; `env kill` really executes kill.
 func execLeadingTokens(tokens []string) []string {
 	for i, token := range tokens {
 		switch {
 		case execIsAssignment(token):
 		case token == "sudo":
-		case token == "env" && i+1 < len(tokens) && execIsAssignment(tokens[i+1]):
+		case token == "env" && i+1 < len(tokens) && !isRedirection(tokens[i+1]) &&
+			!slices.Contains([]string{"|", "|&", "&&", "||", ";", "&"}, tokens[i+1]):
 		default:
 			return tokens[i:]
 		}
@@ -224,7 +225,7 @@ func commandTargetHost(value string) string {
 func execCredentialPackage(value string) bool {
 	at := strings.IndexByte(value, '@')
 	colon := strings.IndexByte(value, ':')
-	return colon >= 0 && at > colon
+	return colon >= 0 && at > colon || strings.HasPrefix(strings.ToLower(value), "sk-live-")
 }
 
 func execSub(args []string) string {
@@ -1415,14 +1416,19 @@ func execPermissionPaths(cmd execCommand) ([]string, bool) {
 		return nil, false
 	}
 	paths := scan.operands
-	if cmd.word == "chmod" && scan.hasFlag("--reference") {
+	if scan.hasFlag("--reference") {
 		for i := len(scan.flags) - 1; i >= 0; i-- {
 			if scan.flags[i].name != "--reference" {
 				continue
 			}
-			// An exact reference and target spelling is a syntax-proven no-op;
-			// normalizing them could equate paths through a symlink without proof.
-			paths = slices.DeleteFunc(paths, func(path string) bool { return path == scan.flags[i].value })
+			if cmd.word == "chmod" {
+				// A lexical alias such as ./file names the same cwd-relative target.
+				// Parent components remain incomparable because a symlink could make
+				// them resolve elsewhere.
+				paths = slices.DeleteFunc(paths, func(path string) bool {
+					return sameCommandPath(path, scan.flags[i].value)
+				})
+			}
 			break
 		}
 	} else {
@@ -1444,58 +1450,6 @@ func execPermissionReportsEveryChange(cmd execCommand) bool {
 	}
 	scan := scanCommandArgs(cmd.args, execPermissionFlagModelFor(cmd.word))
 	return !scan.unknownFlag && scan.hasFlag("-c", "--changes")
-}
-
-// execStdoutRedirected excludes silence that the command sent away from the
-// captured stdout. Without this, a redirected `chmod -c` would look like it
-// changed nothing even when its unreadable change report proves nothing.
-func execStdoutRedirected(raw string) bool {
-	quote, substitutions := byte(0), 0
-	backtick := false
-	for i := 0; i < len(raw); i++ {
-		switch raw[i] {
-		case '\\':
-			if quote != '\'' && i+1 < len(raw) {
-				i++
-			}
-		case '\'', '"':
-			switch quote {
-			case 0:
-				quote = raw[i]
-			case raw[i]:
-				quote = 0
-			}
-		case '`':
-			if quote != '\'' {
-				backtick = !backtick
-			}
-		case '$':
-			if !backtick && quote != '\'' && i+1 < len(raw) && raw[i+1] == '(' {
-				substitutions++
-				i++
-			}
-		case '(':
-			if !backtick && substitutions != 0 {
-				substitutions++
-			}
-		case ')':
-			if !backtick && substitutions != 0 {
-				substitutions--
-			}
-		case '>':
-			if !backtick && quote == 0 && substitutions == 0 {
-				start := i
-				for start > 0 && raw[start-1] >= '0' && raw[start-1] <= '9' {
-					start--
-				}
-				if start == i || start > 0 && !strings.ContainsRune(" \t\n;&|()<>", rune(raw[start-1])) {
-					return true
-				}
-				return raw[start:i] == "1"
-			}
-		}
-	}
-	return false
 }
 
 func execChmodSymbolicMode(value string) bool {
@@ -1520,7 +1474,7 @@ func execPermission(cmd execCommand) *commandFacts {
 	if !ok {
 		return nil
 	}
-	if execPermissionReportsEveryChange(cmd) && cmd.seg.outputTrusted && !execStdoutRedirected(cmd.seg.raw) && cmd.seg.output == "" {
+	if execPermissionReportsEveryChange(cmd) && cmd.seg.outputTrusted && !commandRawStdoutRedirected(cmd.seg.raw) && cmd.seg.output == "" {
 		// `chmod -c` prints one line per file it actually changed, so output
 		// that is readable and empty proves it changed none. A command whose
 		// output cannot be attributed to this segment is not silence — it is

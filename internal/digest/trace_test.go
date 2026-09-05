@@ -571,6 +571,40 @@ func TestInferSearchFileStepFromPath(t *testing.T) {
 	}
 }
 
+func TestSearchOutputNamesChildOf(t *testing.T) {
+	for _, tc := range []struct {
+		operand string
+		output  string
+	}{
+		{"docs.api", "./docs.api/file.go:1:TODO\n"},
+		{".env.production", "\x1b[32m.env.production/settings\x1b[0m:TODO\n"},
+		{"docs.api", `.\\docs.api\\file.go:1:TODO` + "\n"},
+	} {
+		if !searchOutputNamesChildOf(tc.operand, tc.output) {
+			t.Fatalf("child output %q was not recognized", tc.output)
+		}
+	}
+	if file := explicitSingleSearchFile(tokensForSegment("rg --color=always TODO .env.production"), "\x1b[32m.env.production/settings\x1b[0m:TODO\n", testWorkspace()); file != "" {
+		t.Fatalf("colored directory output was credited as %q", file)
+	}
+}
+
+func TestCommandRawStdoutRedirected(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want bool
+	}{
+		{"chmod -c 0600 file.txt '>' changes.log", false},
+		{"chmod -c 0600 file.txt <> rw.log", false},
+		{"chmod -c 0600 file.txt 2>&1", false},
+		{"chmod -c 0600 file.txt &> changes.log", true},
+	} {
+		if got := commandRawStdoutRedirected(tc.raw); got != tc.want {
+			t.Fatalf("commandRawStdoutRedirected(%q) = %v, want %v", tc.raw, got, tc.want)
+		}
+	}
+}
+
 func TestMergeSpans(t *testing.T) {
 	got := mergeSpans([]Span{{10, 20}, {1, 5}, {18, 30}, {6, 8}})
 	want := []Span{{1, 8}, {10, 30}}

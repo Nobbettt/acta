@@ -42,31 +42,32 @@ type CodexError struct {
 }
 
 type CodexItem struct {
-	ID                string            `json:"id"`
-	Type              string            `json:"type"`
-	Command           string            `json:"command,omitempty"`
-	AggregatedOutput  string            `json:"aggregated_output,omitempty"`
-	ExitCode          *int              `json:"exit_code,omitempty"`
-	Status            string            `json:"status,omitempty"`
-	Text              string            `json:"text,omitempty"`
-	TextChars         int               `json:"text_chars,omitempty"`
-	TextTruncated     bool              `json:"text_truncated,omitempty"`
-	Redacted          bool              `json:"redacted,omitempty"`
-	Message           string            `json:"message,omitempty"`
-	Changes           []CodexFileChange `json:"changes,omitempty"`
-	Items             []CodexTodoItem   `json:"items,omitempty"`
-	Server            string            `json:"server,omitempty"`
-	Tool              string            `json:"tool,omitempty"`
-	Arguments         json.RawMessage   `json:"arguments,omitempty"`
-	Result            json.RawMessage   `json:"result,omitempty"`
-	Error             *CodexError       `json:"error,omitempty"`
-	Query             string            `json:"query,omitempty"`
-	Action            json.RawMessage   `json:"action,omitempty"`
-	SenderThreadID    string            `json:"sender_thread_id,omitempty"`
-	ReceiverThreadIDs []string          `json:"receiver_thread_ids,omitempty"`
-	Prompt            string            `json:"prompt,omitempty"`
-	AgentsStates      json.RawMessage   `json:"agents_states,omitempty"`
-	Raw               json.RawMessage   `json:"-"`
+	ID                 string            `json:"id"`
+	Type               string            `json:"type"`
+	Command            string            `json:"command,omitempty"`
+	AggregatedOutput   string            `json:"aggregated_output,omitempty"`
+	ExitCode           *int              `json:"exit_code,omitempty"`
+	Status             string            `json:"status,omitempty"`
+	Text               string            `json:"text,omitempty"`
+	TextChars          int               `json:"text_chars,omitempty"`
+	TextTruncated      bool              `json:"text_truncated,omitempty"`
+	Redacted           bool              `json:"redacted,omitempty"`
+	Message            string            `json:"message,omitempty"`
+	Changes            []CodexFileChange `json:"changes,omitempty"`
+	Items              []CodexTodoItem   `json:"items,omitempty"`
+	Server             string            `json:"server,omitempty"`
+	Tool               string            `json:"tool,omitempty"`
+	Arguments          json.RawMessage   `json:"arguments,omitempty"`
+	Result             json.RawMessage   `json:"result,omitempty"`
+	Error              *CodexError       `json:"error,omitempty"`
+	Query              string            `json:"query,omitempty"`
+	Action             json.RawMessage   `json:"action,omitempty"`
+	SenderThreadID     string            `json:"sender_thread_id,omitempty"`
+	ReceiverThreadIDs  []string          `json:"receiver_thread_ids,omitempty"`
+	Prompt             string            `json:"prompt,omitempty"`
+	AgentsStates       json.RawMessage   `json:"agents_states,omitempty"`
+	Raw                json.RawMessage   `json:"-"`
+	exitCodeUnreadable bool
 }
 
 func (i *CodexItem) UnmarshalJSON(raw []byte) error {
@@ -75,6 +76,8 @@ func (i *CodexItem) UnmarshalJSON(raw []byte) error {
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		return err
 	}
+	exitCodeFields, _ := decoderMatchedJSONFieldValues(raw, "exit_code")
+	decoded.exitCodeUnreadable = len(exitCodeFields) > 0 && decoded.ExitCode == nil
 	*i = CodexItem(decoded)
 	i.Raw = append(i.Raw[:0], raw...)
 	return nil
@@ -82,11 +85,13 @@ func (i *CodexItem) UnmarshalJSON(raw []byte) error {
 
 // Failed reports whether a terminal codex item represents a failure, so the
 // digest and the tracing span agree on error state (a single rule instead of
-// four hand-coded copies). A nonzero exit code always means failure; otherwise
-// only an explicit non-success status does. The real stream stamps
-// "completed"/"failed"; empty and "success" are treated as ok.
+// four hand-coded copies). A present but unreadable exit code means failure,
+// because treating null as absent would invent success from no outcome. A
+// nonzero exit code always means failure; otherwise only an explicit
+// non-success status does. The real stream stamps "completed"/"failed"; empty
+// and "success" are treated as ok.
 func (i *CodexItem) Failed() bool {
-	if i.ExitCode != nil && *i.ExitCode != 0 {
+	if i.exitCodeUnreadable || (i.ExitCode != nil && *i.ExitCode != 0) {
 		return true
 	}
 	switch i.Status {
