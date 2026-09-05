@@ -3706,5 +3706,184 @@
   "want_targets": [],
   "want_mutations": [],
   "source": "review-r26-RRR"
+ },
+ {
+  "command": "pip install secrets/sk-live-SECRET.whl",
+  "want_categories": [
+   "package.install"
+  ],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r28-TTT"
+ },
+ {
+  "command": "pip install ./x",
+  "want_categories": [
+   "package.install"
+  ],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r28-TTT"
+ },
+ {
+  "command": "pip install x/y",
+  "want_categories": [
+   "package.install"
+  ],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r28-TTT"
+ },
+ {
+  "command": "pip install ../x",
+  "want_categories": [
+   "package.install"
+  ],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r28-TTT"
+ },
+ {
+  "command": "pip install x.whl",
+  "want_categories": [
+   "package.install"
+  ],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r28-TTT"
+ },
+ {
+  "command": "pip install x.tgz",
+  "want_categories": [
+   "package.install"
+  ],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r28-TTT"
+ },
+ {
+  "command": "pip install -e .",
+  "want_categories": [
+   "package.install"
+  ],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r28-TTT"
+ },
+ {
+  "command": "pip install -r requirements.txt",
+  "want_categories": [
+   "package.install"
+  ],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r28-TTT"
+ },
+ {
+  "command": "npm install left-pad @scope/pkg",
+  "want_categories": [
+   "package.install"
+  ],
+  "want_targets": [
+   {
+    "kind": "package",
+    "value": "left-pad"
+   },
+   {
+    "kind": "package",
+    "value": "@scope/pkg"
+   }
+  ],
+  "want_mutations": [],
+  "source": "review-r28-TTT"
+ },
+ {
+  "command": "pip install django==4.2",
+  "want_categories": [
+   "package.install"
+  ],
+  "want_targets": [
+   {
+    "kind": "package",
+    "value": "django==4.2"
+   }
+  ],
+  "want_mutations": [],
+  "source": "review-r28-TTT"
+ },
+ {
+  "command": "go get example.com/team/module",
+  "want_categories": [
+   "package.install"
+  ],
+  "want_targets": [
+   {
+    "kind": "package",
+    "value": "example.com/team/module"
+   }
+  ],
+  "want_mutations": [],
+  "source": "review-r28-TTT"
+ },
+ {
+  "command": "gunzip - < data.gz > /dev/null",
+  "want_categories": [],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r28-TTT"
+ },
+ {
+  "command": "curl -o /proc/self/fd/1 https://example.com",
+  "want_categories": [
+   "network.egress"
+  ],
+  "want_targets": [
+   {
+    "kind": "url",
+    "value": "https://example.com"
+   }
+  ],
+  "want_mutations": [],
+  "source": "review-r28-TTT"
+ },
+ {
+  "command": "curl -o /proc/thread-self/fd/2 https://example.com",
+  "want_categories": [
+   "network.egress"
+  ],
+  "want_targets": [
+   {
+    "kind": "url",
+    "value": "https://example.com"
+   }
+  ],
+  "want_mutations": [],
+  "source": "review-r28-TTT"
+ },
+ {
+  "command": "git rebase --interactive=false main",
+  "want_categories": [
+   "vcs.rewrite"
+  ],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r28-TTT",
+  "failure": {
+   "want_categories": [],
+   "want_targets": [],
+   "want_mutations": []
+  }
+ },
+ {
+  "command": "git add --interactive=false",
+  "want_categories": [],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r28-TTT",
+  "failure": {
+   "want_categories": [],
+   "want_targets": [],
+   "want_mutations": []
+  }
  }
 ]

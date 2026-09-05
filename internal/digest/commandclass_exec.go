@@ -664,9 +664,25 @@ func execPackage(cmd execCommand) *commandFacts {
 		if name = strings.TrimSpace(name); name == "" {
 			continue // an empty quoted operand (`npm install ""`) names nothing
 		}
+		if !execPublishablePackage(cmd.word, name) {
+			continue
+		}
 		appendCommandTarget(facts, CommandTarget{Kind: "package", Value: name})
 	}
 	return facts
+}
+
+func execPublishablePackage(word, name string) bool {
+	if execPackageSource(name) || execCredentialPackage(name) {
+		return false
+	}
+	if word != "pip" && word != "pip3" {
+		return true
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return false
+	}
+	return !slices.Contains([]string{".bz2", ".egg", ".gz", ".tar", ".tgz", ".whl", ".xz", ".zip"}, strings.ToLower(path.Ext(name)))
 }
 
 func execPackageURL(name string) bool {
@@ -1058,7 +1074,7 @@ func execArchiveWritesToDisk(cmd execCommand) bool {
 	case "gunzip":
 		scan := scanCommandArgs(cmd.args, execGunzipFlagModel)
 		if !scan.unknownFlag && !scan.hasFlag("--list", "--test", "--stdout", "--to-stdout", "-l", "-t", "-c", "-r") {
-			return len(scan.operands) != 0
+			return slices.ContainsFunc(scan.operands, func(operand string) bool { return operand != "-" })
 		}
 		return false
 	case "curl":
@@ -1084,7 +1100,7 @@ func execArchive(cmd execCommand) *commandFacts {
 		scan := scanCommandArgs(cmd.args, execUnzipFlagModel)
 		inside, escaped = execArchiveDestinationsWorkspace(cmd, scan, "-d")
 	case "gunzip":
-		destinations := scanCommandArgs(cmd.args, execGunzipFlagModel).operands
+		destinations := slices.DeleteFunc(scanCommandArgs(cmd.args, execGunzipFlagModel).operands, func(operand string) bool { return operand == "-" })
 		inside, escaped = execPathsWorkspace(cmd, destinations)
 	case "curl":
 		destinations := execDownloadOutputFiles(cmd)
@@ -1152,7 +1168,8 @@ func execDownloadOutputFiles(cmd execCommand) []string {
 func execOutputPath(value string) bool {
 	clean := canonicalWorkspacePath(value)
 	if value == "" || value == "-" || strings.ContainsAny(value, fsShellMetacharacters) ||
-		strings.HasPrefix(clean, "/dev/") {
+		strings.HasPrefix(clean, "/dev/") || strings.HasPrefix(clean, "/proc/self/fd/") ||
+		strings.HasPrefix(clean, "/proc/thread-self/fd/") {
 		return false
 	}
 	return true
@@ -1459,9 +1476,14 @@ func execInteractive(cmd execCommand) *commandFacts {
 	if execInteractiveCommands[cmd.word] {
 		return execFacts("command.interactive")
 	}
-	if cmd.word == "git" && (execSub(cmd.args) == "rebase" || execSub(cmd.args) == "add") &&
-		execHasFlag(cmd.args[1:], gitFlagModels[execSub(cmd.args)], "-i", "--interactive") {
-		return execFacts("command.interactive")
+	if cmd.word == "git" && (execSub(cmd.args) == "rebase" || execSub(cmd.args) == "add") {
+		args := cmd.args[1:]
+		scan := scanCommandArgs(args, gitFlagModels[execSub(cmd.args)])
+		for _, flag := range scan.flags {
+			if !scan.unknownFlag && (flag.name == "-i" || flag.name == "--interactive") && args[flag.index] == flag.name {
+				return execFacts("command.interactive")
+			}
+		}
 	}
 	return nil
 }
