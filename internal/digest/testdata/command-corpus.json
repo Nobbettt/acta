@@ -3885,5 +3885,91 @@
    "want_targets": [],
    "want_mutations": []
   }
+ },
+ {
+  "command": "npm install dist/app.tgz",
+  "want_categories": [
+   "package.install"
+  ],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "package-name-regression"
+ },
+ {
+  "command": "yarn add ./local",
+  "want_categories": [
+   "package.install"
+  ],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "package-name-regression"
+ },
+ {
+  "command": "pnpm add ../pkg",
+  "want_categories": [
+   "package.install"
+  ],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "package-name-regression"
+ },
+ {
+  "command": "pip3 install wheels/app.whl",
+  "want_categories": [
+   "package.install"
+  ],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "package-name-regression"
+ },
+ {
+  "command": "go get ./...",
+  "want_categories": [
+   "package.install"
+  ],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "package-name-regression"
+ },
+ {
+  "command": "cargo add ./local.zip",
+  "want_categories": [
+   "package.install"
+  ],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "package-name-regression"
+ },
+ {
+  "command": "gem install ./x.gem",
+  "want_categories": [
+   "package.install"
+  ],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "package-name-regression"
+ },
+ {
+  "command": "brew install ./formula.rb",
+  "want_categories": [
+   "package.install"
+  ],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "package-name-regression"
+ },
+ {
+  "command": "pip install requests[socks]",
+  "want_categories": [
+   "package.install"
+  ],
+  "want_targets": [
+   {
+    "kind": "package",
+    "value": "requests[socks]"
+   }
+  ],
+  "want_mutations": [],
+  "source": "package-name-regression"
  }
 ]

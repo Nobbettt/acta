@@ -174,7 +174,7 @@ func appendCommandTarget(facts *commandFacts, target CommandTarget) {
 	case "host":
 		target.Value = commandTargetHost(target.Value)
 	case "package":
-		if execPackageSource(target.Value) || execCredentialPackage(target.Value) {
+		if !execPackageName("", target.Value) {
 			return
 		}
 	case "path":
@@ -198,7 +198,7 @@ func appendCommandTarget(facts *commandFacts, target CommandTarget) {
 	default:
 		return
 	}
-	if target.Value == "" || strings.ContainsAny(target.Value, fsShellMetacharacters) ||
+	if target.Value == "" || target.Kind != "package" && strings.ContainsAny(target.Value, fsShellMetacharacters) ||
 		slices.Contains(facts.targets, target) {
 		return
 	}
@@ -664,7 +664,7 @@ func execPackage(cmd execCommand) *commandFacts {
 		if name = strings.TrimSpace(name); name == "" {
 			continue // an empty quoted operand (`npm install ""`) names nothing
 		}
-		if !execPublishablePackage(cmd.word, name) {
+		if !execPackageName(cmd.word, name) {
 			continue
 		}
 		appendCommandTarget(facts, CommandTarget{Kind: "package", Value: name})
@@ -672,17 +672,38 @@ func execPackage(cmd execCommand) *commandFacts {
 	return facts
 }
 
-func execPublishablePackage(word, name string) bool {
-	if execPackageSource(name) || execCredentialPackage(name) {
+// execPackageName is the single gate for package targets. Slash-bearing names
+// are limited to scoped Node names and domain-qualified Go module paths.
+func execPackageName(word, name string) bool {
+	if name == "" || execPackageSource(name) || execCredentialPackage(name) || strings.HasPrefix(name, ".") ||
+		strings.HasPrefix(name, "-") || strings.ContainsFunc(name, func(r rune) bool {
+		return !strings.ContainsRune("-_.@:=><!~^+,[]|/", r) &&
+			(r < '0' || r > '9') && (r < 'A' || r > 'Z') && (r < 'a' || r > 'z')
+	}) {
 		return false
 	}
-	if word != "pip" && word != "pip3" {
-		return true
-	}
-	if strings.ContainsAny(name, `/\`) {
+	ext := strings.ToLower(path.Ext(name))
+	if slices.Contains([]string{".bz2", ".egg", ".gem", ".gz", ".jar", ".tar", ".tgz", ".whl", ".xz", ".zip"}, ext) {
 		return false
 	}
-	return !slices.Contains([]string{".bz2", ".egg", ".gz", ".tar", ".tgz", ".whl", ".xz", ".zip"}, strings.ToLower(path.Ext(name)))
+	if !strings.ContainsRune(name, '/') {
+		return name[0] != '@'
+	}
+	if (word == "" || execNodeManagers[word]) && strings.HasPrefix(name, "@") &&
+		strings.Count(name, "/") == 1 {
+		slash := strings.IndexByte(name, '/')
+		return slash > 1 && slash < len(name)-1 && name[slash+1] != '.'
+	}
+	if word == "" || word == "go" {
+		parts := strings.Split(name, "/")
+		if !strings.ContainsRune(parts[0], '.') {
+			return false
+		}
+		return !slices.ContainsFunc(parts, func(part string) bool {
+			return part == "" || strings.HasPrefix(part, ".")
+		})
+	}
+	return false
 }
 
 func execPackageURL(name string) bool {
