@@ -534,6 +534,10 @@ type chainSegment struct {
 // shape could not be resolved — see stripHeredocBodies — so the caller credits
 // nothing for the whole command.
 func splitCommandChain(command string) []chainSegment {
+	return splitCommandChainForShell(command, true)
+}
+
+func splitCommandChainForShell(command string, returnTerminates bool) []chainSegment {
 	if len(command) > maxCommandTokenizationChars {
 		return []chainSegment{{raw: command}}
 	}
@@ -557,7 +561,7 @@ func splitCommandChain(command string) []chainSegment {
 			proven = false
 		}
 	}
-	pruned := pruneUnexecuted(raw)
+	pruned := pruneUnexecutedForShell(raw, returnTerminates)
 	segments := make([]chainSegment, 0, len(pruned))
 	for i, r := range pruned {
 		segments = append(segments, chainSegment{
@@ -653,6 +657,10 @@ const (
 // executed exit, exec or self-SIGKILL terminates the list; an uncertain one
 // makes every later term uncertain too.
 func pruneUnexecuted(raw []commandChainRaw) []commandChainRaw {
+	return pruneUnexecutedForShell(raw, true)
+}
+
+func pruneUnexecutedForShell(raw []commandChainRaw, returnTerminates bool) []commandChainRaw {
 	out := make([]commandChainRaw, 0, len(raw))
 	outcome := shellOutcomeUnknown
 	terminated, mayHaveTerminated := false, false
@@ -681,19 +689,20 @@ func pruneUnexecuted(raw []commandChainRaw) []commandChainRaw {
 		loadsParentShell := containsShellControlCommand(tokens, "eval", "source", ".")
 		if !certain {
 			mayHaveTerminated = mayHaveTerminated || loadsParentShell ||
-				terminatesShellList(tokens)
+				terminatesShellList(tokens, returnTerminates)
 			outcome = shellOutcomeUnknown
 			continue
 		}
 		outcome = knownShellOutcome(tokens)
-		terminated = terminatesShellList(tokens)
+		terminated = terminatesShellList(tokens, returnTerminates)
 		mayHaveTerminated = mayHaveTerminated || loadsParentShell
 	}
 	return out
 }
 
-func terminatesShellList(tokens []string) bool {
-	if containsShellControlCommand(tokens, "exit", "exec", "return") {
+func terminatesShellList(tokens []string, returnTerminates bool) bool {
+	if containsShellControlCommand(tokens, "exit", "exec") ||
+		returnTerminates && containsShellControlCommand(tokens, "return") {
 		return true
 	}
 	tokens = execLeadingTokens(tokens)
@@ -704,31 +713,55 @@ func terminatesShellList(tokens []string) bool {
 			tokens = tokens[1:]
 		}
 	}
-	// `$$` is the shell's own pid and `$BASHPID` is the current bash process's,
-	// which differ only inside a subshell; killing either ends the shell that
-	// would have run whatever follows.
-	if len(tokens) == 0 || path.Base(tokens[0]) != "kill" || !isShellSelfPid(tokens[len(tokens)-1]) {
+	if len(tokens) == 0 || path.Base(tokens[0]) != "kill" {
 		return false
 	}
-	args := tokens[1 : len(tokens)-1]
-	// `--` ends kill's options, not its argument list. Ignoring it would make a
-	// fatal self-signal look malformed and credit commands the shell never ran.
-	if len(args) > 0 && args[len(args)-1] == "--" {
-		args = args[:len(args)-1]
-	}
-	signal := ""
-	switch len(args) {
-	case 1:
-		signal = strings.TrimPrefix(args[0], "-")
-	case 2:
-		if args[0] != "-s" {
-			return false
+	return killSelfSIGKILL(tokens[1:])
+}
+
+func killSelfSIGKILL(tokens []string) bool {
+	args := make([]string, 0, len(tokens))
+	for i := 0; i < len(tokens); i++ {
+		if isRedirection(tokens[i]) {
+			i++
+			continue
 		}
-		signal = args[1]
-	default:
-		return false
+		args = append(args, tokens[i])
 	}
-	return signal == "9" || signal == "KILL" || signal == "SIGKILL"
+	// Redirections never reach kill as arguments. Treating their targets as
+	// PIDs would either invent a self-kill or miss the one that really ran.
+	tokens = args
+	signal, pids, options := "", []string{}, true
+	for i := 0; i < len(tokens); i++ {
+		if !options {
+			pids = append(pids, tokens[i])
+			continue
+		}
+		switch tokens[i] {
+		case "--":
+			options = false
+		case "-s", "-n", "--signal":
+			if i+1 == len(tokens) {
+				return false
+			}
+			i++
+			signal = tokens[i]
+		case "-l", "-L":
+			return false
+		default:
+			if strings.HasPrefix(tokens[i], "--signal=") {
+				signal = strings.TrimPrefix(tokens[i], "--signal=")
+			} else if strings.HasPrefix(tokens[i], "-") {
+				signal = strings.TrimPrefix(tokens[i], "-")
+			} else {
+				options = false
+				pids = append(pids, tokens[i])
+			}
+		}
+	}
+	signal = strings.ToUpper(signal)
+	return (signal == "9" || signal == "KILL" || signal == "SIGKILL") &&
+		slices.ContainsFunc(pids, isShellSelfPid)
 }
 
 func knownShellOutcome(tokens []string) shellOutcome {
@@ -750,6 +783,26 @@ func knownShellOutcome(tokens []string) shellOutcome {
 	default:
 		return shellOutcomeUnknown
 	}
+}
+
+// shellReturnTerminates keeps the wrapper identity that unwrapShell removes:
+// Bash reports an invalid top-level return and continues, while zsh stops its
+// command list. Assuming zsh's behavior for an unknown wrapper would hide
+// later work that the command text still proves ran.
+func shellReturnTerminates(command string) bool {
+	tokens := execLeadingTokens(tokensForSegment(command))
+	if len(tokens) < 3 || path.Base(tokens[0]) != "zsh" {
+		return false
+	}
+	for _, token := range tokens[1 : len(tokens)-1] {
+		if token == "--" {
+			return false
+		}
+		if token == "-c" || strings.HasPrefix(token, "-") && strings.Contains(token[1:], "c") {
+			return true
+		}
+	}
+	return false
 }
 
 // chainSegmentTexts is the raw text of every untransformed segment in chain.
@@ -846,10 +899,13 @@ var segmentClassifiers = []func(commandSegment) *commandFacts{
 // command too. Returns nil when nothing was credited.
 func classifyCommand(command, outputText string, exitOK bool, ws *workspace) *commandFacts {
 	rawCommand := unwrapShell(command)
-	chain := splitCommandChain(rawCommand)
+	chain := splitCommandChainForShell(rawCommand, shellReturnTerminates(command))
 	output := trustedOutput(chainSegmentTexts(chain), outputText)
 	facts := &commandFacts{}
-	cwd, cwdKnown := canonicalWorkspacePath(ws.root), ws.root != ""
+	cwd, cwdKnown := "", ws.root != ""
+	if fsOperandAbsolute(ws.root) {
+		cwd = canonicalWorkspacePath(ws.root)
+	}
 	gitWorkTree, gitWorkTreeKnown := "", false
 	for _, c := range chain {
 		segmentFacts := &commandFacts{}

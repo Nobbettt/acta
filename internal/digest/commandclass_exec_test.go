@@ -1150,6 +1150,77 @@ func TestClassifyExecArchiveAndPermission(t *testing.T) {
 	})
 }
 
+func TestClassifyCommandChmodChangeEvidence(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		want    []string
+		targets []CommandTarget
+	}{
+		{
+			name:    "redirected changes output cannot prove no change",
+			command: "chmod -c 0600 file.txt >changes.log",
+			want:    []string{"permission.changed"},
+			targets: []CommandTarget{{Kind: "path", Value: "file.txt"}},
+		},
+		{
+			name:    "discarded changes output cannot prove no change",
+			command: "chmod -c 0600 file.txt >/dev/null",
+			want:    []string{"permission.changed"},
+			targets: []CommandTarget{{Kind: "path", Value: "file.txt"}},
+		},
+		{
+			name:    "redirection after a command substitution cannot prove no change",
+			command: `chmod -c 0600 "$(printf skipped.txt)" file.txt >changes.log`,
+			want:    []string{"permission.changed"},
+			targets: []CommandTarget{{Kind: "path", Value: "file.txt"}},
+		},
+		{
+			name:    "readable empty changes output proves no change",
+			command: "chmod -c 0600 file.txt",
+		},
+		{
+			name:    "stderr redirection leaves readable changes output",
+			command: "chmod -c 0600 file.txt 2>errors.log",
+		},
+		{
+			name:    "quoted greater-than operand leaves readable changes output",
+			command: "chmod -c 0600 file.txt '>' changes.log",
+		},
+		{
+			name:    "self reference cannot change permissions",
+			command: "chmod --reference=victim.txt victim.txt",
+		},
+		{
+			name:    "separate self reference cannot change permissions",
+			command: "chmod --reference victim.txt victim.txt",
+		},
+		{
+			name:    "reference to another path can change permissions",
+			command: "chmod --reference=victim.txt recipient.txt",
+			want:    []string{"permission.changed"},
+			targets: []CommandTarget{{Kind: "path", Value: "recipient.txt"}},
+		},
+		{
+			name:    "self reference does not hide other recipients",
+			command: "chmod --reference=victim.txt victim.txt recipient.txt",
+			want:    []string{"permission.changed"},
+			targets: []CommandTarget{{Kind: "path", Value: "recipient.txt"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			facts := classifyCommand(tt.command, "", true, testWorkspace())
+			if facts == nil {
+				facts = &commandFacts{}
+			}
+			if !reflect.DeepEqual(facts.categories, tt.want) || !reflect.DeepEqual(facts.targets, tt.targets) {
+				t.Fatalf("classifyCommand(%q) = %+v, want categories %v and targets %+v", tt.command, facts, tt.want, tt.targets)
+			}
+		})
+	}
+}
+
 func TestClassifyCommandPreservesPathOperandWhitespace(t *testing.T) {
 	tests := []struct {
 		name    string

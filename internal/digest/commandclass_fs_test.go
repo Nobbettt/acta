@@ -55,6 +55,14 @@ func TestClassifyFSNoTargetDirectoryDoesNotInventNestedDestination(t *testing.T)
 			targets:    fsPathTargets("old", "new/old"),
 			mutations:  []ShellMutation{{Kind: "move", From: "old", To: "new/old"}},
 		}},
+		{"no-target-directory copies directory contents into the named destination", "cp -RT old new/", &commandFacts{
+			categories: []string{"fs.create"},
+			targets:    fsPathTargets("new"),
+		}},
+		{"a trailing slash without no-target-directory keeps the copied directory", "cp -R old new/", &commandFacts{
+			categories: []string{"fs.create"},
+			targets:    fsPathTargets("new/old"),
+		}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -72,7 +80,22 @@ func TestClassifyFSEmptyPatchInputDoesNotApply(t *testing.T) {
 		want    *commandFacts
 	}{
 		{"an empty input applies nothing", "patch < /dev/null", nil},
+		{"an attached empty input applies nothing", "patch </dev/null", nil},
 		{"a named input still applies a patch", "patch < fix.diff", &commandFacts{
+			categories: []string{"fs.patch"},
+		}},
+		{"patch native input can be empty", "patch -i /dev/null", nil},
+		{"patch long native input can be empty", "patch --input=/dev/null", nil},
+		{"patch native input overrides an empty stdin redirection", "patch -i fix.diff < /dev/null", &commandFacts{
+			categories: []string{"fs.patch"},
+		}},
+		{"patch native input after an empty stdin redirection still applies", "patch < /dev/null -i fix.diff", &commandFacts{
+			categories: []string{"fs.patch"},
+		}},
+		{"git apply can accept an empty patch file", "git apply --allow-empty /dev/null", nil},
+		{"git apply recognizes an empty redirected stdin after an option terminator", "git apply --allow-empty -- < /dev/null", nil},
+		{"git apply recognizes an empty redirected stdin before its option", "git apply < /dev/null --allow-empty", nil},
+		{"git apply patch file overrides an empty stdin redirection", "git apply --allow-empty fix.diff < /dev/null", &commandFacts{
 			categories: []string{"fs.patch"},
 		}},
 	}

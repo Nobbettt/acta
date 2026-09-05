@@ -53,10 +53,10 @@ func classifyFS(segment commandSegment) *commandFacts {
 		if scan.hasFlag(fsInspectFlags...) || verb == "patch" && scan.hasFlag("-C", "-v") {
 			return nil
 		}
-		if verb == "patch" && fsRedirectsInputFromDevNull(args) {
+		if verb == "patch" && fsPatchInputIsDevNull(args) {
 			return nil
 		}
-		if verb == "git apply" && len(args) == 3 && args[0] == "--allow-empty" && args[1] == "<" && args[2] == "/dev/null" {
+		if verb == "git apply" && fsGitApplyInputIsEmpty(args) {
 			return nil
 		}
 	}
@@ -366,16 +366,64 @@ func fsOwnArgs(args []string) []string {
 	return args
 }
 
-// fsRedirectsInputFromDevNull reports the shell spelling that proves patch
-// received no diff. BSD patch accepts that empty input and exits successfully
-// without changing a file, so fs.patch would credit an act that did not occur.
-func fsRedirectsInputFromDevNull(args []string) bool {
-	for i := 0; i+1 < len(args); i++ {
-		if args[i] == "<" && args[i+1] == "/dev/null" {
-			return true
+// fsPatchArgs removes shell redirections while preserving options that follow
+// them. Cutting at a redirect would treat an overridden empty stdin as patch's
+// input and suppress a patch that its native -i/--input option really applies.
+func fsPatchArgs(args []string) ([]string, bool) {
+	words := make([]string, 0, len(args))
+	stdinDevNull := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "|" || arg == "|&" || arg == "&" {
+			break
+		}
+		if !isRedirection(arg) {
+			words = append(words, arg)
+			continue
+		}
+		op := strings.IndexAny(arg, "<>")
+		redirect, target := arg[op:], arg[op+1:]
+		if target == "" && i+1 < len(args) {
+			i++
+			target = args[i]
+		}
+		if (arg[:op] == "" || arg[:op] == "0") && strings.HasPrefix(redirect, "<") &&
+			!strings.HasPrefix(redirect, "<<") && target == "/dev/null" {
+			stdinDevNull = true
 		}
 	}
-	return false
+	return words, stdinDevNull
+}
+
+// fsPatchInputIsDevNull reports whether patch's effective input is empty.
+// Its native input option overrides stdin, so an empty redirect only matters
+// when no -i/--input value names the patch instead.
+func fsPatchInputIsDevNull(args []string) bool {
+	args, stdinDevNull := fsPatchArgs(args)
+	input, explicit := "", false
+	for _, flag := range scanCommandArgs(args, fsFlagModels["patch"]).flags {
+		if flag.name == "-i" || flag.name == "--input" {
+			input, explicit = flag.value, true
+		}
+	}
+	return explicit && input == "/dev/null" || !explicit && stdinDevNull
+}
+
+// fsGitApplyInputIsEmpty reports git apply's --allow-empty forms that prove
+// no patch was supplied. A named patch overrides stdin just as patch's -i
+// does, so any nonempty patch operand keeps the fs.patch classification.
+func fsGitApplyInputIsEmpty(args []string) bool {
+	args, stdinDevNull := fsPatchArgs(args)
+	scan := scanCommandArgs(args, nil)
+	if !scan.hasFlag("--allow-empty") {
+		return false
+	}
+	for _, operand := range scan.operands {
+		if operand != "/dev/null" {
+			return false
+		}
+	}
+	return len(scan.operands) != 0 || stdinDevNull
 }
 
 type commandFlag struct {
@@ -875,7 +923,8 @@ func fsCopy(args, operands []string, ws *workspace, cwdUncertain bool) *commandF
 		return nil
 	}
 	dest := operands[len(operands)-1]
-	if strings.HasSuffix(dest, "/") || fsDestinationNamesDirectory(dest) || fsIsWorkspaceRoot(dest, ws) {
+	if !scan.hasFlag("-T", "--no-target-directory") &&
+		(strings.HasSuffix(dest, "/") || fsDestinationNamesDirectory(dest) || fsIsWorkspaceRoot(dest, ws)) {
 		facts := &commandFacts{}
 		for _, src := range operands[:len(operands)-1] {
 			facts.merge(fsCopyIntoDir(src, dest, ws, cwdUncertain))

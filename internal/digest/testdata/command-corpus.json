@@ -4371,17 +4371,17 @@
     "want_targets": [
       {
         "kind": "path",
-        "value": "workspace/nested/victim.txt"
+        "value": "nested/victim.txt"
       }
     ],
     "want_mutations": [
       {
         "kind": "delete",
-        "path": "workspace/nested/victim.txt"
+        "path": "nested/victim.txt"
       }
     ],
     "source": "review-r31-parent-component",
-    "note": "A literal Git directory remains attributable with a relative recorded root."
+    "note": "A literal Git directory remains attributable relative to the recorded workspace root."
   },
   {
     "command": "brew install private-audit-formula.rb",
@@ -4571,5 +4571,110 @@
     "source": "review-r32-correctness",
     "output": "fixtures.test/case.go:1:TODO\n",
     "note": "An ordinary dotted directory: the output names the child that matched."
+  },
+  {
+    "command": "kill -9 -- $$ 999999; curl https://never.example",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r32-commandclass",
+    "failure": {
+      "want_categories": [],
+      "want_targets": [],
+      "want_mutations": []
+    },
+    "note": "Killing the shell among several PID operands prevents the later request."
+  },
+  {
+    "command": "/bin/zsh -lc 'kill -9 $$ >/dev/null; curl https://never.example'",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r32-commandclass",
+    "failure": {
+      "want_categories": [],
+      "want_targets": [],
+      "want_mutations": []
+    },
+    "note": "A redirection is not a PID operand, so it cannot make the later request run."
+  },
+  {
+    "command": "/bin/bash -lc 'kill -n 9 $$; curl https://never.example'",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r32-commandclass",
+    "failure": {
+      "want_categories": [],
+      "want_targets": [],
+      "want_mutations": []
+    },
+    "note": "The standard numeric signal option kills the shell before the request."
+  },
+  {
+    "command": "/bin/bash -lc 'return 0; curl https://example.com'",
+    "want_categories": [
+      "network.egress"
+    ],
+    "want_targets": [
+      {
+        "kind": "url",
+        "value": "https://example.com"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r32-commandclass",
+    "note": "Bash reports a top-level return error but continues to the later request."
+  },
+  {
+    "command": "/bin/zsh -lc 'return 0; curl https://never.example'",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r32-commandclass",
+    "note": "Zsh ends its top-level command list at return, unlike Bash."
+  },
+  {
+    "command": "kill -n 9 999999; curl https://example.com",
+    "want_categories": [
+      "network.egress"
+    ],
+    "want_targets": [
+      {
+        "kind": "url",
+        "value": "https://example.com"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r32-commandclass",
+    "note": "A non-self PID leaves the shell running after the same signal option."
+  },
+  {
+    "command": "kill -9 999999 > $$; curl https://example.com",
+    "want_categories": [
+      "network.egress"
+    ],
+    "want_targets": [
+      {
+        "kind": "url",
+        "value": "https://example.com"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r32-commandclass",
+    "note": "A redirection target is not a kill PID and cannot end the shell."
+  },
+  {
+    "command": "kill -s kill $$; curl https://never.example",
+    "want_categories": [],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r32-commandclass",
+    "failure": {
+      "want_categories": [],
+      "want_targets": [],
+      "want_mutations": []
+    },
+    "note": "Lowercase signal names still name SIGKILL and stop the later request."
   }
 ]
