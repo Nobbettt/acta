@@ -790,22 +790,25 @@ func TestClassifyCommandCreditsNothingAfterLogout(t *testing.T) {
 }
 
 func TestClassifyCommandTaintsEveryRelativePathOnAnyPossibleCwdChange(t *testing.T) {
-	commands := []string{
-		"command -p cd /tmp && rm victim.txt",
-		"time cd ../other && rm victim.txt",
-		"nice cd ../other && rm victim.txt",
-		"stdbuf -oL cd ../other && rm victim.txt",
-		"echo cd && rm victim.txt",
-		"rm old.go && cd frontend",
+	cases := []struct {
+		command string
+		want    []string
+	}{
+		{"command -p cd /tmp && rm victim.txt", []string{"workspace.escape"}},
+		{"time cd ../other && rm victim.txt", []string{"fs.delete"}},
+		{"nice cd ../other && rm victim.txt", []string{"fs.delete"}},
+		{"stdbuf -oL cd ../other && rm victim.txt", []string{"fs.delete"}},
+		{"echo cd && rm victim.txt", []string{"fs.delete"}},
+		{"rm old.go && cd frontend", []string{"fs.delete"}},
 	}
-	for _, command := range commands {
-		facts := classifyCommand(command, "", true, testWorkspace())
-		if facts == nil || !reflect.DeepEqual(facts.categories, []string{"fs.delete"}) {
-			t.Errorf("classifyCommand(%q) = %+v, want category-only fs.delete", command, facts)
+	for _, c := range cases {
+		facts := classifyCommand(c.command, "", true, testWorkspace())
+		if facts == nil || !reflect.DeepEqual(facts.categories, c.want) {
+			t.Errorf("classifyCommand(%q) = %+v, want categories %v only", c.command, facts, c.want)
 			continue
 		}
 		if len(facts.targets) != 0 || len(facts.mutations) != 0 {
-			t.Errorf("classifyCommand(%q) published tainted paths: %+v", command, facts)
+			t.Errorf("classifyCommand(%q) published tainted paths: %+v", c.command, facts)
 		}
 	}
 }

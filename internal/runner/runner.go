@@ -98,12 +98,14 @@ type Options struct {
 	// MaxRawOutputBytes bounds stdout+stderr combined. Zero explicitly keeps
 	// full fidelity without a byte limit. Crossing a positive limit terminates
 	// the process tree and fails the run; it never silently truncates success.
-	MaxRawOutputBytes       int64
-	MaxWorkspaceDiffBytes   int64
-	MaxUploadBytes          int64
-	MaxRedactionLineBytes   int
-	Stream                  bool
-	AgentWritableDirs       []string
+	MaxRawOutputBytes     int64
+	MaxWorkspaceDiffBytes int64
+	MaxUploadBytes        int64
+	MaxRedactionLineBytes int
+	Stream                bool
+	AgentWritableDirs     []string
+	// ControlPlaneDir is the caller-declared control directory classified by the digest.
+	ControlPlaneDir         string
 	CodexSandbox            string
 	ClaudePermissionMode    string
 	OTLPEndpoint            string
@@ -309,7 +311,7 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 	digester, err := digest.NewStreamDigesterWithOptions(adapter.Name(), cwd, digest.Options{
 		EvidenceExclusions: gitExcludes,
 		WorkspaceIsRepo:    gitInfo.IsRepo,
-		ControlPlaneDir:    agentControlPlaneDir(cwd, writableDirs),
+		ControlPlaneDir:    opts.ControlPlaneDir,
 	})
 	if err != nil {
 		return nil, err
@@ -1068,29 +1070,6 @@ func validateAgentWritableDirs(values []string, runDir string) ([]string, error)
 		result = append(result, resolved)
 	}
 	return result, nil
-}
-
-func agentControlPlaneDir(cwd string, writableDirs []string) string {
-	resolvedCWD, err := filepath.EvalSymlinks(cwd)
-	if err != nil {
-		return ""
-	}
-	control := ""
-	for _, writable := range writableDirs {
-		resolved, err := filepath.EvalSymlinks(writable)
-		if err != nil {
-			return ""
-		}
-		rel, err := filepath.Rel(resolvedCWD, resolved)
-		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			continue
-		}
-		if control != "" {
-			return "" // multiple in-workspace directories do not prove which one is control-plane
-		}
-		control = filepath.ToSlash(rel)
-	}
-	return control
 }
 
 func pathsOverlap(left string, right string) (bool, error) {

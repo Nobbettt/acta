@@ -126,6 +126,12 @@ func isPortableAbsolute(value string) bool {
 // false when p is absolute but outside the workspace (p returned unchanged).
 func (w *workspace) rel(p string) (string, bool) {
 	canonical := canonicalWorkspacePath(p)
+	if rel, inside, checked := w.resolvedRel(canonical); checked {
+		if inside {
+			return rel, true
+		}
+		return p, false
+	}
 	if !filepath.IsAbs(p) && !isPortableAbsolute(canonical) {
 		return path.Clean(canonical), true
 	}
@@ -143,28 +149,52 @@ func (w *workspace) rel(p string) (string, bool) {
 			return clean[len(prefix):], true
 		}
 	}
-	// A provider may spell an absolute path through an alias that the recorded
-	// workspace path cannot reveal. Prove the alias from the candidate itself;
-	// ambient process state must never change a re-digest.
-	rootInfo, err := os.Stat(w.root)
-	if err != nil || !rootInfo.IsDir() {
-		return p, false
-	}
-	native := filepath.Clean(filepath.FromSlash(clean))
-	for ancestor := native; ; ancestor = filepath.Dir(ancestor) {
-		if info, statErr := os.Stat(ancestor); statErr == nil && info.IsDir() && os.SameFile(rootInfo, info) {
-			rel, relErr := filepath.Rel(ancestor, native)
-			if relErr == nil {
-				return canonicalWorkspacePath(rel), true
-			}
-			return p, false
-		}
-		parent := filepath.Dir(ancestor)
-		if parent == ancestor {
-			break
-		}
-	}
 	return p, false
+}
+
+func (w *workspace) resolvedRel(p string) (string, bool, bool) {
+	root, err := filepath.EvalSymlinks(w.root)
+	if err != nil {
+		return "", false, false
+	}
+	candidate := filepath.Clean(filepath.FromSlash(p))
+	if isPortableAbsolute(p) && !filepath.IsAbs(candidate) {
+		return "", false, false
+	}
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(w.root, candidate)
+	}
+	resolved, err := resolveExistingPathPrefix(candidate)
+	if err != nil {
+		return "", false, true
+	}
+	rel, err := filepath.Rel(root, resolved)
+	if err != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false, true
+	}
+	return canonicalWorkspacePath(rel), true, true
+}
+
+func resolveExistingPathPrefix(candidate string) (string, error) {
+	var suffix []string
+	for {
+		resolved, err := filepath.EvalSymlinks(candidate)
+		if err == nil {
+			for i := len(suffix) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, suffix[i])
+			}
+			return filepath.Clean(resolved), nil
+		}
+		if _, statErr := os.Lstat(candidate); statErr == nil || !os.IsNotExist(statErr) {
+			return "", err
+		}
+		parent := filepath.Dir(candidate)
+		if parent == candidate {
+			return "", err
+		}
+		suffix = append(suffix, filepath.Base(candidate))
+		candidate = parent
+	}
 }
 
 // normalizeWorkspacePath admits only paths inside the recorded workspace. It
@@ -489,6 +519,9 @@ func readSegmentStep(segment, outputText string, ws *workspace) *step {
 	if len(tokens) == 0 {
 		return untokenizedReadStep(segment, outputText, ws)
 	}
+	if readSegmentIsInformational(tokens) {
+		return nil
+	}
 	if s := sedReadStep(tokens, ws); s != nil {
 		return s
 	}
@@ -496,6 +529,24 @@ func readSegmentStep(segment, outputText string, ws *workspace) *step {
 		return s
 	}
 	return catLikeReadStep(tokens, outputText, ws)
+}
+
+func readSegmentIsInformational(tokens []string) bool {
+	for len(tokens) > 0 {
+		end := firstPipeIndexAfter(tokens, 0)
+		stage := execLeadingTokens(tokens[:end])
+		if len(stage) > 0 {
+			word := path.Base(stage[0])
+			if slices.Contains(readLikeWords, word) && execCommandAssertsNoChange(execCommand{word: word, args: fsOwnArgs(stage[1:])}) {
+				return true
+			}
+		}
+		if end == len(tokens) {
+			break
+		}
+		tokens = tokens[end+1:]
+	}
+	return false
 }
 
 // untokenizedReadStep handles a segment the tokenizer couldn't parse.

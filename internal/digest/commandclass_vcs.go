@@ -5,6 +5,7 @@ import (
 	"path"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -430,41 +431,51 @@ func gitProvenance(facts *commandFacts, verb string, args []string, output strin
 // gitRemoteURLs reads the `name<tab>url (fetch)` lines `git remote -v` prints.
 // The trailing `(fetch)`/`(push)` marker is required: it is what proves the
 // line came from that command and not from something else in the output.
-// Every producer of a url target shares the same sanitizing pair —
-// stripURLCredentials then execStripURLQuery, as execFirstURL and execPackage
-// in commandclass_exec.go both apply to an argument — so a query string or
-// fragment is cut here too. This one is the higher-risk of the three: its
-// input is command OUTPUT rather than the agent's own argv, so a
-// credential-bearing query string (`?private_token=...`) reaches this
-// classifier via whatever the remote happened to be configured with.
 // gitRemoteOrigin reduces a remote URL to scheme://host, or to the bare host
 // for the scp-like `git@host:path` spelling git also prints. Anything it cannot
 // reduce to a host is dropped: a target it cannot prove is safe is not worth
 // publishing.
 func gitRemoteOrigin(raw string) string {
-	sanitized := stripURLCredentials(raw)
-	if sanitized == "" {
-		return ""
-	}
-	if u, err := neturl.Parse(sanitized); err == nil && u.Scheme != "" && u.Host != "" {
+	if strings.Contains(raw, "://") {
+		u, err := neturl.Parse(raw)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return ""
+		}
 		scheme := strings.ToLower(u.Scheme)
 		switch scheme {
 		case "http", "https", "ssh", "git", "rsync", "git+http", "git+https", "git+ssh", "git+git":
-			return scheme + "://" + u.Host
 		default:
 			return ""
 		}
+		host := u.Hostname()
+		if !validCommandHost(host) {
+			return ""
+		}
+		port := u.Port()
+		if port != "" {
+			value, err := strconv.ParseUint(port, 10, 16)
+			if err != nil || value == 0 {
+				return ""
+			}
+		}
+		if strings.Contains(host, ":") {
+			host = "[" + host + "]"
+		}
+		if port == "" && u.Host != host {
+			return ""
+		}
+		return scheme + "://" + host
 	}
 	// scp-like: [user@]host:path. Only this exact shape is accepted — a
 	// `user@host` prefix followed by a colon before the path — because the
-	// sanitizer already refuses anything more ambiguous. The host must look
+	// parser refuses anything more ambiguous. The host must look
 	// like a host (a dotted name or a bracketed address); otherwise this is
 	// some opaque spelling and no target is published at all.
-	at := strings.LastIndex(sanitized, "@")
+	at := strings.LastIndex(raw, "@")
 	if at < 0 {
 		return ""
 	}
-	rest := sanitized[at+1:]
+	rest := raw[at+1:]
 	colon := strings.Index(rest, ":")
 	if colon <= 0 {
 		return ""
@@ -492,77 +503,6 @@ func gitRemoteURLs(output string) []string {
 		}
 	}
 	return urls
-}
-
-// stripURLCredentials drops any userinfo (`user:token@`) from a URL before it
-// is published as a CommandTarget. A target is provenance about where a
-// command reached, not a place to publish whatever credential happened to be
-// embedded in the argument. The scp-like `git@host:path` shape git prints has
-// no "://" for net/url to find a scheme in, so it parses with no userinfo and
-// passes through unchanged — which is correct, since that leading name is a
-// fixed transport user, not a secret. Shared with commandclass_exec.go, which
-// has the same class of URL argument to sanitize.
-//
-// net/url.Parse rejects a userinfo containing characters like `|`, `^`, or an
-// invalid `%` escape — exactly the shape a raw secret is likely to have. On
-// that error this falls back to a textual scan rather than publishing raw
-// unchanged, so a credential a strict parser objects to does not leak for
-// that reason alone.
-func stripURLCredentials(raw string) string {
-	u, err := neturl.Parse(raw)
-	if err != nil {
-		return stripURLCredentialsTextual(raw)
-	}
-	if u.User == nil {
-		return stripURLCredentialsTextual(raw)
-	}
-	u.User = nil
-	if u.Host == "" {
-		return ""
-	}
-	return u.String()
-}
-
-// stripURLCredentialsTextual removes userinfo from a standard authority or an
-// opaque `user:password@host/path` spelling. The scp-like `git@host:path` form
-// remains: its colon follows the @ and therefore proves there is no password.
-func stripURLCredentialsTextual(raw string) string {
-	schemeEnd := strings.Index(raw, "://")
-	if schemeEnd >= 0 {
-		authorityStart := schemeEnd + len("://")
-		rest := raw[authorityStart:]
-		end := len(rest)
-		if i := strings.IndexAny(rest, "/?#"); i >= 0 {
-			end = i
-		}
-		authority := rest[:end]
-		at := strings.LastIndexByte(authority, '@')
-		if at < 0 {
-			return raw
-		}
-		authority = authority[at+1:]
-		if authority == "" || strings.HasPrefix(authority, ":") {
-			return ""
-		}
-		return raw[:authorityStart] + authority + rest[end:]
-	}
-	end := len(raw)
-	if i := strings.IndexAny(raw, "/?#"); i >= 0 {
-		end = i
-	}
-	prefix := raw[:end]
-	at := strings.LastIndexByte(prefix, '@')
-	colon := strings.IndexByte(prefix, ':')
-	if at < 0 || at == 0 || colon > at {
-		return raw
-	}
-	if colon < 0 {
-		return ""
-	}
-	if at+1 == end {
-		return ""
-	}
-	return raw[at+1:]
 }
 
 // gitFirstArg is the first non-flag token after the verb, i.e. the sub-verb of

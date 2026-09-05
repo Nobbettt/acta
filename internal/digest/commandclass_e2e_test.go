@@ -131,3 +131,47 @@ func TestCodexHeredocBodyDoesNotBecomeAReadEvent(t *testing.T) {
 		}
 	}
 }
+
+func TestCodexInformationalReadDoesNotBecomeAReadEvent(t *testing.T) {
+	started := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	digester, err := digest.NewStreamDigesterWithOptions("codex", t.TempDir(), digest.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := json.Marshal(map[string]any{
+		"type": "item.completed",
+		"item": map[string]any{
+			"id": "c1", "type": "command_execution", "command": "cat --help .env.production",
+			"status": "completed", "exit_code": 0, "aggregated_output": "Usage: cat [OPTION]... [FILE]...\n",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range [][]byte{
+		[]byte(`{"type":"thread.started","thread_id":"thread-help"}`),
+		[]byte(`{"type":"turn.started"}`), item,
+		[]byte(`{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`),
+	} {
+		digester.Line(line, started)
+	}
+	record := &runrecord.Record{
+		Producer: runrecord.Producer{Name: "acta", Version: "test"},
+		ID:       "run-help", Agent: "codex", StartedAt: started, CompletedAt: started, OK: true,
+	}
+	d := digester.Finalize(record, "")
+	for _, event := range d.Timeline {
+		if event.Kind == digest.KindCommand && (len(event.Files) != 0 || len(event.Categories) != 0) {
+			t.Errorf("informational command credited files/categories: files=%v categories=%v", event.Files, event.Categories)
+		}
+	}
+	events, err := actaevents.Build(record, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Type == actaevents.TypeFileRead {
+			t.Errorf("unexpected file.read event: %+v", event)
+		}
+	}
+}

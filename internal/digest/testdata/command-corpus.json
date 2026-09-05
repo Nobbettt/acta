@@ -3971,5 +3971,44 @@
   ],
   "want_mutations": [],
   "source": "package-name-regression"
+ },
+ {
+  "command": "git remote -v",
+  "want_categories": [
+   "vcs.provenance"
+  ],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r28-output-sanitizer",
+  "output": "origin\thttps://example.com:123456/private.git (fetch)\norigin\thttps://example.com:123456/private.git (push)\n"
+ },
+ {
+  "command": "cat --help .env.production",
+  "want_categories": [],
+  "want_targets": [],
+  "want_mutations": [],
+ "source": "review-r28-informational-read",
+ "output": "Usage: cat [OPTION]... [FILE]...\n"
+ },
+ {
+  "command": "builtin cd /tmp && chmod 600 victim.txt",
+  "want_categories": [
+   "workspace.escape"
+  ],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r28-wrapped-cd"
+ },
+ {
+  "command": "/bin/zsh -lc 'kill -9 $$; curl https://example.com'",
+  "want_categories": [],
+  "want_targets": [],
+  "want_mutations": [],
+  "source": "review-r28-self-kill",
+  "failure": {
+   "want_categories": [],
+   "want_targets": [],
+   "want_mutations": []
+  }
  }
 ]

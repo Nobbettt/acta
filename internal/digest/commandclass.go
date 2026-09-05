@@ -645,8 +645,8 @@ const (
 // removes certainly skipped terms and marks uncertain ones unexecuted. A known
 // outcome survives skipped branches, so `true || false || git status` does not
 // revive status by comparing it only with the adjacent skipped false. An
-// executed exit or exec terminates the list; an uncertain one makes every later
-// term uncertain too.
+// executed exit, exec or self-SIGKILL terminates the list; an uncertain one
+// makes every later term uncertain too.
 func pruneUnexecuted(raw []commandChainRaw) []commandChainRaw {
 	out := make([]commandChainRaw, 0, len(raw))
 	outcome := shellOutcomeUnknown
@@ -676,15 +676,31 @@ func pruneUnexecuted(raw []commandChainRaw) []commandChainRaw {
 		loadsParentShell := containsShellControlCommand(tokens, "eval", "source", ".")
 		if !certain {
 			mayHaveTerminated = mayHaveTerminated || loadsParentShell ||
-				containsShellControlCommand(tokens, "exit", "exec")
+				terminatesShellList(tokens)
 			outcome = shellOutcomeUnknown
 			continue
 		}
 		outcome = knownShellOutcome(tokens)
-		terminated = containsShellControlCommand(tokens, "exit", "exec")
+		terminated = terminatesShellList(tokens)
 		mayHaveTerminated = mayHaveTerminated || loadsParentShell
 	}
 	return out
+}
+
+func terminatesShellList(tokens []string) bool {
+	if containsShellControlCommand(tokens, "exit", "exec") {
+		return true
+	}
+	tokens = execLeadingTokens(tokens)
+	for len(tokens) > 0 && (tokens[0] == "command" || tokens[0] == "builtin") {
+		prefix := tokens[0]
+		tokens = tokens[1:]
+		for len(tokens) > 0 && (tokens[0] == "--" || prefix == "command" && tokens[0] == "-p") {
+			tokens = tokens[1:]
+		}
+	}
+	return len(tokens) == 3 && path.Base(tokens[0]) == "kill" &&
+		(tokens[1] == "-9" || tokens[1] == "-KILL") && tokens[2] == "$$"
 }
 
 func knownShellOutcome(tokens []string) shellOutcome {
@@ -881,6 +897,13 @@ func directoryInsideWorkspace(dir string, ws *workspace) bool {
 func nextLiteralWorkingDirectory(tokens []string, statusProven bool, cwd string, known bool) (string, bool) {
 	for len(tokens) > 0 && execIsAssignment(tokens[0]) {
 		tokens = tokens[1:]
+	}
+	for len(tokens) > 0 && (tokens[0] == "command" || tokens[0] == "builtin") {
+		prefix := tokens[0]
+		tokens = tokens[1:]
+		for len(tokens) > 0 && (tokens[0] == "--" || prefix == "command" && tokens[0] == "-p") {
+			tokens = tokens[1:]
+		}
 	}
 	if len(tokens) == 0 {
 		return cwd, known

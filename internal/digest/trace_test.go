@@ -1,6 +1,8 @@
 package digest
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -359,6 +361,35 @@ func TestWorkspaceRelPortableWindowsPath(t *testing.T) {
 	}
 	if rel, ok := ws.rel(`C:\elsewhere\file.py`); ok || rel != `C:\elsewhere\file.py` {
 		t.Fatalf("outside-workspace path = %q,%v", rel, ok)
+	}
+}
+
+func TestWorkspaceRelRejectsAliasSuffixSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	workspaceDir := filepath.Join(root, "repo")
+	outsideDir := filepath.Join(root, "outside")
+	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "repo-alias")
+	if err := os.Symlink(workspaceDir, alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideDir, filepath.Join(workspaceDir, "out")); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(outsideDir, "secret")
+	if err := os.WriteFile(secret, []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	facts := classifyCommand("rm "+filepath.Join(alias, "out", "secret"), "", true, newWorkspace(workspaceDir))
+	if facts == nil || !reflect.DeepEqual(facts.categories, []string{"workspace.escape"}) ||
+		len(facts.targets) != 0 || len(facts.mutations) != 0 {
+		t.Fatalf("alias suffix escape = %+v, want workspace.escape only", facts)
 	}
 }
 

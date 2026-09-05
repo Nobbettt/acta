@@ -324,19 +324,16 @@ func TestClassifyVCSProvenanceTargets(t *testing.T) {
 		},
 		{"read verb invents no target", "git log --oneline", sha + " subject\n", nil},
 		{
-			// net/url.Parse rejects a "|" in userinfo, so this must not fall back
-			// to publishing raw with the credential still attached.
-			"credential with url-illegal char is stripped",
+			"credential with url-illegal char is dropped closed",
 			"git remote -v",
 			"origin\thttps://u:p|ss@example.test/o/r.git (fetch)\n",
-			[]CommandTarget{{Kind: "url", Value: "https://example.test"}},
+			nil,
 		},
 		{
-			// net/url.Parse rejects an invalid "%" escape the same way.
-			"credential with invalid percent escape is stripped",
+			"credential with invalid percent escape is dropped closed",
 			"git remote -v",
 			"origin\thttps://u:p%ZZss@example.test/o/r.git (fetch)\n",
-			[]CommandTarget{{Kind: "url", Value: "https://example.test"}},
+			nil,
 		},
 		{
 			// Regression: gitRemoteURLs only stripped userinfo, unlike execFirstURL
