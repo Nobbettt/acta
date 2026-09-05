@@ -16,44 +16,47 @@ import (
 // output. Exported so the live tracing tee can decode lines with the same
 // shapes.
 type ClaudeItem struct {
-	Type              string                   `json:"type"`
-	Subtype           string                   `json:"subtype,omitempty"`
-	Model             string                   `json:"model,omitempty"`
-	SessionID         string                   `json:"session_id,omitempty"`
-	Message           *ClaudeMessage           `json:"message,omitempty"`
-	ToolUseResult     json.RawMessage          `json:"tool_use_result,omitempty"`
-	Usage             *ClaudeUsage             `json:"usage,omitempty"`
-	NumTurns          int                      `json:"num_turns,omitempty"`
-	TotalCostUSD      float64                  `json:"total_cost_usd,omitempty"`
-	Result            string                   `json:"result,omitempty"`
-	IsError           bool                     `json:"is_error,omitempty"`
-	StopReason        string                   `json:"stop_reason,omitempty"`
-	DurationMillis    int64                    `json:"duration_ms,omitempty"`
-	DurationAPIMillis int64                    `json:"duration_api_ms,omitempty"`
-	ParentToolUseID   string                   `json:"parent_tool_use_id,omitempty"`
-	UUID              string                   `json:"uuid,omitempty"`
-	StructuredOutput  json.RawMessage          `json:"structured_output,omitempty"`
-	ModelUsage        json.RawMessage          `json:"modelUsage,omitempty"`
-	PermissionDenials []ClaudePermissionDenial `json:"permission_denials,omitempty"`
-	TaskID            string                   `json:"task_id,omitempty"`
-	ToolUseID         string                   `json:"tool_use_id,omitempty"`
-	Description       string                   `json:"description,omitempty"`
-	TaskType          string                   `json:"task_type,omitempty"`
-	Prompt            string                   `json:"prompt,omitempty"`
-	Status            string                   `json:"status,omitempty"`
-	Summary           string                   `json:"summary,omitempty"`
-	OutputFile        string                   `json:"output_file,omitempty"`
-	LastToolName      string                   `json:"last_tool_name,omitempty"`
-	RateLimitInfo     json.RawMessage          `json:"rate_limit_info,omitempty"`
-	Tools             []string                 `json:"tools,omitempty"`
-	MCPServers        json.RawMessage          `json:"mcp_servers,omitempty"`
-	PermissionMode    string                   `json:"permissionMode,omitempty"`
-	ClaudeCodeVersion string                   `json:"claude_code_version,omitempty"`
-	Agents            []string                 `json:"agents,omitempty"`
-	Skills            []string                 `json:"skills,omitempty"`
-	SlashCommands     []string                 `json:"slash_commands,omitempty"`
-	Plugins           json.RawMessage          `json:"plugins,omitempty"`
-	Raw               json.RawMessage          `json:"-"`
+	Type               string                   `json:"type"`
+	Subtype            string                   `json:"subtype,omitempty"`
+	Model              string                   `json:"model,omitempty"`
+	SessionID          string                   `json:"session_id,omitempty"`
+	Message            *ClaudeMessage           `json:"-"`
+	RawMessage         json.RawMessage          `json:"message,omitempty"`
+	ToolUseResult      json.RawMessage          `json:"tool_use_result,omitempty"`
+	Usage              *ClaudeUsage             `json:"usage,omitempty"`
+	NumTurns           int                      `json:"num_turns,omitempty"`
+	TotalCostUSD       float64                  `json:"total_cost_usd,omitempty"`
+	Result             string                   `json:"result,omitempty"`
+	IsError            bool                     `json:"is_error,omitempty"`
+	StopReason         string                   `json:"stop_reason,omitempty"`
+	DurationMillis     int64                    `json:"duration_ms,omitempty"`
+	DurationAPIMillis  int64                    `json:"duration_api_ms,omitempty"`
+	ParentToolUseID    string                   `json:"parent_tool_use_id,omitempty"`
+	UUID               string                   `json:"uuid,omitempty"`
+	StructuredOutput   json.RawMessage          `json:"structured_output,omitempty"`
+	ModelUsage         json.RawMessage          `json:"modelUsage,omitempty"`
+	PermissionDenials  []ClaudePermissionDenial `json:"permission_denials,omitempty"`
+	TaskID             string                   `json:"task_id,omitempty"`
+	ToolUseID          string                   `json:"tool_use_id,omitempty"`
+	Description        string                   `json:"description,omitempty"`
+	TaskType           string                   `json:"task_type,omitempty"`
+	Prompt             string                   `json:"prompt,omitempty"`
+	Status             string                   `json:"status,omitempty"`
+	Summary            string                   `json:"summary,omitempty"`
+	OutputFile         string                   `json:"output_file,omitempty"`
+	LastToolName       string                   `json:"last_tool_name,omitempty"`
+	DecisionReasonType string                   `json:"decision_reason_type,omitempty"`
+	ToolName           string                   `json:"tool_name,omitempty"`
+	RateLimitInfo      json.RawMessage          `json:"rate_limit_info,omitempty"`
+	Tools              []string                 `json:"tools,omitempty"`
+	MCPServers         json.RawMessage          `json:"mcp_servers,omitempty"`
+	PermissionMode     string                   `json:"permissionMode,omitempty"`
+	ClaudeCodeVersion  string                   `json:"claude_code_version,omitempty"`
+	Agents             []string                 `json:"agents,omitempty"`
+	Skills             []string                 `json:"skills,omitempty"`
+	SlashCommands      []string                 `json:"slash_commands,omitempty"`
+	Plugins            json.RawMessage          `json:"plugins,omitempty"`
+	Raw                json.RawMessage          `json:"-"`
 }
 
 func (i *ClaudeItem) UnmarshalJSON(raw []byte) error {
@@ -64,6 +67,7 @@ func (i *ClaudeItem) UnmarshalJSON(raw []byte) error {
 	}
 	*i = ClaudeItem(decoded)
 	i.Raw = append(i.Raw[:0], raw...)
+	i.decodeMessage()
 	return nil
 }
 
@@ -621,6 +625,25 @@ func (s *claudeParseState) stamp(event *Event, at time.Time, completed bool) {
 	}
 }
 
+// decodeMessage resolves the polymorphic "message" field. Assistant and user
+// events carry an object, but some system events - permission_denied among them
+// - carry a human-readable string instead. Typing the field as the object form
+// alone made the whole line fail to unmarshal, which counted as a malformed
+// JSONL line and failed the run, even though nothing about the event was
+// malformed and its type is inside the CLI range this package supports.
+func (item *ClaudeItem) decodeMessage() {
+	if len(item.RawMessage) == 0 {
+		return
+	}
+	var message ClaudeMessage
+	if err := json.Unmarshal(item.RawMessage, &message); err != nil {
+		// A non-object message carries no structured content for this package
+		// to read. The event itself is still recorded.
+		return
+	}
+	item.Message = &message
+}
+
 func (s *claudeParseState) consumeSystem(item *ClaudeItem, lineNo int, at time.Time) {
 	switch item.Subtype {
 	case "init":
@@ -640,6 +663,26 @@ func (s *claudeParseState) consumeSystem(item *ClaudeItem, lineNo int, at time.T
 		}
 		s.stamp(&e, at, false)
 		s.d.appendEvent(e)
+	case "permission_denied":
+		// The agent asked to run something and was refused. That is a real part
+		// of what happened in the run and belongs in the trajectory, so it is
+		// recorded rather than passed over - and recorded as an error, because
+		// the work the agent intended did not occur.
+		e := Event{
+			Kind: KindTask, ProviderEvent: "system." + item.Subtype,
+			ID: item.ToolUseID, ParentID: item.ToolUseID, SessionID: item.SessionID,
+			Phase: "observed", Status: "denied", Visibility: VisibilityDiagnostic,
+			IsError: true, Tool: item.ToolName,
+			Text:    firstNonEmpty(item.DecisionReasonType),
+			srcLine: lineNo, RawEventLines: rawEventLines(lineNo), Details: capInput(item.Raw),
+		}
+		s.stamp(&e, at, true)
+		s.d.appendEvent(e)
+	case "thinking_tokens":
+		// A running estimate of thinking tokens, emitted repeatedly as a turn
+		// proceeds. It reports no work and carries no content, so there is
+		// nothing to record - but it must be recognised, because treating a
+		// known progress signal as an unmodelled event fails the whole run.
 	case "task_started", "task_progress", "task_notification":
 		phase := strings.TrimPrefix(item.Subtype, "task_")
 		status := item.Status

@@ -402,3 +402,61 @@ func TestClaudeIncompleteClassificationRespectsProjectionBudget(t *testing.T) {
 		})
 	}
 }
+
+// Claude CLI 2.1.260 - inside the version range this package declares it
+// supports - emits system events that used to fail an entire run: a
+// thinking-token progress estimate counted as an unmodelled event, and a
+// permission denial whose "message" is a string rather than the object every
+// other event uses, which made the whole line count as malformed JSONL.
+func TestClaudeSystemEventsFromSupportedCLIDoNotFailTheRun(t *testing.T) {
+	lines := []string{
+		`{"type":"system","subtype":"thinking_tokens","estimated_tokens":100,"estimated_tokens_delta":100,"session_id":"s1"}`,
+		`{"type":"system","subtype":"permission_denied","tool_name":"Bash","tool_use_id":"t9","decision_reason_type":"subcommandResults","message":"This Bash command contains multiple operations.","session_id":"s1"}`,
+		`{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"git status"}}]}}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"clean"}]},"tool_use_result":{"exit_code":0}}`,
+	}
+	d, err := parseClaude(strings.NewReader(claudeSuccessfulStream(lines...)), newWorkspace(""))
+	if err != nil {
+		t.Fatalf("parse = %v, want a clean parse", err)
+	}
+	if d.Metrics.ParseErrors != 0 {
+		t.Errorf("parse errors = %d, want 0", d.Metrics.ParseErrors)
+	}
+	if len(d.Metrics.UnsupportedEvents) != 0 {
+		t.Errorf("unsupported = %v, want none", d.Metrics.UnsupportedEvents)
+	}
+
+	// The denial is part of what happened and must reach the timeline; the
+	// token estimate reports no work and must not.
+	var denials, thinking int
+	for _, e := range d.Timeline {
+		switch e.ProviderEvent {
+		case "system.permission_denied":
+			denials++
+			if !e.IsError || e.Status != "denied" || e.Tool != "Bash" {
+				t.Errorf("denial event = %+v, want an errored denied Bash event", e)
+			}
+		case "system.thinking_tokens":
+			thinking++
+		}
+	}
+	if denials != 1 {
+		t.Errorf("permission_denied events = %d, want 1", denials)
+	}
+	if thinking != 0 {
+		t.Errorf("thinking_tokens events = %d, want none recorded", thinking)
+	}
+}
+
+// A genuinely unmodelled system subtype must still fail the run, so a provider
+// change is noticed rather than silently dropped.
+func TestClaudeUnknownSystemSubtypeStillFailsTheRun(t *testing.T) {
+	lines := []string{
+		`{"type":"system","subtype":"some_future_event","session_id":"s1"}`,
+		`{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"git status"}}]}}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"clean"}]},"tool_use_result":{"exit_code":0}}`,
+	}
+	if _, err := parseClaude(strings.NewReader(claudeSuccessfulStream(lines...)), newWorkspace("")); err == nil {
+		t.Fatal("parse error = nil, want an unsupported-event failure")
+	}
+}
