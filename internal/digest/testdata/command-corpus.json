@@ -4223,5 +4223,137 @@
     "want_mutations": [],
     "source": "review-r31-correctness",
     "note": "-v prints unchanged files too, so its silence proves nothing."
+  },
+  {
+    "command": "chmod 600 link/../victim.txt",
+    "want_categories": [
+      "workspace.escape"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r31-parent-component",
+    "note": "A raw parent component can escape through a symlink, so the permission target is unprovable."
+  },
+  {
+    "command": "chmod 600 nested/victim.txt",
+    "want_categories": [
+      "permission.changed"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "nested/victim.txt"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r31-parent-component",
+    "note": "An ordinary in-workspace permission target remains attributable."
+  },
+  {
+    "command": "tar -C build -C .. -xf release.tgz",
+    "want_categories": [
+      "workspace.escape"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r31-parent-component",
+    "note": "A later raw parent component may leave extraction outside the workspace through a symlink."
+  },
+  {
+    "command": "tar -C build -xf release.tgz",
+    "want_categories": [
+      "archive.extract"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r31-parent-component",
+    "note": "A literal subdirectory keeps the extraction attributable."
+  },
+  {
+    "command": "git -C link/.. rm victim.txt",
+    "want_categories": [
+      "workspace.escape"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r31-parent-component",
+    "note": "A raw parent component in Git's directory selection cannot prove the deleted file is in the workspace."
+  },
+  {
+    "command": "git -C nested/repo rm victim.txt",
+    "want_categories": [
+      "fs.delete"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "nested/repo/victim.txt"
+      }
+    ],
+    "want_mutations": [
+      {
+        "kind": "delete",
+        "path": "nested/repo/victim.txt"
+      }
+    ],
+    "source": "review-r31-parent-component",
+    "note": "A literal Git directory keeps the deletion attributable."
+  },
+  {
+    "command": "cd link/.. && chmod 600 victim.txt",
+    "want_categories": [
+      "permission.changed"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r31-parent-component",
+    "note": "The successful permission change remains observed, but its location after a raw parent traversal is not attributable."
+  },
+  {
+    "command": "cd nested && chmod 600 victim.txt",
+    "want_categories": [
+      "permission.changed"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "nested/victim.txt"
+      }
+    ],
+    "want_mutations": [],
+    "source": "review-r31-parent-component",
+    "note": "A literal directory change keeps a later permission target attributable."
+  },
+  {
+    "command": "git -C .. rm victim.txt",
+    "workspace_dir": "workspace",
+    "want_categories": [
+      "workspace.escape"
+    ],
+    "want_targets": [],
+    "want_mutations": [],
+    "source": "review-r31-parent-component",
+    "note": "A relative workspace root must not clean away Git's raw parent traversal."
+  },
+  {
+    "command": "git -C nested rm victim.txt",
+    "workspace_dir": "workspace",
+    "want_categories": [
+      "fs.delete"
+    ],
+    "want_targets": [
+      {
+        "kind": "path",
+        "value": "workspace/nested/victim.txt"
+      }
+    ],
+    "want_mutations": [
+      {
+        "kind": "delete",
+        "path": "workspace/nested/victim.txt"
+      }
+    ],
+    "source": "review-r31-parent-component",
+    "note": "A literal Git directory remains attributable with a relative recorded root."
   }
 ]

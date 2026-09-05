@@ -9,6 +9,93 @@ import (
 	"time"
 )
 
+// A malformed exit code says neither that the command failed nor that it
+// succeeded. Crediting its delete would invent a file mutation from an
+// outcome the stream did not actually provide.
+func TestClaudeMalformedExitCodeDoesNotCreditDelete(t *testing.T) {
+	lines := []string{
+		`{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"rm victim.txt"}}]}}`,
+		`{"type":"user","tool_use_result":{"exit_code":"1"},"message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"rm failed"}]}}`,
+	}
+	d, err := parseClaude(strings.NewReader(claudeSuccessfulStream(lines...)), newWorkspace(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Timeline) != 1 {
+		t.Fatalf("timeline = %d events, want 1", len(d.Timeline))
+	}
+	e := d.Timeline[0]
+	if e.ExitCode != nil {
+		t.Fatalf("exit code = %v, want unreadable", *e.ExitCode)
+	}
+	if slices.Contains(e.Categories, "fs.delete") {
+		t.Fatalf("categories = %v, want no fs.delete", e.Categories)
+	}
+	for _, target := range e.Targets {
+		if target.Kind == "path" && target.Value == "victim.txt" {
+			t.Fatalf("targets = %v, want no victim.txt target", e.Targets)
+		}
+	}
+	if len(e.ShellMutations) != 0 {
+		t.Fatalf("shell mutations = %+v, want none", e.ShellMutations)
+	}
+}
+
+// A result carrying no exit code at all is the ordinary shape for much of the
+// stream, and it is not the same as one whose exit code could not be read: the
+// first says nothing about the outcome and leaves is_error to decide, while the
+// second claims an outcome this parser could not decode. Collapsing the two
+// would silently drop every state-changing fact from ordinary successful
+// commands, so both spellings of "no exit code" are pinned here.
+func TestClaudeAbsentExitCodeStillCreditsSuccess(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result string
+	}{
+		{name: "no exit_code field", result: `,"tool_use_result":{"stdout":"done"}`},
+		{name: "no tool_use_result", result: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lines := []string{
+				`{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"rm victim.txt"}}]}}`,
+				`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"done"}]}` + tc.result + `}`,
+			}
+			d, err := parseClaude(strings.NewReader(claudeSuccessfulStream(lines...)), newWorkspace(""))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(d.Timeline) != 1 {
+				t.Fatalf("timeline = %d events, want 1", len(d.Timeline))
+			}
+			e := d.Timeline[0]
+			if e.ExitCode != nil {
+				t.Fatalf("exit code = %d, want none recorded", *e.ExitCode)
+			}
+			if !slices.Contains(e.Categories, "fs.delete") {
+				t.Fatalf("categories = %v, want fs.delete credited", e.Categories)
+			}
+		})
+	}
+}
+
+func TestExitCodeFromToolUseResultReadsWellFormedExitCodes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  json.RawMessage
+		want int
+	}{
+		{name: "nonzero failure", raw: json.RawMessage(`{"exit_code":1}`), want: 1},
+		{name: "zero success", raw: json.RawMessage(`{"exit_code":0}`), want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := ExitCodeFromToolUseResult(tc.raw)
+			if !ok || got != tc.want {
+				t.Fatalf("ExitCodeFromToolUseResult(%s) = (%d, %t), want (%d, true)", tc.raw, got, ok, tc.want)
+			}
+		})
+	}
+}
+
 // classifyEventCommand and applyRunState run on an event already appended (and
 // therefore already normalized) by consumeToolUse, so the caps normalizeEvent
 // enforces on every other path must be re-applied explicitly. Without that,

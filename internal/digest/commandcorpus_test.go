@@ -21,7 +21,8 @@ type commandCorpusWant struct {
 }
 
 type commandCorpusCase struct {
-	Command string `json:"command"`
+	Command      string `json:"command"`
+	WorkspaceDir string `json:"workspace_dir,omitempty"`
 	commandCorpusWant
 	Source  string             `json:"source"`
 	Note    string             `json:"note,omitempty"`
@@ -39,8 +40,8 @@ func TestCommandCorpus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(corpus) < 200 || len(corpus) > 400 {
-		t.Fatalf("corpus has %d entries, want 200-400", len(corpus))
+	if len(corpus) < 200 || len(corpus) > 420 {
+		t.Fatalf("corpus has %d entries, want 200-420", len(corpus))
 	}
 	for i, tc := range corpus {
 		name := tc.Source + "/" + strings.ReplaceAll(tc.Command, "/", "_")
@@ -148,6 +149,9 @@ func validateCorpusWant(t *testing.T, index int, want commandCorpusWant) {
 
 func classifyCorpusCommand(tc commandCorpusCase, exitOK bool) commandCorpusWant {
 	ws := testWorkspace().withControlPrefix(".orchestrator-stage-control")
+	if tc.WorkspaceDir != "" {
+		ws = newWorkspace(tc.WorkspaceDir).withControlPrefix(".orchestrator-stage-control")
+	}
 	facts := classifyCommand(tc.Command, tc.Output, exitOK, ws)
 	if facts == nil {
 		facts = &commandFacts{}

@@ -946,6 +946,9 @@ func nextLiteralWorkingDirectory(tokens []string, statusProven bool, cwd string,
 	if len(args) != 1 || args[0] == "-" || strings.ContainsAny(args[0], fsShellMetacharacters) {
 		return "", false
 	}
+	if hasParentPathComponent(args[0]) {
+		return "", false
+	}
 	dir := canonicalWorkspacePath(args[0])
 	if fsOperandAbsolute(args[0]) {
 		return dir, true
@@ -953,7 +956,7 @@ func nextLiteralWorkingDirectory(tokens []string, statusProven bool, cwd string,
 	if !known {
 		return "", false
 	}
-	return path.Join(cwd, dir), true
+	return literalPathJoin(cwd, dir), true
 }
 
 func nextLiteralGitWorkTree(tokens []string, statusProven bool, value string, known bool) (string, bool) {

@@ -1269,11 +1269,11 @@ func execArchiveDestinationsWorkspace(cmd execCommand, scan commandArgScan, name
 					known = false
 					continue
 				}
-				value := canonicalWorkspacePath(flag.value)
+				value := literalPath(flag.value)
 				if fsOperandAbsolute(flag.value) || isPortableAbsolute(value) {
 					base, known = value, true
 				} else if known {
-					base = path.Join(base, value)
+					base = literalPathJoin(base, value)
 				}
 			}
 			if slices.Contains(scan.operandIndexes, i) {
@@ -1324,10 +1324,10 @@ func execResolvedPath(cmd execCommand, value string) (string, bool) {
 		return "", false
 	}
 	if fsOperandAbsolute(value) {
-		return value, true
+		return literalPath(value), true
 	}
 	if cmd.seg.cwdKnown {
-		return path.Join(cmd.seg.cwd, canonicalWorkspacePath(value)), true
+		return literalPathJoin(cmd.seg.cwd, value), true
 	}
 	if cmd.seg.cwdUncertain {
 		return "", false

@@ -487,7 +487,16 @@ func (s *claudeParseState) consumeToolResult(content *ClaudeContent, toolUseResu
 		// is_error is optional in the stream and defaults to false, so a tool
 		// result can carry a nonzero exit_code without ever setting it. The
 		// exit code, when present, is the more direct proof.
-		exitOK := !e.IsError && (e.ExitCode == nil || *e.ExitCode == 0)
+		//
+		// A result that carries an outcome this parser cannot read is a third
+		// case, and it must not collapse into either of the other two. Absent
+		// is not the same as unreadable: plenty of results legitimately carry
+		// no exit code at all, and treating those as failures would silently
+		// drop every state-changing fact from an ordinary successful command.
+		// An outcome that IS present but malformed proves nothing, so it fails
+		// closed rather than being read as the zero it never decoded to.
+		exitOK := !e.IsError && (e.ExitCode == nil || *e.ExitCode == 0) &&
+			!toolUseResultOutcomeUnreadable(toolUseResult)
 		// Retrieval inference stays success-only, but a command is classified
 		// whether or not it succeeded: the per-category gates decide what a
 		// failed command may still be credited with.
@@ -733,6 +742,34 @@ func claudeTokens(usage *ClaudeUsage) TokenUsage {
 
 // ExitCodeFromToolUseResult pulls the bash exit code out of a claude
 // tool_use_result payload. Shared with the live tracing mapper.
+// toolUseResultOutcomeUnreadable reports whether a tool result claims to carry
+// an outcome that this parser could not decode. ExitCodeFromToolUseResult
+// answers "no usable exit code" for both a missing field and a malformed one,
+// and those two mean opposite things to a caller deciding whether a command
+// succeeded, so the distinction is drawn here instead.
+func toolUseResultOutcomeUnreadable(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil {
+		// The payload is not even an object, so whatever outcome it meant to
+		// report is unreadable rather than absent.
+		return true
+	}
+	for _, name := range []string{"exit_code", "exitCode"} {
+		value, ok := fields[name]
+		if !ok {
+			continue
+		}
+		var code *int
+		if json.Unmarshal(value, &code) != nil {
+			return true
+		}
+	}
+	return false
+}
+
 func ExitCodeFromToolUseResult(raw json.RawMessage) (int, bool) {
 	if len(raw) == 0 {
 		return 0, false

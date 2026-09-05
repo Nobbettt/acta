@@ -77,7 +77,7 @@ func classifyFS(segment commandSegment) *commandFacts {
 			operands, _ := fsOperands(verb, args)
 			for i, operand := range operands {
 				if !fsOperandAbsolute(operand) {
-					operands[i] = path.Join(dir, canonicalWorkspacePath(operand))
+					operands[i] = literalPathJoin(dir, operand)
 				}
 			}
 			return fsDelete(operands, segment.ws, false)
@@ -251,9 +251,9 @@ func gitCommandDirectory(tokens []string, cwd string, cwdKnown bool) (string, bo
 		if flag.value == "" || strings.ContainsAny(flag.value, fsShellMetacharacters) {
 			cwd, cwdKnown = "", false
 		} else if fsOperandAbsolute(flag.value) {
-			cwd, cwdKnown = canonicalWorkspacePath(flag.value), true
+			cwd, cwdKnown = literalPath(flag.value), true
 		} else if cwdKnown {
-			cwd = path.Join(cwd, canonicalWorkspacePath(flag.value))
+			cwd = literalPathJoin(cwd, flag.value)
 		}
 	}
 	return cwd, found && cwdKnown
@@ -548,6 +548,25 @@ func fsOperandAbsolute(operand string) bool {
 	return strings.HasPrefix(operand, "/") || filepath.IsAbs(operand) || isPortableAbsolute(canonicalWorkspacePath(operand))
 }
 
+// literalPath preserves a raw parent component until workspace normalization
+// rejects it. Cleaning first would erase the only spelling that reveals a
+// symlink traversal may have left the recorded workspace.
+func literalPath(value string) string {
+	value = strings.ReplaceAll(value, `\`, "/")
+	if hasParentPathComponent(value) {
+		return value
+	}
+	return path.Clean(value)
+}
+
+func literalPathJoin(base, value string) string {
+	base, value = literalPath(base), literalPath(value)
+	if hasParentPathComponent(base) || hasParentPathComponent(value) {
+		return strings.TrimRight(base, "/") + "/" + strings.TrimLeft(value, "/")
+	}
+	return path.Join(base, value)
+}
+
 // fsSourceBasenameIsDotOrDotDot reports whether the raw source operand's last
 // path element is "." or "..". fsPaths cleans an operand before this
 // classifier ever sees it, so `src/.` normalises to `src`, but `cp -a src/.
@@ -572,6 +591,9 @@ func fsDestinationNamesDirectory(dest string) bool {
 // write into the root (`cp src/a.go .`) looks identical to one that left the
 // workspace entirely.
 func fsIsWorkspaceRoot(operand string, ws *workspace) bool {
+	if hasParentPathComponent(operand) {
+		return false
+	}
 	rel, ok := ws.rel(operand)
 	if ok && path.Clean(filepath.ToSlash(rel)) == "." {
 		return true
