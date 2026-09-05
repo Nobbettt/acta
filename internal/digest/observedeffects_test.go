@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -54,6 +55,14 @@ func TestDiffPathStatesReportsOnlyRealChanges(t *testing.T) {
 // A permission change leaves size and content alone, so mode has to count or a
 // real chmod would look like it did nothing.
 func TestDiffPathStatesNoticesAModeChange(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Windows has no POSIX permission bits: os.Chmod there only toggles the
+		// read-only attribute, so the mode this fixture sets never lands and it
+		// would be asserting the local filesystem rather than the comparison.
+		// pathStateChanged itself is platform-independent and still covered by
+		// the size and existence cases above.
+		t.Skip("POSIX permission bits are not settable on this platform")
+	}
 	root := t.TempDir()
 	ws := newWorkspace(root)
 	writeObservedFile(t, root, "script.sh", "#!/bin/sh\n")
@@ -341,4 +350,27 @@ func commandObservedEffects(t *testing.T, d *Digest) []ObservedEffect {
 	}
 	t.Fatalf("digest has no command event: %+v", d.Timeline)
 	return nil
+}
+
+// pathStateChanged is what decides a modify, and it is platform-independent
+// even where the filesystem fixture above cannot set POSIX permission bits.
+func TestPathStateChanged(t *testing.T) {
+	base := pathState{exists: true, size: 10, modTime: time.Unix(1000, 0), mode: 0o644}
+	for _, tc := range []struct {
+		name string
+		next pathState
+		want bool
+	}{
+		{name: "identical", next: base, want: false},
+		{name: "size", next: pathState{exists: true, size: 11, modTime: base.modTime, mode: base.mode}, want: true},
+		{name: "mode", next: pathState{exists: true, size: 10, modTime: base.modTime, mode: 0o755}, want: true},
+		{name: "modification time", next: pathState{exists: true, size: 10, modTime: time.Unix(2000, 0), mode: base.mode}, want: true},
+		{name: "file became a directory", next: pathState{exists: true, size: 10, modTime: base.modTime, mode: base.mode, isDir: true}, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := pathStateChanged(base, tc.next); got != tc.want {
+				t.Fatalf("pathStateChanged = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
