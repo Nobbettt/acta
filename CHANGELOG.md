@@ -5,6 +5,19 @@ and Semantic Versioning. Dates use ISO 8601.
 
 ## Unreleased
 
+## v0.2.1 - 2026-09-05
+
+### Fixed
+
+- Claude CLI versions inside the supported range no longer fail every run they
+  record. `system.thinking_tokens`, a progress estimate carrying no work, was
+  treated as an unmodelled event; a genuinely unknown subtype still fails.
+- A system event whose `message` is a string rather than the object assistant
+  and user events use no longer makes the whole line count as malformed JSONL.
+  The field is read as raw JSON and resolved to the object form when it is one.
+- A permission denial is recorded as an errored, denied event carrying the tool
+  and reason, instead of being lost inside that malformed line.
+
 ## v0.2.0 - 2026-09-05
 
 ### Added
