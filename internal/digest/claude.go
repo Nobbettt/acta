@@ -47,6 +47,7 @@ type ClaudeItem struct {
 	LastToolName       string                   `json:"last_tool_name,omitempty"`
 	DecisionReasonType string                   `json:"decision_reason_type,omitempty"`
 	ToolName           string                   `json:"tool_name,omitempty"`
+	Patch              *ClaudeTaskPatch         `json:"patch,omitempty"`
 	RateLimitInfo      json.RawMessage          `json:"rate_limit_info,omitempty"`
 	Tools              []string                 `json:"tools,omitempty"`
 	MCPServers         json.RawMessage          `json:"mcp_servers,omitempty"`
@@ -69,6 +70,13 @@ func (i *ClaudeItem) UnmarshalJSON(raw []byte) error {
 	i.Raw = append(i.Raw[:0], raw...)
 	i.decodeMessage()
 	return nil
+}
+
+// ClaudeTaskPatch is the body of a system.task_updated event: only the fields
+// of the task that changed. Status is the one this package reads; the full
+// patch travels in the event's details untouched.
+type ClaudeTaskPatch struct {
+	Status string `json:"status,omitempty"`
 }
 
 type ClaudePermissionDenial struct {
@@ -304,6 +312,11 @@ func (s *claudeParseState) consume(item *ClaudeItem, lineNo int, at time.Time) {
 		}
 	case "result":
 		s.consumeResult(item, lineNo, at)
+	case "tool_progress":
+		// A heartbeat for a long-running tool call. The work it reports on
+		// arrives as the tool_use/tool_result pair, so there is nothing to
+		// record - but it must be recognised, because any tool that runs long
+		// enough emits it and an unmodelled event fails the whole run.
 	case "rate_limit_event":
 		e := Event{
 			Kind: KindRateLimit, ProviderEvent: item.Type, SessionID: item.SessionID,
@@ -683,6 +696,31 @@ func (s *claudeParseState) consumeSystem(item *ClaudeItem, lineNo int, at time.T
 		// proceeds. It reports no work and carries no content, so there is
 		// nothing to record - but it must be recognised, because treating a
 		// known progress signal as an unmodelled event fails the whole run.
+	case "background_tasks_changed":
+		// The set of live background tasks changed. Which task changed, and
+		// how, arrives as that task's own task_updated patch; this signal
+		// reports membership only, so there is nothing to record - but like
+		// thinking_tokens it must be recognised, because it is emitted by
+		// every run that uses a background task at all.
+	case "task_updated":
+		// A patch against one background task: only the fields that changed,
+		// so a patch with no status is a task still running whose metadata
+		// moved. The patch itself is the record - it is how a background
+		// task's completion or failure reaches the trajectory at all.
+		status := "running"
+		if item.Patch != nil && item.Patch.Status != "" {
+			status = item.Patch.Status
+		}
+		e := Event{
+			Kind: KindTask, ProviderEvent: "system." + item.Subtype,
+			ID: firstNonEmpty(item.TaskID, item.ToolUseID), ParentID: item.ToolUseID,
+			TaskID: item.TaskID, SessionID: item.SessionID,
+			Phase: "updated", Status: status, Visibility: VisibilityDiagnostic,
+			srcLine: lineNo, RawEventLines: rawEventLines(lineNo), Details: capInput(item.Raw),
+		}
+		e.IsError = status == "failed" || status == "denied"
+		s.stamp(&e, at, status == "completed" || status == "failed")
+		s.d.appendEvent(e)
 	case "task_started", "task_progress", "task_notification":
 		phase := strings.TrimPrefix(item.Subtype, "task_")
 		status := item.Status

@@ -448,6 +448,92 @@ func TestClaudeSystemEventsFromSupportedCLIDoNotFailTheRun(t *testing.T) {
 	}
 }
 
+// Claude CLI 2.1.260 - still inside the declared version range - emits three
+// more events that used to fail an entire run: two system subtypes produced
+// whenever the agent uses background tasks (a set-membership signal and a
+// per-task patch), and a top-level tool-progress heartbeat for long-running
+// tools. Three of the first five hosted runs on a real deployment died on
+// them. The lines below for the system pair are captured verbatim from a live
+// CLI session.
+func TestClaudeBackgroundTaskEventsFromSupportedCLIDoNotFailTheRun(t *testing.T) {
+	lines := []string{
+		`{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b9pfzzs2k","task_type":"local_bash","description":"Sleep for 2 seconds in background"}],"uuid":"d8bec0c4-a89f-4929-a5dd-73d62958dbe9","session_id":"s1"}`,
+		`{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"git status"}}]}}`,
+		`{"type":"tool_progress","tool_use_id":"t1","tool_name":"Bash","elapsed_ms":15000,"session_id":"s1"}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"clean"}]},"tool_use_result":{"exit_code":0}}`,
+		`{"type":"system","subtype":"task_updated","task_id":"b9pfzzs2k","patch":{"status":"completed","end_time":1789016757498},"uuid":"211205c7-b7fb-4472-9249-dfa2862223ae","session_id":"s1"}`,
+		`{"type":"system","subtype":"background_tasks_changed","tasks":[],"uuid":"a4dbe263-44ad-4bcc-babc-37117ef9eb84","session_id":"s1"}`,
+	}
+	d, err := parseClaude(strings.NewReader(claudeSuccessfulStream(lines...)), newWorkspace(""))
+	if err != nil {
+		t.Fatalf("parse = %v, want a clean parse", err)
+	}
+	if len(d.Metrics.UnsupportedEvents) != 0 {
+		t.Errorf("unsupported = %v, want none", d.Metrics.UnsupportedEvents)
+	}
+
+	// The per-task patch is part of what happened and reaches the timeline;
+	// the set-membership signal and the progress heartbeat report no work of
+	// their own and must not.
+	var updated, membership, progress int
+	for _, e := range d.Timeline {
+		switch e.ProviderEvent {
+		case "system.task_updated":
+			updated++
+			if e.TaskID != "b9pfzzs2k" || e.Phase != "updated" || e.Status != "completed" || e.IsError {
+				t.Errorf("task_updated event = %+v, want a completed update for b9pfzzs2k", e)
+			}
+		case "system.background_tasks_changed":
+			membership++
+		case "tool_progress":
+			progress++
+		}
+	}
+	if updated != 1 {
+		t.Errorf("task_updated events = %d, want 1", updated)
+	}
+	if membership != 0 || progress != 0 {
+		t.Errorf("membership = %d, progress = %d, want none recorded", membership, progress)
+	}
+}
+
+// A task_updated patch that carries no status is still a running task - the
+// patch touched something else (an output file, a description) - and a patch
+// that says failed is an error the timeline must say out loud.
+func TestClaudeTaskUpdatedPatchStatuses(t *testing.T) {
+	lines := []string{
+		`{"type":"system","subtype":"task_updated","task_id":"t-a","patch":{"output_file":"/tmp/x"},"session_id":"s1"}`,
+		`{"type":"system","subtype":"task_updated","task_id":"t-b","patch":{"status":"failed","end_time":1789016757498},"session_id":"s1"}`,
+		`{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"git status"}}]}}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"clean"}]},"tool_use_result":{"exit_code":0}}`,
+	}
+	d, err := parseClaude(strings.NewReader(claudeSuccessfulStream(lines...)), newWorkspace(""))
+	if err != nil {
+		t.Fatalf("parse = %v, want a clean parse", err)
+	}
+	var running, failed int
+	for _, e := range d.Timeline {
+		if e.ProviderEvent != "system.task_updated" {
+			continue
+		}
+		switch e.TaskID {
+		case "t-a":
+			running++
+			if e.Status != "running" || e.IsError {
+				t.Errorf("statusless patch = %+v, want a running non-error event", e)
+			}
+		case "t-b":
+			failed++
+			if e.Status != "failed" || !e.IsError {
+				t.Errorf("failed patch = %+v, want a failed error event", e)
+			}
+		}
+	}
+	if running != 1 || failed != 1 {
+		t.Errorf("running = %d, failed = %d, want one of each", running, failed)
+	}
+}
+
 // A genuinely unmodelled system subtype must still fail the run, so a provider
 // change is noticed rather than silently dropped.
 func TestClaudeUnknownSystemSubtypeStillFailsTheRun(t *testing.T) {
