@@ -100,6 +100,11 @@ type Record struct {
 	// bundle entirely, could not be redacted, or has an ambiguous partial commit.
 	// Reasoning text is never written to digest.json or OTLP.
 	ReasoningRedactionState string `json:"reasoning_redaction_state,omitempty"`
+	// ArtifactRedactionStates attests, per bundle artifact ID, that an artifact
+	// outside the reasoning_redaction_state streams is safe to publish. Only
+	// the git-produced workspace_diff is ever attested; see
+	// ArtifactRedactionStatesFor.
+	ArtifactRedactionStates map[string]string `json:"artifact_redaction_states,omitempty"`
 	// PublishedBundle is populated only by an Acta-owned publication path. A
 	// launcher may reuse this digest-bound reference instead of trusting a
 	// similarly shaped claim emitted by the coding agent.
@@ -124,6 +129,17 @@ func (r *Record) UnmarshalJSON(data []byte) error {
 	*r = Record(decoded)
 	r.presentV3Fields = fields
 	return nil
+}
+
+// ArtifactRedactionStatesFor returns the per-artifact attestations for a run.
+// workspace.diff is repository content produced by git, not agent reasoning
+// or transcript, so reasoning redaction does not apply to it. Artifacts that
+// can carry agent prose, such as raw_stderr, are never attested.
+func ArtifactRedactionStatesFor(hasWorkspaceDiff bool) map[string]string {
+	if !hasWorkspaceDiff {
+		return nil
+	}
+	return map[string]string{"workspace_diff": "not_required"}
 }
 
 type PublishedBundle struct {
@@ -200,6 +216,11 @@ func (r *Record) Validate() error {
 		}
 		if r.ReasoningRedactionState != "" && !slices.Contains([]string{"retained_local", "redacted", "failed", "partial"}, r.ReasoningRedactionState) {
 			return fmt.Errorf("run record has invalid reasoning_redaction_state %q", r.ReasoningRedactionState)
+		}
+		for id, state := range r.ArtifactRedactionStates {
+			if id != "workspace_diff" || state != "not_required" {
+				return fmt.Errorf("run record has unsupported artifact_redaction_states entry %q: %q", id, state)
+			}
 		}
 		if r.PublishedBundle != nil {
 			if !validPublishedBundleArtifactID(r.PublishedBundle.ArtifactID) {

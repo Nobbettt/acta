@@ -139,6 +139,11 @@ Current fields:
   from persisted bundle artifacts, `failed` when redaction failed with the raw
   stream unchanged, or `partial` when an ambiguous commit could not be verified
   as byte-identical to the original stream
+- `artifact_redaction_states` - optional map from bundle artifact ID to a
+  per-artifact attestation. Acta writes `{"workspace_diff": "not_required"}`
+  only when a non-empty `workspace.diff` exists: it is repository content
+  produced by git, not agent reasoning, so reasoning redaction does not apply.
+  Artifacts that can carry agent prose, such as stderr, are never attested
 - `published_bundle` - optional digest-bound artifact reference written only by
   an Acta-owned publication path; launchers must not substitute agent output
 

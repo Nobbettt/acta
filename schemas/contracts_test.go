@@ -310,6 +310,7 @@ func TestGoProducedCurrentArtifactsValidateAgainstPublishedSchemas(t *testing.T)
 				RawStderrPath: "/workspace/.acta/runs/run-example/codex.stderr.log", RawStdoutArtifact: "codex-events.jsonl",
 				RawStderrArtifact: "codex.stderr.log", PromptSource: "flag", OTLPStatus: "pending",
 				ProcessContainment: "posix_process_group", AgentConfigMode: "ambient_ephemeral",
+				ArtifactRedactionStates: runrecord.ArtifactRedactionStatesFor(true),
 			},
 		},
 		{

@@ -89,6 +89,11 @@ func TestValidateVersionGatesV3Fields(t *testing.T) {
 			edit:  func(record *Record) { record.ReasoningRedactionState = "redacted" },
 		},
 		{
+			name:  "artifact redaction states",
+			field: "artifact_redaction_states",
+			edit:  func(record *Record) { record.ArtifactRedactionStates = ArtifactRedactionStatesFor(true) },
+		},
+		{
 			name:  "published bundle",
 			field: "published_bundle",
 			edit: func(record *Record) {
@@ -156,5 +161,56 @@ func TestValidateRejectsMissingSchemaVersion(t *testing.T) {
 	err := record.Validate()
 	if err == nil || !strings.Contains(err.Error(), "unsupported run record schema_version") {
 		t.Fatalf("Validate() error = %v, want unsupported schema_version", err)
+	}
+}
+
+func TestArtifactRedactionStatesForAttestsOnlyAnExistingWorkspaceDiff(t *testing.T) {
+	if got := ArtifactRedactionStatesFor(false); got != nil {
+		t.Fatalf("ArtifactRedactionStatesFor(false) = %v, want nil", got)
+	}
+	got := ArtifactRedactionStatesFor(true)
+	if len(got) != 1 || got["workspace_diff"] != "not_required" {
+		t.Fatalf("ArtifactRedactionStatesFor(true) = %v, want only workspace_diff not_required", got)
+	}
+}
+
+func TestArtifactRedactionStatesRoundTrip(t *testing.T) {
+	for _, hasDiff := range []bool{true, false} {
+		t.Run(fmt.Sprintf("diff=%v", hasDiff), func(t *testing.T) {
+			record := validRecord()
+			record.ArtifactRedactionStates = ArtifactRedactionStatesFor(hasDiff)
+			payload, err := MarshalFile(&record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(payload), "artifact_redaction_states") != hasDiff {
+				t.Fatalf("artifact_redaction_states presence != %v in:\n%s", hasDiff, payload)
+			}
+			var parsed Record
+			if err := json.Unmarshal(payload, &parsed); err != nil {
+				t.Fatal(err)
+			}
+			if err := parsed.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			if fmt.Sprint(parsed.ArtifactRedactionStates) != fmt.Sprint(record.ArtifactRedactionStates) {
+				t.Fatalf("round trip = %v, want %v", parsed.ArtifactRedactionStates, record.ArtifactRedactionStates)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsAttestationsBeyondTheWorkspaceDiff(t *testing.T) {
+	for _, states := range []map[string]string{
+		{"raw_stderr": "not_required"},
+		{"raw_stdout": "redacted"},
+		{"workspace_diff": "redacted"},
+		{"workspace_diff": ""},
+	} {
+		record := validRecord()
+		record.ArtifactRedactionStates = states
+		if err := record.Validate(); err == nil || !strings.Contains(err.Error(), "artifact_redaction_states") {
+			t.Fatalf("Validate(%v) error = %v, want artifact_redaction_states rejection", states, err)
+		}
 	}
 }

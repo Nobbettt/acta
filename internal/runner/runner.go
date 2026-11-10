@@ -806,6 +806,7 @@ func postRun(ctx context.Context, record *runrecord.Record, artifactDir string, 
 	// Finalize AFTER the diff is written so HasWorkspaceDiff sees it. No
 	// re-decode of the raw stream, no sidecar re-read — times are already set.
 	d := digester.Finalize(record, artifactDir)
+	record.ArtifactRedactionStates = runrecord.ArtifactRedactionStatesFor(d.HasWorkspaceDiff)
 	if redactReasoning && !digest.RedactReasoning(d) {
 		err := errors.New("reasoning redaction could not verify normalized digest payload")
 		record.ReasoningRedactionState = "failed"

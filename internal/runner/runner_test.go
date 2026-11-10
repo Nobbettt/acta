@@ -959,6 +959,12 @@ func TestRunCapturesWorkspaceDiff(t *testing.T) {
 	}
 	assertFileContains(t, filepath.Join(record.RunDir, "digest.json"), `"has_workspace_diff": true`)
 	assertFileContains(t, filepath.Join(record.RunDir, "acta-events.jsonl"), `"type":"diff.generated"`)
+	// The git-produced diff is attested so a remote consumer may publish it;
+	// raw_stderr can carry agent prose and must never be attested.
+	assertFileContains(t, filepath.Join(record.RunDir, "run.json"), `"workspace_diff": "not_required"`)
+	if len(record.ArtifactRedactionStates) != 1 || record.ArtifactRedactionStates["workspace_diff"] != "not_required" {
+		t.Fatalf("artifact_redaction_states = %v, want only workspace_diff not_required", record.ArtifactRedactionStates)
+	}
 
 	// The bundle must record which git base the diff applies to.
 	if !isCommitSHA(record.BaseCommitSHA) || record.BaseDirty == nil || !*record.BaseDirty {
@@ -1002,6 +1008,10 @@ func TestRunRecordsHeadCommitAfterAgentCommit(t *testing.T) {
 		t.Fatalf("head = %q base = %q, want a new head commit", record.HeadCommitSHA, record.BaseCommitSHA)
 	}
 	assertFileContains(t, filepath.Join(record.RunDir, "acta-events.jsonl"), `"head_commit_sha":"`+record.HeadCommitSHA+`"`)
+	// A clean tree produces no workspace.diff, so nothing is attested.
+	if data := readFile(t, filepath.Join(record.RunDir, "run.json")); strings.Contains(data, "artifact_redaction_states") {
+		t.Fatalf("run.json attests an absent workspace diff:\n%s", data)
+	}
 }
 
 // A workspace with an unborn HEAD at run start (fresh git init) has no base
