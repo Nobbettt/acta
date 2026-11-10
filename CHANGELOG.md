@@ -5,6 +5,8 @@ and Semantic Versioning. Dates use ISO 8601.
 
 ## Unreleased
 
+## v0.2.2 - 2026-11-11
+
 ### Added
 
 - `run.json` carries an optional `artifact_redaction_states` map. When a run
@@ -14,6 +16,14 @@ and Semantic Versioning. Dates use ISO 8601.
   attestation can publish it. Nothing that can carry agent prose, such as
   stderr, is attested. The field is additive within run-record schema v3 and
   rejected in a v2 record.
+
+### Fixed
+
+- Claude CLI versions inside the supported range no longer fail a run whose
+  agent uses a background task or a long-running tool.
+  `system.task_updated` is recorded so a background task's completion or
+  failure reaches the trajectory; `system.background_tasks_changed` and the
+  top-level `tool_progress` heartbeat are recognised without being recorded.
 
 ## v0.2.1 - 2026-09-05
 
