@@ -5,6 +5,34 @@ and Semantic Versioning. Dates use ISO 8601.
 
 ## Unreleased
 
+## v0.2.2 - 2026-11-11
+
+### Added
+
+- Under `--redact-reasoning`, Acta runs its reasoning-redaction pass over the
+  final `workspace.diff`. When the pass verifies every line, the diff is
+  replaced with its redacted bytes and `run.json` records
+  `"artifact_redaction_states": {"workspace_diff": "redacted"}`, so a remote
+  consumer that requires a per-artifact attestation can publish it. A
+  disabled, failed, or unverifiable pass leaves the diff unchanged and
+  unattested. Nothing else, such as stderr, is ever attested.
+
+### Changed
+
+- `artifact_redaction_states` was added to run-record schema v3 without a
+  version increment, and that schema forbids unknown properties. Consumers
+  that validate `run.json` against the previously published v3 schema must
+  update to this release's schema; loose JSON readers are unaffected. The
+  field is rejected in a v2 record.
+
+### Fixed
+
+- Claude CLI versions inside the supported range no longer fail a run whose
+  agent uses a background task or a long-running tool.
+  `system.task_updated` is recorded so a background task's completion or
+  failure reaches the trajectory; `system.background_tasks_changed` and the
+  top-level `tool_progress` heartbeat are recognised without being recorded.
+
 ## v0.2.1 - 2026-09-05
 
 ### Fixed

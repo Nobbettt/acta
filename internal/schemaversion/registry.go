@@ -29,6 +29,7 @@ type Field struct {
 // validator and by remote-rewrite version stamping. Its completeness is
 // checked against the published v2 and v3 schemas in schemas/contracts_test.go.
 var v3OnlyFields = []Field{
+	{Document: RunRecord, Path: "/artifact_redaction_states"},
 	{Document: RunRecord, Path: "/published_bundle"},
 	{Document: RunRecord, Path: "/reasoning_redaction_state"},
 	{Document: Digest, Path: "/timeline/*/categories"},

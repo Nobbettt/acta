@@ -1354,6 +1354,38 @@ func redactArtifactSnapshot(ctx context.Context, file *os.File, kind, path strin
 	}
 }
 
+// RedactWorkspaceDiff runs the remote-upload reasoning redaction pass over the
+// final workspace.diff in runDir and atomically replaces it with the result.
+// It reports true only when the pass verified every line; on false or error
+// the on-disk diff is left unchanged and must not be attested as redacted.
+func RedactWorkspaceDiff(ctx context.Context, runDir string, maxLineBytes int) (bool, error) {
+	path := filepath.Join(runDir, "workspace.diff")
+	snapshot, snapshotPath, err := snapshotRegularFile(ctx, runDir, path, 0)
+	if err != nil {
+		return false, fmt.Errorf("snapshot workspace diff: %w", err)
+	}
+	defer func() {
+		_ = snapshot.Close()
+		_ = os.Remove(snapshotPath)
+	}()
+	verified, err := redactArtifactSnapshot(ctx, snapshot, "workspace_diff", "workspace.diff", maxLineBytes)
+	if err != nil || !verified {
+		return false, err
+	}
+	writer, err := securefile.Create(path)
+	if err != nil {
+		return false, err
+	}
+	defer writer.Abort()
+	if err := copyContext(ctx, writer, snapshot); err != nil {
+		return false, fmt.Errorf("write redacted workspace diff: %w", err)
+	}
+	if err := writer.Commit(); err != nil {
+		return false, fmt.Errorf("commit redacted workspace diff: %w", err)
+	}
+	return true, nil
+}
+
 func isRunRecordArtifact(path string) bool {
 	return filepath.ToSlash(filepath.Clean(filepath.FromSlash(path))) == "run.json"
 }

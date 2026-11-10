@@ -1004,6 +1004,74 @@ func TestRunRecordsHeadCommitAfterAgentCommit(t *testing.T) {
 	assertFileContains(t, filepath.Join(record.RunDir, "acta-events.jsonl"), `"head_commit_sha":"`+record.HeadCommitSHA+`"`)
 }
 
+// workspace_diff is attested only after the reasoning-redaction pass verified
+// the final diff on disk. Disabled redaction or an unverifiable diff leaves it
+// unattested, so a remote consumer keeps withholding it.
+func TestRunAttestsWorkspaceDiffOnlyAfterVerifiedRedaction(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell agents require /bin/sh")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	const secret = "private-reasoning-in-workspace-diff-5309"
+	reasoningLine := `{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"` + secret + `"}]}}`
+	tests := []struct {
+		name         string
+		redact       bool
+		changedLine  string
+		wantAttested bool
+	}{
+		{name: "redacted", redact: true, changedLine: "changed", wantAttested: true},
+		{name: "redaction disabled", redact: false, changedLine: "changed"},
+		{name: "unverifiable diff", redact: true, changedLine: "values []string"},
+		{name: "clean tree", redact: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			setGitIdentity(t)
+			cwd := t.TempDir()
+			gitCmd(t, cwd, "init", "-q")
+			if err := os.WriteFile(filepath.Join(cwd, "notes.txt"), []byte(reasoningLine+"\norig\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, cwd, "add", ".")
+			gitCmd(t, cwd, "commit", "-qm", "init")
+			if test.changedLine != "" {
+				if err := os.WriteFile(filepath.Join(cwd, "notes.txt"), []byte(reasoningLine+"\n"+test.changedLine+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fakeBin := t.TempDir()
+			writeFakeAgent(t, fakeBin, "codex", "#!/bin/sh\ncat >/dev/null\n"+
+				`printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'`+"\n")
+			t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			record, err := runForTest(context.Background(), Options{
+				Agent: "codex", CWD: cwd, Prompt: "x", PromptSource: "test", RedactReasoning: test.redact,
+			}, io.Discard, io.Discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runJSON := readFile(t, filepath.Join(record.RunDir, "run.json"))
+			if !test.wantAttested {
+				if record.ArtifactRedactionStates != nil || strings.Contains(runJSON, "artifact_redaction_states") {
+					t.Fatalf("workspace diff attested without a verified redaction pass:\n%s", runJSON)
+				}
+				return
+			}
+			if len(record.ArtifactRedactionStates) != 1 || record.ArtifactRedactionStates["workspace_diff"] != "redacted" ||
+				!strings.Contains(runJSON, `"workspace_diff": "redacted"`) {
+				t.Fatalf("artifact_redaction_states = %v, want only workspace_diff redacted", record.ArtifactRedactionStates)
+			}
+			diff := readFile(t, filepath.Join(record.RunDir, "workspace.diff"))
+			if strings.Contains(diff, secret) || !strings.Contains(diff, "+changed") {
+				t.Fatalf("attested workspace diff was not redacted:\n%s", diff)
+			}
+		})
+	}
+}
+
 // A workspace with an unborn HEAD at run start (fresh git init) has no base
 // commit, but the head commit the agent creates must still be captured.
 func TestRunRecordsHeadCommitFromUnbornHead(t *testing.T) {

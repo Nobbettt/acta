@@ -139,6 +139,15 @@ Current fields:
   from persisted bundle artifacts, `failed` when redaction failed with the raw
   stream unchanged, or `partial` when an ambiguous commit could not be verified
   as byte-identical to the original stream
+- `artifact_redaction_states` - optional map from bundle artifact ID to a
+  per-artifact attestation. Acta writes `{"workspace_diff": "redacted"}` only
+  under `--redact-reasoning`, and only when the reasoning-redaction pass ran
+  over the final non-empty `workspace.diff`, verified every line, and replaced
+  the file with its redacted bytes. A disabled, failed, or unverifiable pass,
+  or a missing or over-limit diff, leaves the diff unattested. The pass only
+  recognises provider reasoning structures: it does not detect credentials,
+  so a consumer publishing the diff still needs its own secret scanning.
+  Nothing else, such as stderr, is ever attested
 - `published_bundle` - optional digest-bound artifact reference written only by
   an Acta-owned publication path; launchers must not substitute agent output
 
