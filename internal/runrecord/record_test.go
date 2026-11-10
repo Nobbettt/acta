@@ -164,19 +164,19 @@ func TestValidateRejectsMissingSchemaVersion(t *testing.T) {
 	}
 }
 
-func TestArtifactRedactionStatesForAttestsOnlyAnExistingWorkspaceDiff(t *testing.T) {
+func TestArtifactRedactionStatesForAttestsOnlyARedactedWorkspaceDiff(t *testing.T) {
 	if got := ArtifactRedactionStatesFor(false); got != nil {
 		t.Fatalf("ArtifactRedactionStatesFor(false) = %v, want nil", got)
 	}
 	got := ArtifactRedactionStatesFor(true)
-	if len(got) != 1 || got["workspace_diff"] != "not_required" {
-		t.Fatalf("ArtifactRedactionStatesFor(true) = %v, want only workspace_diff not_required", got)
+	if len(got) != 1 || got["workspace_diff"] != "redacted" {
+		t.Fatalf("ArtifactRedactionStatesFor(true) = %v, want only workspace_diff redacted", got)
 	}
 }
 
 func TestArtifactRedactionStatesRoundTrip(t *testing.T) {
 	for _, hasDiff := range []bool{true, false} {
-		t.Run(fmt.Sprintf("diff=%v", hasDiff), func(t *testing.T) {
+		t.Run(fmt.Sprintf("redacted=%v", hasDiff), func(t *testing.T) {
 			record := validRecord()
 			record.ArtifactRedactionStates = ArtifactRedactionStatesFor(hasDiff)
 			payload, err := MarshalFile(&record)
@@ -202,9 +202,9 @@ func TestArtifactRedactionStatesRoundTrip(t *testing.T) {
 
 func TestValidateRejectsAttestationsBeyondTheWorkspaceDiff(t *testing.T) {
 	for _, states := range []map[string]string{
-		{"raw_stderr": "not_required"},
+		{"raw_stderr": "redacted"},
 		{"raw_stdout": "redacted"},
-		{"workspace_diff": "redacted"},
+		{"workspace_diff": "not_required"},
 		{"workspace_diff": ""},
 	} {
 		record := validRecord()

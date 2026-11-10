@@ -494,11 +494,11 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 	record.Error = preview.Error
 
 	reasoningRedacted := false
+	maxRedactionLineBytes := opts.MaxRedactionLineBytes
+	if maxRedactionLineBytes == 0 {
+		maxRedactionLineBytes = reporting.DefaultMaxRedactionLineBytes
+	}
 	if opts.RedactReasoning {
-		maxRedactionLineBytes := opts.MaxRedactionLineBytes
-		if maxRedactionLineBytes == 0 {
-			maxRedactionLineBytes = reporting.DefaultMaxRedactionLineBytes
-		}
 		redactionState, redactErr := redactReasoningRawStream(stagedStdoutPath, maxRedactionLineBytes)
 		if redactErr != nil {
 			// Treat redaction as a late Acta failure, but continue derivation and
@@ -545,7 +545,7 @@ func Run(ctx context.Context, opts Options, stdout io.Writer, stderr io.Writer) 
 	if opts.CapturePrompt {
 		capturedPrompt = opts.Prompt
 	}
-	finalDigest, postErr := postRun(ctx, record, stagingDir, gitExcludes, opts.MaxWorkspaceDiffBytes, digester, capturedPrompt, reasoningRedacted, stderr, runErr)
+	finalDigest, postErr := postRun(ctx, record, stagingDir, gitExcludes, opts.MaxWorkspaceDiffBytes, digester, capturedPrompt, reasoningRedacted, maxRedactionLineBytes, stderr, runErr)
 	if postErr != nil {
 		runErr = errors.Join(runErr, postErr)
 	}
@@ -747,7 +747,7 @@ func verifyCompleteBundle(bundleDir string, record *runrecord.Record) error {
 // postRun captures derived evidence into artifactDir. artifactDir remains
 // private staging until every final/failed artifact has been generated; the
 // caller publishes the complete directory atomically afterwards.
-func postRun(ctx context.Context, record *runrecord.Record, artifactDir string, gitExcludes []string, maxWorkspaceDiffBytes int64, digester *digest.StreamDigester, capturedPrompt string, redactReasoning bool, stderr io.Writer, priorErr error) (*digest.Digest, error) {
+func postRun(ctx context.Context, record *runrecord.Record, artifactDir string, gitExcludes []string, maxWorkspaceDiffBytes int64, digester *digest.StreamDigester, capturedPrompt string, redactReasoning bool, maxRedactionLineBytes int, stderr io.Writer, priorErr error) (*digest.Digest, error) {
 	var postErr error
 	refreshOutcome := func() {
 		FinalizeRecordOutcome(record, errors.Join(priorErr, postErr))
@@ -776,12 +776,22 @@ func postRun(ctx context.Context, record *runrecord.Record, artifactDir string, 
 	diffCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), gitCaptureTimeout)
 	defer cancel()
 	destPath := filepath.Join(artifactDir, "workspace.diff")
-	if _, err := gitdiff.WorkspaceDiffWithLimit(diffCtx, record.CWD, destPath, maxWorkspaceDiffBytes, gitExcludes...); err != nil {
+	diffRedacted := false
+	if wrote, err := gitdiff.WorkspaceDiffWithLimit(diffCtx, record.CWD, destPath, maxWorkspaceDiffBytes, gitExcludes...); err != nil {
 		if errors.Is(err, gitdiff.ErrWorkspaceDiffLimit) {
 			record.WorkspaceDiffLimitExceeded = true
 		}
 		fmt.Fprintf(stderr, "acta: workspace diff failed: %v\n", err)
 		postErr = errors.Join(postErr, fmt.Errorf("workspace diff: %w", err))
+	} else if wrote && redactReasoning {
+		// Only a verified pass over the final diff earns an attestation. An
+		// unverifiable diff stays local and unattested, so remote consumers
+		// keep withholding it; that is not a run failure.
+		diffRedacted, err = reporting.RedactWorkspaceDiff(diffCtx, artifactDir, maxRedactionLineBytes)
+		if err != nil {
+			diffRedacted = false
+			fmt.Fprintf(stderr, "acta: workspace diff reasoning redaction failed; diff left unattested: %v\n", err)
+		}
 	}
 	// Head capture is always attempted (an agent can `git init` and commit in a
 	// previously non-git or unborn-HEAD workspace), gets its own budget so a
@@ -806,7 +816,7 @@ func postRun(ctx context.Context, record *runrecord.Record, artifactDir string, 
 	// Finalize AFTER the diff is written so HasWorkspaceDiff sees it. No
 	// re-decode of the raw stream, no sidecar re-read — times are already set.
 	d := digester.Finalize(record, artifactDir)
-	record.ArtifactRedactionStates = runrecord.ArtifactRedactionStatesFor(d.HasWorkspaceDiff)
+	record.ArtifactRedactionStates = runrecord.ArtifactRedactionStatesFor(d.HasWorkspaceDiff && diffRedacted)
 	if redactReasoning && !digest.RedactReasoning(d) {
 		err := errors.New("reasoning redaction could not verify normalized digest payload")
 		record.ReasoningRedactionState = "failed"

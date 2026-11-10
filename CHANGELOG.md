@@ -9,13 +9,21 @@ and Semantic Versioning. Dates use ISO 8601.
 
 ### Added
 
-- `run.json` carries an optional `artifact_redaction_states` map. When a run
-  produces a non-empty `workspace.diff`, Acta attests it as
-  `{"workspace_diff": "not_required"}`: the diff is repository content from
-  git, not agent reasoning, so a remote consumer that requires a per-artifact
-  attestation can publish it. Nothing that can carry agent prose, such as
-  stderr, is attested. The field is additive within run-record schema v3 and
-  rejected in a v2 record.
+- Under `--redact-reasoning`, Acta runs its reasoning-redaction pass over the
+  final `workspace.diff`. When the pass verifies every line, the diff is
+  replaced with its redacted bytes and `run.json` records
+  `"artifact_redaction_states": {"workspace_diff": "redacted"}`, so a remote
+  consumer that requires a per-artifact attestation can publish it. A
+  disabled, failed, or unverifiable pass leaves the diff unchanged and
+  unattested. Nothing else, such as stderr, is ever attested.
+
+### Changed
+
+- `artifact_redaction_states` was added to run-record schema v3 without a
+  version increment, and that schema forbids unknown properties. Consumers
+  that validate `run.json` against the previously published v3 schema must
+  update to this release's schema; loose JSON readers are unaffected. The
+  field is rejected in a v2 record.
 
 ### Fixed
 

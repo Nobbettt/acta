@@ -54,7 +54,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "workspace_diff": {"const": "not_required"}
+        "workspace_diff": {"const": "redacted"}
       }
     },
     "published_bundle": {"$ref": "#/$defs/published_bundle"}

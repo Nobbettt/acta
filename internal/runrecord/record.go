@@ -101,8 +101,8 @@ type Record struct {
 	// Reasoning text is never written to digest.json or OTLP.
 	ReasoningRedactionState string `json:"reasoning_redaction_state,omitempty"`
 	// ArtifactRedactionStates attests, per bundle artifact ID, that an artifact
-	// outside the reasoning_redaction_state streams is safe to publish. Only
-	// the git-produced workspace_diff is ever attested; see
+	// outside the reasoning_redaction_state streams passed a verified
+	// reasoning-redaction pass. Only workspace_diff is ever attested; see
 	// ArtifactRedactionStatesFor.
 	ArtifactRedactionStates map[string]string `json:"artifact_redaction_states,omitempty"`
 	// PublishedBundle is populated only by an Acta-owned publication path. A
@@ -132,14 +132,15 @@ func (r *Record) UnmarshalJSON(data []byte) error {
 }
 
 // ArtifactRedactionStatesFor returns the per-artifact attestations for a run.
-// workspace.diff is repository content produced by git, not agent reasoning
-// or transcript, so reasoning redaction does not apply to it. Artifacts that
-// can carry agent prose, such as raw_stderr, are never attested.
-func ArtifactRedactionStatesFor(hasWorkspaceDiff bool) map[string]string {
-	if !hasWorkspaceDiff {
+// workspace_diff is attested redacted only when the reasoning-redaction pass
+// verified the final workspace.diff; an unverified, disabled, failed, or
+// absent diff gets no attestation. Artifacts that can carry agent prose
+// outside a verifiable structure, such as raw_stderr, are never attested.
+func ArtifactRedactionStatesFor(redactedWorkspaceDiff bool) map[string]string {
+	if !redactedWorkspaceDiff {
 		return nil
 	}
-	return map[string]string{"workspace_diff": "not_required"}
+	return map[string]string{"workspace_diff": "redacted"}
 }
 
 type PublishedBundle struct {
@@ -218,7 +219,7 @@ func (r *Record) Validate() error {
 			return fmt.Errorf("run record has invalid reasoning_redaction_state %q", r.ReasoningRedactionState)
 		}
 		for id, state := range r.ArtifactRedactionStates {
-			if id != "workspace_diff" || state != "not_required" {
+			if id != "workspace_diff" || state != "redacted" {
 				return fmt.Errorf("run record has unsupported artifact_redaction_states entry %q: %q", id, state)
 			}
 		}

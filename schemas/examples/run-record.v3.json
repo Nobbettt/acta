@@ -29,5 +29,5 @@
   "workspace_diff_limit_bytes": 268435456,
   "process_containment": "posix_process_group",
   "agent_config_mode": "ambient_ephemeral",
-  "artifact_redaction_states": {"workspace_diff": "not_required"}
+  "artifact_redaction_states": {"workspace_diff": "redacted"}
 }

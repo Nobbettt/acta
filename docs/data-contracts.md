@@ -61,8 +61,8 @@ from the raw provider artifact using `raw_event_lines`.
 - Version 2 is the first published run-record, digest, and Acta-event contract;
   v3 extends their closed `otlp_status` enums with `not_sampled` and `pending`, adds run
   redaction/publication state, per-artifact redaction attestations
-  (`artifact_redaction_states`, an optional field added in v0.2.2), and
-  withheld-artifact metadata, and lets events
+  (`artifact_redaction_states`, added in v0.2.2), and withheld-artifact
+  metadata, and lets events
   identify a regenerating producer separately. Readers accept both, but reject
   these v3-only fields and values in a v2 artifact. The versions listed for the
   other contracts are their first published versions, and readers reject lower
@@ -71,6 +71,11 @@ from the raw provider artifact using `raw_event_lines`.
   event stream; v2 manifests pin only the derived pair.
 - Adding an optional field without changing existing meaning is compatible
   and may retain the current schema version.
+- v0.2.2 added `artifact_redaction_states` to the v3 run record without a
+  version increment. The v3 schema forbids unknown properties, so a consumer
+  validating `run.json` against the previously published v3 schema rejects
+  records that carry it and must update to the current schema. Loose JSON
+  readers are unaffected.
 - Removing or renaming a field, changing a field's type or semantics, changing
   event ordering invariants, or making an optional field required is breaking
   and requires a schema-version increment.
